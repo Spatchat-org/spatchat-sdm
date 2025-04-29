@@ -85,14 +85,14 @@ def show_suitability_map():
     if not os.path.exists("outputs/suitability_map.tif"):
         return "❗ No suitability map available yet."
 
-    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
-    folium.TileLayer('OpenStreetMap').add_to(m)
-
     with rasterio.open("outputs/suitability_map.tif") as src:
         bounds = src.bounds
         img = src.read(1)
         img_min = np.nanmin(img)
         img_max = np.nanmax(img)
+
+        m = folium.Map(control_scale=True)
+        folium.TileLayer('OpenStreetMap').add_to(m)
 
         folium.raster_layers.ImageOverlay(
             image=img,
@@ -100,6 +100,9 @@ def show_suitability_map():
             opacity=0.6,
             colormap=lambda x: (1, 0, 0, x)  # simple red scale
         ).add_to(m)
+
+        # ✅ Automatically zoom to bounds
+        m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
 
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
