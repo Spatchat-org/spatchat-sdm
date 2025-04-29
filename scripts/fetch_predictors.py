@@ -19,20 +19,21 @@ os.makedirs("predictor_rasters", exist_ok=True)
 selected_layers = os.environ.get('SELECTED_LAYERS', '')
 selected_layers = selected_layers.split(',') if selected_layers else []
 
-# --- Define Earth Engine layer sources ---
-layer_sources = {
-    "elevation": ee.Image("USGS/SRTMGL1_003"),
-    "slope": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('slope'),
-    "aspect": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('aspect'),
-    "ndvi": ee.ImageCollection("MODIS/061/MOD13A2").select('NDVI').first(),
-    "precipitation": ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").mean(),
-    "mean_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tavg').mean(),
-    "min_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tmin').mean(),
-    "max_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tmax').mean(),
-    "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select('LC_Type1').first()
-}
+# --- Define WorldClim BIOCLIM source ---
+bio_image = ee.Image("WORLDCLIM/V1/BIO")
 
-default_bbox = ee.Geometry.BBox(100, -10, 110, 0)  # ✅ smaller region for safe export
+# --- Map of bioclim layer names to WorldClim bands ---
+layer_sources = {f"bio{i}": bio_image.select(f"bio{i}") for i in range(1, 20)}
+
+# Optional additional layers
+layer_sources.update({
+    "elevation": ee.Image("USGS/SRTMGL1_003"),
+    "ndvi": ee.ImageCollection("MODIS/061/MOD13A2").select('NDVI').first(),
+    "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select('LC_Type1').first(),
+})
+
+# --- Clip region: Adjust as needed ---
+default_bbox = ee.Geometry.BBox(-125, 40, -115, 50)  # Example: Oregon region
 
 # --- Export selected layers ---
 for layer_name in selected_layers:
