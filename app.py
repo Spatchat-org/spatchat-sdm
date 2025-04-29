@@ -21,11 +21,6 @@ print("✅ Earth Engine authenticated using Service Account!")
 
 # --- Global State ---
 uploaded_csv = None
-predictor_list = []
-available_predictors = [
-    "elevation", "slope", "aspect", "ndvi",
-    "precipitation", "mean_temperature", "min_temperature", "max_temperature", "landcover"
-]
 
 # --- Helper Functions ---
 
@@ -35,7 +30,7 @@ def create_map(presence_points=None):
 
     if presence_points is not None:
         try:
-            df = pd.read_csv(presence_points)
+            df = pd.read_csv(presence_points.name)
             if {'latitude', 'longitude'}.issubset(df.columns):
                 for idx, row in df.iterrows():
                     folium.CircleMarker(
@@ -118,7 +113,17 @@ with gr.Blocks() as app:
     with gr.Row():
         layer_selector = gr.CheckboxGroup(
             label="🌎 Select Environmental Predictors",
-            choices=available_predictors
+            choices=[
+                "elevation",
+                "slope",
+                "aspect",
+                "ndvi",
+                "precipitation",
+                "mean_temperature",
+                "min_temperature",
+                "max_temperature",
+                "landcover"
+            ]
         )
         fetch_btn = gr.Button("📥 Fetch Predictors")
         fetch_status = gr.Markdown()
