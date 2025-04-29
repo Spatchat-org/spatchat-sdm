@@ -28,10 +28,14 @@ uploaded_csv = None
 
 def reproject_to_wgs84(src_path, dst_path):
     with rasterio.open(src_path) as src:
-        print(f"📏 Original CRS: {src.crs}")
-        if src.crs.to_epsg() == 4326:
+        print(f"📏 Original CRS for {src_path}: {src.crs}")
+        if src.crs and src.crs.to_epsg() == 4326:
             shutil.copy(src_path, dst_path)
             print("✅ Already in WGS84; copied directly.")
+            return
+
+        if src.count == 0:
+            print(f"⚠️ Skipping {src_path} — has no raster bands.")
             return
 
         transform, width, height = calculate_default_transform(
@@ -56,9 +60,9 @@ def reproject_to_wgs84(src_path, dst_path):
                     dst_crs="EPSG:4326",
                     resampling=Resampling.nearest
                 )
-        print("🌐 Reprojection complete!")
+        print(f"🌐 Reprojected: {dst_path}")
 
-def create_map(presence_points=None, include_rasters=True):
+def create_map(presence_points=None):
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
@@ -80,14 +84,18 @@ def create_map(presence_points=None, include_rasters=True):
         except Exception as e:
             print(f"⚠️ Error reading CSV: {e}")
 
-    # Add predictor rasters
-    if include_rasters and os.path.exists("predictor_rasters"):
-        for tif in os.listdir("predictor_rasters"):
+    # Draw reprojected rasters
+    wgs84_dir = "predictor_rasters/wgs84"
+    if os.path.exists(wgs84_dir):
+        for tif in os.listdir(wgs84_dir):
             if tif.endswith(".tif"):
                 try:
-                    path = os.path.join("predictor_rasters", tif)
+                    path = os.path.join(wgs84_dir, tif)
                     with rasterio.open(path) as src:
                         print(f"🌍 Raster: {tif}, CRS: {src.crs}")
+                        if src.count == 0:
+                            print(f"⚠️ Skipping empty raster: {tif}")
+                            continue
                         bounds = src.bounds
                         img = src.read(1)
                         raster_layer = folium.raster_layers.ImageOverlay(
@@ -101,7 +109,6 @@ def create_map(presence_points=None, include_rasters=True):
                 except Exception as e:
                     print(f"⚠️ Error displaying raster {tif}: {e}")
 
-    # Leaflet-native toggle panel
     folium.LayerControl(collapsed=False).add_to(m)
 
     raw_html = m.get_root().render()
@@ -126,9 +133,17 @@ def fetch_predictors(selected):
     os.environ['SELECTED_LAYERS'] = selected_layers
     os.system("python scripts/fetch_predictors.py")
 
+    os.makedirs("predictor_rasters/wgs84", exist_ok=True)
+
+    # Reproject all downloaded rasters
+    for tif in os.listdir("predictor_rasters"):
+        if tif.endswith(".tif"):
+            src_path = os.path.join("predictor_rasters", tif)
+            dst_path = os.path.join("predictor_rasters/wgs84", tif)
+            reproject_to_wgs84(src_path, dst_path)
+
     available_files = [f for f in os.listdir("predictor_rasters") if f.endswith(".tif")]
-    map_html = create_map(uploaded_csv)
-    return "✅ Predictors fetched.", gr.update(choices=available_files), map_html
+    return "✅ Predictors fetched.", gr.update(choices=available_files), create_map(uploaded_csv)
 
 def run_model():
     if uploaded_csv is None:
