@@ -9,6 +9,7 @@ import os
 import json
 import ee
 import joblib
+import shutil
 
 # --- Authenticate Earth Engine using Hugging Face Secret ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
