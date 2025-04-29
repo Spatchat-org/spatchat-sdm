@@ -25,8 +25,13 @@ bio_image = ee.Image("WORLDCLIM/V1/BIO")
 # --- Map of bioclim layer names to WorldClim bands ---
 layer_sources = {f"bio{i}": bio_image.select(f"bio{str(i).zfill(2)}") for i in range(1, 20)}
 
+# --- For slope and aspect ---
+terrain = ee.Terrain.products(ee.Image("USGS/SRTMGL1_003"))
+
 # Optional additional layers
 layer_sources.update({
+    "slope": terrain.select("slope"),
+    "aspect": terrain.select("aspect"),
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "ndvi": ee.ImageCollection("MODIS/061/MOD13A2").select('NDVI').first(),
     "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select('LC_Type1').first(),
