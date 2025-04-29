@@ -52,6 +52,10 @@ def create_map(presence_points=None):
 def handle_upload(file):
     global uploaded_csv
     uploaded_csv = file
+
+    # ✅ Ensure directory exists
+    os.makedirs("predictor_rasters", exist_ok=True)
+
     shutil.copy(file.name, "predictor_rasters/presence_points.csv")  # ✅ Hugging Face compatible
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
 
