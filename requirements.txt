@@ -1,0 +1,10 @@
+gradio
+earthengine-api
+geemap
+rasterio
+numpy
+pandas
+scikit-learn
+matplotlib
+folium
+joblib
