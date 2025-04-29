@@ -88,7 +88,6 @@ def create_map(presence_points=None):
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
-    # Draw presence points
     if presence_points is not None:
         try:
             df = pd.read_csv(presence_points.name)
@@ -106,7 +105,6 @@ def create_map(presence_points=None):
         except Exception as e:
             print(f"⚠️ Error reading CSV: {e}")
 
-    # Draw reprojected rasters
     wgs84_dir = "predictor_rasters/wgs84"
     if os.path.exists(wgs84_dir):
         for tif in os.listdir(wgs84_dir):
@@ -136,11 +134,9 @@ def create_map(presence_points=None):
                     print(f"⚠️ Error displaying raster {tif}: {e}")
 
     folium.LayerControl(collapsed=False).add_to(m)
-
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
-    iframe = f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
-    return iframe
+    return f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
 
 def handle_upload(file):
     global uploaded_csv
@@ -151,20 +147,16 @@ def handle_upload(file):
 
 def fetch_predictors(selected_layers, selected_classes):
     global uploaded_csv
-
     if not selected_layers:
         return "⚠️ No predictors selected.", gr.update(choices=[]), create_map(uploaded_csv)
 
     os.environ["SELECTED_LAYERS"] = ",".join(selected_layers)
-
-    # Extract landcover class IDs from "13 – urban and built up"
     class_ids = [s.split("–")[0].strip() for s in selected_classes]
     os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(class_ids)
 
     os.system("python scripts/fetch_predictors.py")
 
     os.makedirs("predictor_rasters/wgs84", exist_ok=True)
-
     for tif in os.listdir("predictor_rasters"):
         if tif.endswith(".tif"):
             src_path = os.path.join("predictor_rasters", tif)
@@ -173,6 +165,51 @@ def fetch_predictors(selected_layers, selected_classes):
 
     available_files = [f for f in os.listdir("predictor_rasters") if f.endswith(".tif")]
     return "✅ Predictors fetched.", gr.update(choices=available_files), create_map(uploaded_csv)
+
+def run_model():
+    if uploaded_csv is None:
+        return "⚠️ Please upload presence points first."
+
+    os.system("python scripts/run_logistic_sdm.py")
+
+    if os.path.exists("outputs/suitability_map.tif"):
+        reproject_to_wgs84(
+            "outputs/suitability_map.tif",
+            "outputs/suitability_map_wgs84.tif"
+        )
+        return "✅ Model trained and reprojected!"
+    else:
+        return "❗ Model ran but no suitability map was generated."
+
+def show_suitability_map():
+    path = "outputs/suitability_map_wgs84.tif"
+    if not os.path.exists(path):
+        return "❗ No suitability map available yet."
+
+    with rasterio.open(path) as src:
+        print(f"🗺️ Suitability map CRS: {src.crs}")
+        bounds = src.bounds
+        img = src.read(1)
+        m = folium.Map(control_scale=True)
+        folium.TileLayer('OpenStreetMap').add_to(m)
+
+        if np.nanmin(img) != np.nanmax(img):
+            img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
+
+        folium.raster_layers.ImageOverlay(
+            image=img,
+            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+            opacity=0.6,
+            colormap=lambda x: (1, 0, 0, x),
+            name="🎯 Suitability Map"
+        ).add_to(m)
+
+        m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
+        folium.LayerControl(collapsed=False).add_to(m)
+
+    raw_html = m.get_root().render()
+    safe_html = html_lib.escape(raw_html)
+    return f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
 
 # --- Gradio App Layout ---
 
@@ -188,8 +225,7 @@ with gr.Blocks() as app:
     with gr.Row():
         layer_selector = gr.CheckboxGroup(
             label="🌎 Select Environmental Predictors",
-            choices=[f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"],
-            value=[]
+            choices=[f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"]
         )
         landcover_class_selector = gr.CheckboxGroup(
             label="🧮 Landcover Classes (only if 'landcover' is selected)",
@@ -220,5 +256,4 @@ with gr.Blocks() as app:
     show_map_btn.click(fn=show_suitability_map, outputs=[suitability_map_output])
 
 # --- Launch App ---
-
 app.launch()
