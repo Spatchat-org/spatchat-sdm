@@ -5,6 +5,7 @@ import html as html_lib
 import pandas as pd
 import numpy as np
 import rasterio
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import os
 import json
 import ee
@@ -24,6 +25,38 @@ print("✅ Earth Engine authenticated using Service Account!")
 uploaded_csv = None
 
 # --- Helper Functions ---
+
+def reproject_to_wgs84(src_path, dst_path):
+    with rasterio.open(src_path) as src:
+        print(f"📏 Original CRS: {src.crs}")
+        if src.crs.to_epsg() == 4326:
+            shutil.copy(src_path, dst_path)
+            print("✅ Already in WGS84; copied directly.")
+            return
+
+        transform, width, height = calculate_default_transform(
+            src.crs, "EPSG:4326", src.width, src.height, *src.bounds
+        )
+        kwargs = src.meta.copy()
+        kwargs.update({
+            'crs': "EPSG:4326",
+            'transform': transform,
+            'width': width,
+            'height': height
+        })
+
+        with rasterio.open(dst_path, 'w', **kwargs) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs="EPSG:4326",
+                    resampling=Resampling.nearest
+                )
+        print("🌐 Reprojection complete!")
 
 def create_map(presence_points=None, show_points=True, show_rasters=True):
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
@@ -96,15 +129,19 @@ def run_model():
     os.system("python scripts/run_logistic_sdm.py")
 
     if os.path.exists("outputs/suitability_map.tif"):
-        return "✅ Model trained and suitability map generated!"
+        reproject_to_wgs84(
+            "outputs/suitability_map.tif",
+            "outputs/suitability_map_wgs84.tif"
+        )
+        return "✅ Model trained and reprojected!"
     else:
         return "❗ Model ran but no suitability map was generated."
 
 def show_suitability_map():
-    if not os.path.exists("outputs/suitability_map.tif"):
+    if not os.path.exists("outputs/suitability_map_wgs84.tif"):
         return "❗ No suitability map available yet."
 
-    with rasterio.open("outputs/suitability_map.tif") as src:
+    with rasterio.open("outputs/suitability_map_wgs84.tif") as src:
         bounds = src.bounds
         img = src.read(1)
         m = folium.Map(control_scale=True)
