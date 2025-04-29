@@ -1,46 +1,60 @@
 import ee
+import json
 import os
-import geemap.foliumap as geemap
+import geemap
 
-# --- Initialize Earth Engine ---
-try:
-    ee.Initialize()
-except Exception:
-    print("🔑 GEE Authentication required... Getting dynamic token...")
-    token = geemap.get_ee_token()
-    ee.Initialize(token=token)
+# --- Authenticate Earth Engine using Hugging Face Secret ---
+service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
+credentials = ee.ServiceAccountCredentials(
+    email=service_account_info['client_email'],
+    key_data=json.dumps(service_account_info)
+)
+ee.Initialize(credentials)
+print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
 
-# --- Output Folder ---
-output_folder = "predictor_rasters"
-os.makedirs(output_folder, exist_ok=True)
+# --- Parameters ---
+selected_layers = os.environ.get('SELECTED_LAYERS', '')
+selected_layers = selected_layers.split(',') if selected_layers else []
 
-# --- Read Selections from Environment ---
-selected_layers = os.environ.get('SELECTED_LAYERS', '').split(',')
-
-# --- Available Layers ---
-available_layers = {
+# --- Define Layer Sources ---
+layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('slope'),
     "aspect": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('aspect'),
-    "ndvi": ee.ImageCollection("MODIS/006/MOD13A2").select('NDVI').first().divide(10000),
-    "precipitation": ee.ImageCollection("WORLDCLIM/V1/BIO").select('bio12').first(),
-    "mean_temperature": ee.ImageCollection("WORLDCLIM/V1/BIO").select('bio1').first().divide(10),
-    "min_temperature": ee.ImageCollection("WORLDCLIM/V1/BIO").select('bio6').first().divide(10),
-    "max_temperature": ee.ImageCollection("WORLDCLIM/V1/BIO").select('bio5').first().divide(10),
-    "landcover": ee.ImageCollection("MODIS/006/MCD12Q1").select('LC_Type1').first(),
+    "ndvi": ee.ImageCollection("MODIS/006/MOD13A2").select('NDVI').first(),
+    "precipitation": ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").mean(),
+    "mean_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tavg').mean(),
+    "min_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tmin').mean(),
+    "max_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tmax').mean(),
+    "landcover": ee.ImageCollection("MODIS/006/MCD12Q1").select('LC_Type1').first()
 }
 
-# --- Fetch Selected Layers ---
-for layer in selected_layers:
-    if layer in available_layers:
-        print(f"📥 Fetching {layer}...")
-        path = os.path.join(output_folder, f"{layer}.tif")
-        geemap.ee_export_image(
-            image=available_layers[layer],
-            filename=path,
-            scale=500 if layer == "ndvi" else 30,  # ndvi = MODIS = coarser
-            region=ee.Geometry.BBox(-125, 25, -66, 50)  # USA bounding box; you can change
-        )
-        print(f"✅ {layer} saved!")
+# --- Default Study Area Bounding Box ---
+default_bbox = ee.Geometry.BBox(-180, -60, 180, 85)
 
-print("🎯 Done fetching predictors.")
+# --- Create output folder if missing ---
+os.makedirs("predictor_rasters", exist_ok=True)
+
+# --- Fetch Each Selected Layer ---
+for layer_name in selected_layers:
+    if layer_name not in layer_sources:
+        print(f"⚠️ Layer {layer_name} not recognized.")
+        continue
+
+    image = layer_sources[layer_name]
+    out_file = f"predictor_rasters/{layer_name}.tif"
+
+    print(f"📥 Fetching {layer_name}...")
+
+    try:
+        geemap.ee_export_image(
+            image=image.clip(default_bbox),
+            filename=out_file,
+            scale=1000,          # 1km resolution
+            region=default_bbox,
+            file_per_band=False,
+            timeout=600           # increase if necessary
+        )
+        print(f"✅ Saved {layer_name} to {out_file}")
+    except Exception as e:
+        print(f"❗ Failed to fetch {layer_name}: {e}")
