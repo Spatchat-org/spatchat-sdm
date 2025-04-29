@@ -47,7 +47,7 @@ for layer_name in selected_layers:
 
     try:
         geemap.ee_export_image(
-            image=image.clip(default_bbox),
+            image.clip(default_bbox),
             filename=out_file,
             scale=1000,
             region=default_bbox,
