@@ -24,6 +24,28 @@ print("✅ Earth Engine authenticated using Service Account!")
 # --- Global State ---
 uploaded_csv = None
 
+# --- Landcover Labels ---
+landcover_options = {
+    0: "water",
+    1: "evergreen needleleaf forest",
+    2: "evergreen broadleaf forest",
+    3: "deciduous needleleaf forest",
+    4: "deciduous broadleaf forest",
+    5: "mixed forest",
+    6: "closed shrublands",
+    7: "open shrublands",
+    8: "woody savannas",
+    9: "savannas",
+    10: "grasslands",
+    11: "permanent wetlands",
+    12: "croplands",
+    13: "urban and built up",
+    14: "cropland/natural vegetation mosaic",
+    15: "snow and ice",
+    16: "barren or sparsely vegetated"
+}
+landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
+
 # --- Helper Functions ---
 
 def reproject_to_wgs84(src_path, dst_path):
@@ -99,7 +121,6 @@ def create_map(presence_points=None):
                         bounds = src.bounds
                         img = src.read(1)
 
-                        # ✅ Normalize raster for visualization
                         if np.nanmin(img) != np.nanmax(img):
                             img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
 
@@ -128,19 +149,22 @@ def handle_upload(file):
     shutil.copy(file.name, "predictor_rasters/presence_points.csv")
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
 
-def fetch_predictors(selected):
+def fetch_predictors(selected_layers, selected_classes):
     global uploaded_csv
 
-    if not selected:
+    if not selected_layers:
         return "⚠️ No predictors selected.", gr.update(choices=[]), create_map(uploaded_csv)
 
-    selected_layers = ",".join(selected)
-    os.environ['SELECTED_LAYERS'] = selected_layers
+    os.environ["SELECTED_LAYERS"] = ",".join(selected_layers)
+
+    # Extract landcover class IDs from "13 – urban and built up"
+    class_ids = [s.split("–")[0].strip() for s in selected_classes]
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(class_ids)
+
     os.system("python scripts/fetch_predictors.py")
 
     os.makedirs("predictor_rasters/wgs84", exist_ok=True)
 
-    # Reproject all downloaded rasters
     for tif in os.listdir("predictor_rasters"):
         if tif.endswith(".tif"):
             src_path = os.path.join("predictor_rasters", tif)
@@ -149,52 +173,6 @@ def fetch_predictors(selected):
 
     available_files = [f for f in os.listdir("predictor_rasters") if f.endswith(".tif")]
     return "✅ Predictors fetched.", gr.update(choices=available_files), create_map(uploaded_csv)
-
-def run_model():
-    if uploaded_csv is None:
-        return "⚠️ Please upload presence points first."
-
-    os.system("python scripts/run_logistic_sdm.py")
-
-    if os.path.exists("outputs/suitability_map.tif"):
-        reproject_to_wgs84(
-            "outputs/suitability_map.tif",
-            "outputs/suitability_map_wgs84.tif"
-        )
-        return "✅ Model trained and reprojected!"
-    else:
-        return "❗ Model ran but no suitability map was generated."
-
-def show_suitability_map():
-    path = "outputs/suitability_map_wgs84.tif"
-    if not os.path.exists(path):
-        return "❗ No suitability map available yet."
-
-    with rasterio.open(path) as src:
-        print(f"🗺️ Suitability map CRS: {src.crs}")
-        bounds = src.bounds
-        img = src.read(1)
-        m = folium.Map(control_scale=True)
-        folium.TileLayer('OpenStreetMap').add_to(m)
-
-        if np.nanmin(img) != np.nanmax(img):
-            img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
-
-        folium.raster_layers.ImageOverlay(
-            image=img,
-            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-            opacity=0.6,
-            colormap=lambda x: (1, 0, 0, x),
-            name="🎯 Suitability Map"
-        ).add_to(m)
-
-        m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
-        folium.LayerControl(collapsed=False).add_to(m)
-
-    raw_html = m.get_root().render()
-    safe_html = html_lib.escape(raw_html)
-    iframe = f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
-    return iframe
 
 # --- Gradio App Layout ---
 
@@ -210,8 +188,16 @@ with gr.Blocks() as app:
     with gr.Row():
         layer_selector = gr.CheckboxGroup(
             label="🌎 Select Environmental Predictors",
-            choices=[f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"]
+            choices=[f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"],
+            value=[]
         )
+        landcover_class_selector = gr.CheckboxGroup(
+            label="🧮 Landcover Classes (only if 'landcover' is selected)",
+            choices=landcover_choices,
+            visible=False
+        )
+
+    with gr.Row():
         fetch_btn = gr.Button("📥 Fetch Predictors")
         fetch_status = gr.Markdown()
 
@@ -223,10 +209,13 @@ with gr.Blocks() as app:
         show_map_btn = gr.Button("🎯 Show Suitability Map")
         suitability_map_output = gr.HTML()
 
-    # --- Actions ---
+    # --- Interactions ---
+    def toggle_landcover_class_selector(selected):
+        return gr.update(visible="landcover" in selected)
 
+    layer_selector.change(fn=toggle_landcover_class_selector, inputs=[layer_selector], outputs=[landcover_class_selector])
     uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
-    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector], outputs=[fetch_status, layer_selector, map_output])
+    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector, landcover_class_selector], outputs=[fetch_status, layer_selector, map_output])
     run_btn.click(fn=run_model, outputs=[run_status])
     show_map_btn.click(fn=show_suitability_map, outputs=[suitability_map_output])
 
