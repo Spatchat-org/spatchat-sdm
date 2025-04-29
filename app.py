@@ -25,24 +25,46 @@ uploaded_csv = None
 
 # --- Helper Functions ---
 
-def create_map(presence_points=None):
+def create_map(presence_points=None, show_points=True, show_rasters=True):
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
-    if presence_points is not None:
+    # Draw presence points
+    if show_points and presence_points is not None:
         try:
             df = pd.read_csv(presence_points.name)
             if {'latitude', 'longitude'}.issubset(df.columns):
-                for idx, row in df.iterrows():
+                points_layer = folium.FeatureGroup(name="Presence Points")
+                for _, row in df.iterrows():
                     folium.CircleMarker(
                         location=[row['latitude'], row['longitude']],
                         radius=3,
                         color='blue',
                         fill=True,
                         fill_opacity=0.7
-                    ).add_to(m)
+                    ).add_to(points_layer)
+                points_layer.add_to(m)
         except Exception as e:
             print(f"⚠️ Error reading CSV: {e}")
+
+    # Draw predictor rasters
+    if show_rasters and os.path.exists("predictor_rasters"):
+        for tif in os.listdir("predictor_rasters"):
+            if tif.endswith(".tif"):
+                try:
+                    with rasterio.open(os.path.join("predictor_rasters", tif)) as src:
+                        bounds = src.bounds
+                        img = src.read(1)
+                        folium.raster_layers.ImageOverlay(
+                            image=img,
+                            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                            opacity=0.4,
+                            colormap=lambda x: (0, 1, 0, x)
+                        ).add_to(m)
+                except Exception as e:
+                    print(f"⚠️ Error displaying raster {tif}: {e}")
+
+    folium.LayerControl().add_to(m)
 
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
@@ -52,11 +74,8 @@ def create_map(presence_points=None):
 def handle_upload(file):
     global uploaded_csv
     uploaded_csv = file
-
-    # ✅ Ensure directory exists
     os.makedirs("predictor_rasters", exist_ok=True)
-
-    shutil.copy(file.name, "predictor_rasters/presence_points.csv")  # ✅ Hugging Face compatible
+    shutil.copy(file.name, "predictor_rasters/presence_points.csv")
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
 
 def fetch_predictors(selected):
@@ -88,9 +107,6 @@ def show_suitability_map():
     with rasterio.open("outputs/suitability_map.tif") as src:
         bounds = src.bounds
         img = src.read(1)
-        img_min = np.nanmin(img)
-        img_max = np.nanmax(img)
-
         m = folium.Map(control_scale=True)
         folium.TileLayer('OpenStreetMap').add_to(m)
 
@@ -98,10 +114,9 @@ def show_suitability_map():
             image=img,
             bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
             opacity=0.6,
-            colormap=lambda x: (1, 0, 0, x)  # simple red scale
+            colormap=lambda x: (1, 0, 0, x)
         ).add_to(m)
 
-        # ✅ Automatically zoom to bounds
         m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
 
     raw_html = m.get_root().render()
@@ -109,15 +124,23 @@ def show_suitability_map():
     iframe = f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
     return iframe
 
+def update_map_layer_switch(file, show_points, show_rasters):
+    return create_map(file, show_points, show_rasters)
+
 # --- Gradio App Layout ---
 
 with gr.Blocks() as app:
     gr.Markdown("## 🧬 Spatchat-SDM: Global Species Distribution Modeling")
 
+    map_output = gr.HTML(value=create_map(), label="Map Preview")
+
     with gr.Row():
         uploader = gr.File(label="📥 Upload Presence Points (CSV)")
-        upload_btn = gr.Button("⬆️ Upload")
         upload_status = gr.Markdown()
+
+    with gr.Row():
+        show_points_checkbox = gr.Checkbox(value=True, label="🟦 Show Presence Points")
+        show_rasters_checkbox = gr.Checkbox(value=True, label="🟨 Show Predictor Rasters")
 
     with gr.Row():
         layer_selector = gr.CheckboxGroup(
@@ -143,14 +166,16 @@ with gr.Blocks() as app:
 
     with gr.Row():
         show_map_btn = gr.Button("🗺️ Show Suitability Map")
-        map_output = gr.HTML()
+        suitability_map_output = gr.HTML()
 
     # --- Actions ---
 
-    upload_btn.click(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
+    uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
+    show_points_checkbox.change(fn=update_map_layer_switch, inputs=[uploader, show_points_checkbox, show_rasters_checkbox], outputs=[map_output])
+    show_rasters_checkbox.change(fn=update_map_layer_switch, inputs=[uploader, show_points_checkbox, show_rasters_checkbox], outputs=[map_output])
     fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector], outputs=[fetch_status, layer_selector])
     run_btn.click(fn=run_model, outputs=[run_status])
-    show_map_btn.click(fn=show_suitability_map, outputs=[map_output])
+    show_map_btn.click(fn=show_suitability_map, outputs=[suitability_map_output])
 
 # --- Launch App ---
 
