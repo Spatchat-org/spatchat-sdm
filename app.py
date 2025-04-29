@@ -226,4 +226,10 @@ with gr.Blocks() as app:
     # --- Actions ---
 
     uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
-    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector],_
+    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector], outputs=[fetch_status, layer_selector, map_output])
+    run_btn.click(fn=run_model, outputs=[run_status])
+    show_map_btn.click(fn=show_suitability_map, outputs=[suitability_map_output])
+
+# --- Launch App ---
+
+app.launch()
