@@ -1,127 +1,110 @@
-import rasterio
-import numpy as np
-import pandas as pd
-import glob
 import os
+import pandas as pd
+import numpy as np
+import rasterio
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-import joblib
+from sklearn.utils import shuffle
+from joblib import dump
 
-# --- Paths ---
-predictor_folder = "predictor_rasters"
-presence_file = os.path.join(predictor_folder, "presence_points.csv")
-output_folder = "outputs"
-os.makedirs(output_folder, exist_ok=True)
+# --- Ensure output folder exists ---
+os.makedirs("outputs", exist_ok=True)
 
-# --- Read Selected Layers ---
-with open("scripts/user_layer_selection.txt", "r") as f:
-    selected_layers = [line.strip() for line in f.readlines()]
+# --- Load presence points ---
+presence_path = "predictor_rasters/presence_points.csv"
+if not os.path.exists(presence_path):
+    print("❗ Presence CSV not found.")
+    exit()
 
-# --- Load Only Selected Predictor Rasters ---
-predictor_paths = [os.path.join(predictor_folder, f"{layer}.tif") for layer in selected_layers]
+df = pd.read_csv(presence_path)
+if not {'latitude', 'longitude'}.issubset(df.columns):
+    print("❗ CSV missing 'latitude' or 'longitude' columns.")
+    exit()
+
+coords = list(zip(df['longitude'], df['latitude']))
+print(f"📍 Loaded {len(coords)} presence points.")
+
+# --- Load predictor rasters ---
+raster_folder = "predictor_rasters"
+raster_paths = [os.path.join(raster_folder, f) for f in os.listdir(raster_folder) if f.endswith(".tif") and "presence" not in f]
+print(f"🔍 Found predictor rasters: {raster_paths}")
 
 arrays = []
-array_names = []
+for path in raster_paths:
+    with rasterio.open(path) as src:
+        arrays.append(src.read(1))
 
-# --- Pick master raster for alignment ---
-master_raster = rasterio.open(predictor_paths[0])
-master_profile = master_raster.profile
+try:
+    stacked = np.stack(arrays, axis=-1)
+    print(f"🗺️ Stacked predictor shape: {stacked.shape}")
+except Exception as e:
+    print(f"❗ Could not stack rasters: {e}")
+    exit()
 
-def resample_raster(src_raster, target_profile):
-    data = src_raster.read(
-        out_shape=(
-            src_raster.count,
-            target_profile['height'],
-            target_profile['width']
-        ),
-        resampling=rasterio.enums.Resampling.nearest
-    )
-    return data[0]
-
-for path in predictor_paths:
-    name = os.path.splitext(os.path.basename(path))[0]
-    raster = rasterio.open(path)
-    resampled_array = resample_raster(raster, master_profile)
-    arrays.append(resampled_array)
-    array_names.append(name)
-
-# --- Stack Predictors ---
-stacked_predictors = np.stack(arrays, axis=-1)
-height, width, num_predictors = stacked_predictors.shape
-
-print(f"🗺️ Stacked predictors shape: {stacked_predictors.shape}")
-
-# --- Load Presence Points ---
-presence = pd.read_csv(presence_file)
-coords = list(zip(presence.longitude, presence.latitude))
-
+# --- Extract presence pixel values ---
 samples = []
-transform = master_profile['transform']
 for lon, lat in coords:
-    col, row = ~transform * (lon, lat)
-    col, row = int(col), int(row)
-    if 0 <= row < height and 0 <= col < width:
-        samples.append(stacked_predictors[row, col, :])
-    else:
-        samples.append(np.full((num_predictors,), np.nan))
+    row_samples = []
+    for path in raster_paths:
+        with rasterio.open(path) as src:
+            row, col = src.index(lon, lat)
+            try:
+                val = src.read(1)[row, col]
+                row_samples.append(val)
+            except:
+                row_samples.append(np.nan)
+    samples.append(row_samples)
 
-presence_X = np.stack(samples, axis=0)
-presence_y = np.ones(presence_X.shape[0])
+X_pos = np.array(samples)
+print(f"📍 Presence samples: {X_pos.shape}")
 
-print(f"📍 Presence samples: {presence_X.shape}")
-
-# --- Generate Random Background Points ---
+# --- Sample background points ---
 np.random.seed(42)
-num_background = presence_X.shape[0] * 5
-row_idxs = np.random.randint(0, height, num_background)
-col_idxs = np.random.randint(0, width, num_background)
+background_samples = []
+height, width = stacked.shape[:2]
 
-background_samples = stacked_predictors[row_idxs, col_idxs, :]
-background_y = np.zeros(background_samples.shape[0])
+for _ in range(len(X_pos) * 5):  # 5x background
+    row = np.random.randint(0, height)
+    col = np.random.randint(0, width)
+    values = stacked[row, col, :]
+    background_samples.append(values)
 
-print(f"🌎 Background samples: {background_samples.shape}")
+X_neg = np.array(background_samples)
+print(f"🌎 Background samples: {X_neg.shape}")
 
-# --- Combine Presence + Background ---
-X = np.vstack([presence_X, background_samples])
-y = np.concatenate([presence_y, background_y])
+# --- Stack and train ---
+X = np.vstack([X_pos, X_neg])
+y = np.hstack([np.ones(len(X_pos)), np.zeros(len(X_neg))])
+X, y = shuffle(X, y, random_state=42)
 
-print(f"🔀 Total samples before cleaning: {X.shape}")
-
-# --- Remove any NaN samples ---
-mask = np.all(np.isfinite(X), axis=1)
-X = X[mask]
-y = y[mask]
-
+print(f"🔀 Total training samples: {X.shape}")
+X = np.nan_to_num(X)
 print(f"🧹 Samples after removing NaN: {X.shape}")
 
-# --- Train Logistic Regression Model ---
+# --- Train model ---
 model = LogisticRegression(max_iter=1000)
 model.fit(X, y)
-
 print("🚀 Logistic Regression model trained!")
 
-# --- Predict Suitability over Full Map ---
-flat_predictors = stacked_predictors.reshape(-1, num_predictors)
-suitability = model.predict_proba(flat_predictors)[:, 1]
-suitability_map = suitability.reshape(height, width)
+# --- Save model ---
+dump(model, "outputs/sdm_model.joblib")
+print("💾 Model saved.")
 
-# --- Save Suitability Map ---
-output_suitability = os.path.join(output_folder, "suitability_map.tif")
-with rasterio.open(
-    output_suitability,
-    'w',
-    driver='GTiff',
-    height=height,
-    width=width,
-    count=1,
-    dtype=suitability_map.dtype,
-    crs=master_profile['crs'],
-    transform=master_profile['transform']
-) as dst:
-    dst.write(suitability_map, 1)
+# --- Apply to entire raster ---
+flat = stacked.reshape(-1, stacked.shape[-1])
+flat = np.nan_to_num(flat)
+y_pred = model.predict_proba(flat)[:, 1]
+suitability = y_pred.reshape(stacked.shape[:2])
 
-print(f"🎯 Suitability map saved at {output_suitability}")
+# --- Save suitability map ---
+out_path = "outputs/suitability_map.tif"
+with rasterio.open(raster_paths[0]) as ref:
+    meta = ref.meta.copy()
+    meta.update({
+        "count": 1,
+        "dtype": "float32"
+    })
 
-# --- Save Trained Model (Optional) ---
-joblib.dump(model, os.path.join(output_folder, "logistic_model.pkl"))
-print("💾 Model saved!")
+    with rasterio.open(out_path, "w", **meta) as dst:
+        dst.write(suitability.astype(np.float32), 1)
+
+print(f"🎯 Suitability map saved at {out_path}")
