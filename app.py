@@ -51,6 +51,7 @@ def create_map(presence_points=None):
 def handle_upload(file):
     global uploaded_csv
     uploaded_csv = file
+    file.save("predictor_rasters/presence_points.csv")
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
 
 def fetch_predictors(selected):
