@@ -24,12 +24,12 @@ layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('slope'),
     "aspect": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('aspect'),
-    "ndvi": ee.ImageCollection("MODIS/006/MOD13A2").select('NDVI').first(),
+    "ndvi": ee.ImageCollection("MODIS/061/MOD13A2").select('NDVI').first(),
     "precipitation": ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").mean(),
     "mean_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tavg').mean(),
     "min_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tmin').mean(),
     "max_temperature": ee.ImageCollection("NASA/ORNL/DAYMET_V4").select('tmax').mean(),
-    "landcover": ee.ImageCollection("MODIS/006/MCD12Q1").select('LC_Type1').first()
+    "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select('LC_Type1').first()
 }
 
 default_bbox = ee.Geometry.BBox(100, -10, 110, 0)  # ✅ smaller region for safe export
