@@ -1,144 +1,143 @@
 import gradio as gr
+import geemap.foliumap as foliumap
 import folium
-import rasterio
-import numpy as np
+import html as html_lib
 import pandas as pd
-import subprocess
+import numpy as np
+import rasterio
 import os
-import matplotlib.pyplot as plt
+import json
+import ee
+import joblib
 
-# --- Landcover Classes ---
-landcover_class_dict = {
-    0: "Water",
-    1: "Evergreen Needleleaf Forest",
-    2: "Evergreen Broadleaf Forest",
-    3: "Deciduous Needleleaf Forest",
-    4: "Deciduous Broadleaf Forest",
-    5: "Mixed Forests",
-    6: "Closed Shrublands",
-    7: "Open Shrublands",
-    8: "Woody Savannas",
-    9: "Savannas",
-    10: "Grasslands",
-    11: "Permanent Wetlands",
-    12: "Croplands",
-    13: "Urban and Built-Up",
-    14: "Cropland/Natural Vegetation Mosaic",
-    15: "Snow and Ice",
-    16: "Barren or Sparsely Vegetated"
-}
+# --- Authenticate Earth Engine using Hugging Face Secret ---
+service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
+credentials = ee.ServiceAccountCredentials(
+    email=service_account_info['client_email'],
+    key_data=json.dumps(service_account_info)
+)
+ee.Initialize(credentials)
+print("✅ Earth Engine authenticated using Service Account!")
 
-# --- Environmental Layers Available ---
-env_layer_options = [
-    "elevation",
-    "slope",
-    "aspect",
-    "ndvi",
-    "precipitation",
-    "mean_temperature",
-    "min_temperature",
-    "max_temperature",
-    "landcover"
+# --- Global State ---
+uploaded_csv = None
+predictor_list = []
+available_predictors = [
+    "elevation", "slope", "aspect", "ndvi",
+    "precipitation", "mean_temperature", "min_temperature", "max_temperature", "landcover"
 ]
 
-uploaded_csv_path = "predictor_rasters/presence_points.csv"
+# --- Helper Functions ---
 
-# --- Handle Upload ---
-def handle_upload(csv_file):
-    if csv_file is None:
-        return "⚠️ No file uploaded.", None
-    df = pd.read_csv(csv_file.name)
-    os.makedirs("predictor_rasters", exist_ok=True)
-    df.to_csv(uploaded_csv_path, index=False)
-    return "✅ Presence points uploaded!", preview_presence_map(df)
+def create_map(presence_points=None):
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
+    folium.TileLayer('OpenStreetMap').add_to(m)
 
-# --- Preview Presence Points ---
-def preview_presence_map(df):
-    if 'longitude' not in df.columns or 'latitude' not in df.columns:
-        return "⚠️ CSV must have longitude, latitude columns."
-    m = folium.Map(location=[df.latitude.mean(), df.longitude.mean()], zoom_start=5)
-    for _, row in df.iterrows():
-        folium.CircleMarker(
-            location=[row['latitude'], row['longitude']],
-            radius=3,
-            color='blue',
-            fill=True,
-            fill_opacity=0.7
-        ).add_to(m)
-    return m._repr_html_()
+    if presence_points is not None:
+        try:
+            df = pd.read_csv(presence_points)
+            if {'latitude', 'longitude'}.issubset(df.columns):
+                for idx, row in df.iterrows():
+                    folium.CircleMarker(
+                        location=[row['latitude'], row['longitude']],
+                        radius=3,
+                        color='blue',
+                        fill=True,
+                        fill_opacity=0.7
+                    ).add_to(m)
+        except Exception as e:
+            print(f"⚠️ Error reading CSV: {e}")
 
-# --- Show Suitability Map ---
-def load_suitability_map():
-    raster_path = "outputs/suitability_map.tif"
-    if not os.path.exists(raster_path):
-        return "⚠️ Suitability map not generated yet."
-    with rasterio.open(raster_path) as src:
+    raw_html = m.get_root().render()
+    safe_html = html_lib.escape(raw_html)
+    iframe = f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
+    return iframe
+
+def handle_upload(file):
+    global uploaded_csv
+    uploaded_csv = file
+    return create_map(uploaded_csv), "✅ Presence points uploaded!"
+
+def fetch_predictors(selected):
+    if not selected:
+        return "⚠️ No predictors selected.", gr.update(choices=[])
+
+    selected_layers = ",".join(selected)
+    os.environ['SELECTED_LAYERS'] = selected_layers
+    os.system("python scripts/fetch_predictors.py")
+
+    available_files = [f for f in os.listdir("predictor_rasters") if f.endswith(".tif")]
+    return "✅ Predictors fetched.", gr.update(choices=available_files)
+
+def run_model():
+    if uploaded_csv is None:
+        return "⚠️ Please upload presence points first."
+
+    os.system("python scripts/run_logistic_sdm.py")
+
+    if os.path.exists("outputs/suitability_map.tif"):
+        return "✅ Model trained and suitability map generated!"
+    else:
+        return "❗ Model ran but no suitability map was generated."
+
+def show_suitability_map():
+    if not os.path.exists("outputs/suitability_map.tif"):
+        return "❗ No suitability map available yet."
+
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
+    folium.TileLayer('OpenStreetMap').add_to(m)
+
+    with rasterio.open("outputs/suitability_map.tif") as src:
         bounds = src.bounds
-        array = src.read(1)
-    array_min, array_max = np.nanmin(array), np.nanmax(array)
-    norm_array = (array - array_min) / (array_max - array_min)
-    plt.imsave("outputs/suitability_map_temp.png", np.clip(norm_array, 0, 1), cmap="YlGn", vmin=0, vmax=1)
-    center_lat = (bounds.top + bounds.bottom) / 2
-    center_lon = (bounds.left + bounds.right) / 2
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=8)
-    folium.raster_layers.ImageOverlay(
-        name="Suitability",
-        image="outputs/suitability_map_temp.png",
-        bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-        opacity=0.6
-    ).add_to(m)
-    folium.LayerControl().add_to(m)
-    return m._repr_html_()
+        img = src.read(1)
+        img_min = np.nanmin(img)
+        img_max = np.nanmax(img)
 
-# --- Full Workflow ---
-def full_workflow(selected_layers, selected_lc_classes):
-    if not selected_layers:
-        return "⚠️ Please select environmental layers.", None
+        folium.raster_layers.ImageOverlay(
+            image=img,
+            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+            opacity=0.6,
+            colormap=lambda x: (1, 0, 0, x)  # simple red scale
+        ).add_to(m)
 
-    os.makedirs("scripts", exist_ok=True)
-    with open("scripts/user_layer_selection.txt", "w") as f:
-        for layer in selected_layers:
-            f.write(f"{layer}\n")
-    with open("scripts/user_landcover_selection.txt", "w") as f:
-        for lc in selected_lc_classes:
-            f.write(f"{lc.split(':')[0]}\n")  # Only class ID
+    raw_html = m.get_root().render()
+    safe_html = html_lib.escape(raw_html)
+    iframe = f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
+    return iframe
 
-    subprocess.run(["python", "scripts/run_full_pipeline.py"])
+# --- Gradio App Layout ---
 
-    return "✅ Model completed and map generated!", load_suitability_map()
-
-# --- Gradio App ---
 with gr.Blocks() as app:
-    gr.Markdown("# 🧬 Spatchat-SDM - Upload, Select, Model, Map")
+    gr.Markdown("## 🧬 Spatchat-SDM: Global Species Distribution Modeling")
 
     with gr.Row():
-        uploader = gr.File(label="📤 Upload Presence CSV (longitude, latitude)")
-        upload_status = gr.Markdown("⬇️ Waiting for upload...")
-        presence_map = gr.HTML()
+        uploader = gr.File(label="📥 Upload Presence Points (CSV)")
+        upload_btn = gr.Button("⬆️ Upload")
+        upload_status = gr.Markdown()
 
-    uploader.change(
-        fn=handle_upload,
-        inputs=[uploader],
-        outputs=[upload_status, presence_map]
-    )
+    with gr.Row():
+        layer_selector = gr.CheckboxGroup(
+            label="🌎 Select Environmental Predictors",
+            choices=available_predictors
+        )
+        fetch_btn = gr.Button("📥 Fetch Predictors")
+        fetch_status = gr.Markdown()
 
-    gr.Markdown("## 🌍 Select Environmental Layers")
-    env_layer_selector = gr.CheckboxGroup(choices=env_layer_options, label="Environmental Layers")
+    with gr.Row():
+        run_btn = gr.Button("🚀 Run SDM Model")
+        run_status = gr.Markdown()
 
-    gr.Markdown("## 🌳 Select Landcover Classes (if using Landcover)")
-    landcover_selector = gr.CheckboxGroup(
-        choices=[f"{k}: {v}" for k,v in landcover_class_dict.items()],
-        label="Landcover Classes"
-    )
+    with gr.Row():
+        show_map_btn = gr.Button("🗺️ Show Suitability Map")
+        map_output = gr.HTML()
 
-    run_button = gr.Button("🚀 Fetch Predictors + Run Model")
-    model_status = gr.Markdown("🔄 Waiting to run...")
-    suitability_map_output = gr.HTML()
+    # --- Actions ---
 
-    run_button.click(
-        fn=full_workflow,
-        inputs=[env_layer_selector, landcover_selector],
-        outputs=[model_status, suitability_map_output]
-    )
+    upload_btn.click(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
+    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector], outputs=[fetch_status, layer_selector])
+    run_btn.click(fn=run_model, outputs=[run_status])
+    show_map_btn.click(fn=show_suitability_map, outputs=[map_output])
 
-app.launch(share=True)
+# --- Launch App ---
+
+app.launch()
