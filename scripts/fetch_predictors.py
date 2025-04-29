@@ -23,7 +23,7 @@ selected_layers = selected_layers.split(',') if selected_layers else []
 bio_image = ee.Image("WORLDCLIM/V1/BIO")
 
 # --- Map of bioclim layer names to WorldClim bands ---
-layer_sources = {f"bio{i}": bio_image.select(f"bio{i}") for i in range(1, 20)}
+layer_sources = {f"bio{i}": bio_image.select(f"bio{str(i).zfill(2)}") for i in range(1, 20)}
 
 # Optional additional layers
 layer_sources.update({
