@@ -202,17 +202,7 @@ with gr.Blocks() as app:
     with gr.Row():
         layer_selector = gr.CheckboxGroup(
             label="🌎 Select Environmental Predictors",
-            choices=[
-                "elevation",
-                "slope",
-                "aspect",
-                "ndvi",
-                "precipitation",
-                "mean_temperature",
-                "min_temperature",
-                "max_temperature",
-                "landcover"
-            ]
+            choices=[f"bio{i}" for i in range(1, 20)] + ["elevation", "ndvi", "landcover"]
         )
         fetch_btn = gr.Button("📥 Fetch Predictors")
         fetch_status = gr.Markdown()
