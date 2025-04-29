@@ -12,11 +12,14 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
 
-# --- Parameters ---
+# --- Ensure output folder exists ---
+os.makedirs("predictor_rasters", exist_ok=True)
+
+# --- Get selected layers from environment variable ---
 selected_layers = os.environ.get('SELECTED_LAYERS', '')
 selected_layers = selected_layers.split(',') if selected_layers else []
 
-# --- Define Layer Sources ---
+# --- Define Earth Engine layer sources ---
 layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('slope'),
@@ -29,13 +32,9 @@ layer_sources = {
     "landcover": ee.ImageCollection("MODIS/006/MCD12Q1").select('LC_Type1').first()
 }
 
-# --- Default Study Area Bounding Box ---
 default_bbox = ee.Geometry.BBox(-180, -60, 180, 85)
 
-# --- Create output folder if missing ---
-os.makedirs("predictor_rasters", exist_ok=True)
-
-# --- Fetch Each Selected Layer ---
+# --- Export selected layers ---
 for layer_name in selected_layers:
     if layer_name not in layer_sources:
         print(f"⚠️ Layer {layer_name} not recognized.")
@@ -50,10 +49,10 @@ for layer_name in selected_layers:
         geemap.ee_export_image(
             image=image.clip(default_bbox),
             filename=out_file,
-            scale=1000,          # 1km resolution
+            scale=1000,
             region=default_bbox,
             file_per_band=False,
-            timeout=600           # increase if necessary
+            timeout=600
         )
         print(f"✅ Saved {layer_name} to {out_file}")
     except Exception as e:
