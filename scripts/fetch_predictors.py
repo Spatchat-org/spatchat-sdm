@@ -32,7 +32,7 @@ layer_sources = {
     "landcover": ee.ImageCollection("MODIS/006/MCD12Q1").select('LC_Type1').first()
 }
 
-default_bbox = ee.Geometry.BBox(-180, -60, 180, 85)
+default_bbox = ee.Geometry.BBox(100, -10, 110, 0)  # ✅ smaller region for safe export
 
 # --- Export selected layers ---
 for layer_name in selected_layers:
