@@ -58,16 +58,16 @@ def reproject_to_wgs84(src_path, dst_path):
                 )
         print("🌐 Reprojection complete!")
 
-def create_map(presence_points=None, show_points=True, show_rasters=True):
+def create_map(presence_points=None, include_rasters=True):
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
     # Draw presence points
-    if show_points and presence_points is not None:
+    if presence_points is not None:
         try:
             df = pd.read_csv(presence_points.name)
             if {'latitude', 'longitude'}.issubset(df.columns):
-                points_layer = folium.FeatureGroup(name="Presence Points")
+                points_layer = folium.FeatureGroup(name="🟦 Presence Points")
                 for _, row in df.iterrows():
                     folium.CircleMarker(
                         location=[row['latitude'], row['longitude']],
@@ -80,24 +80,29 @@ def create_map(presence_points=None, show_points=True, show_rasters=True):
         except Exception as e:
             print(f"⚠️ Error reading CSV: {e}")
 
-    # Draw predictor rasters
-    if show_rasters and os.path.exists("predictor_rasters"):
+    # Add predictor rasters
+    if include_rasters and os.path.exists("predictor_rasters"):
         for tif in os.listdir("predictor_rasters"):
             if tif.endswith(".tif"):
                 try:
-                    with rasterio.open(os.path.join("predictor_rasters", tif)) as src:
+                    path = os.path.join("predictor_rasters", tif)
+                    with rasterio.open(path) as src:
+                        print(f"🌍 Raster: {tif}, CRS: {src.crs}")
                         bounds = src.bounds
                         img = src.read(1)
-                        folium.raster_layers.ImageOverlay(
+                        raster_layer = folium.raster_layers.ImageOverlay(
                             image=img,
                             bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
                             opacity=0.4,
-                            colormap=lambda x: (0, 1, 0, x)
-                        ).add_to(m)
+                            colormap=lambda x: (0, 1, 0, x),
+                            name=f"🟨 {tif}"
+                        )
+                        raster_layer.add_to(m)
                 except Exception as e:
                     print(f"⚠️ Error displaying raster {tif}: {e}")
 
-    folium.LayerControl().add_to(m)
+    # Leaflet-native toggle panel
+    folium.LayerControl(collapsed=False).add_to(m)
 
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
@@ -112,15 +117,18 @@ def handle_upload(file):
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
 
 def fetch_predictors(selected):
+    global uploaded_csv
+
     if not selected:
-        return "⚠️ No predictors selected.", gr.update(choices=[])
+        return "⚠️ No predictors selected.", gr.update(choices=[]), create_map(uploaded_csv)
 
     selected_layers = ",".join(selected)
     os.environ['SELECTED_LAYERS'] = selected_layers
     os.system("python scripts/fetch_predictors.py")
 
     available_files = [f for f in os.listdir("predictor_rasters") if f.endswith(".tif")]
-    return "✅ Predictors fetched.", gr.update(choices=available_files)
+    map_html = create_map(uploaded_csv)
+    return "✅ Predictors fetched.", gr.update(choices=available_files), map_html
 
 def run_model():
     if uploaded_csv is None:
@@ -138,10 +146,12 @@ def run_model():
         return "❗ Model ran but no suitability map was generated."
 
 def show_suitability_map():
-    if not os.path.exists("outputs/suitability_map_wgs84.tif"):
+    path = "outputs/suitability_map_wgs84.tif"
+    if not os.path.exists(path):
         return "❗ No suitability map available yet."
 
-    with rasterio.open("outputs/suitability_map_wgs84.tif") as src:
+    with rasterio.open(path) as src:
+        print(f"🗺️ Suitability map CRS: {src.crs}")
         bounds = src.bounds
         img = src.read(1)
         m = folium.Map(control_scale=True)
@@ -151,33 +161,28 @@ def show_suitability_map():
             image=img,
             bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
             opacity=0.6,
-            colormap=lambda x: (1, 0, 0, x)
+            colormap=lambda x: (1, 0, 0, x),
+            name="🎯 Suitability Map"
         ).add_to(m)
 
         m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
+        folium.LayerControl(collapsed=False).add_to(m)
 
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
     iframe = f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
     return iframe
 
-def update_map_layer_switch(file, show_points, show_rasters):
-    return create_map(file, show_points, show_rasters)
-
 # --- Gradio App Layout ---
 
 with gr.Blocks() as app:
     gr.Markdown("## 🧬 Spatchat-SDM: Global Species Distribution Modeling")
 
-    map_output = gr.HTML(value=create_map(), label="Map Preview")
+    map_output = gr.HTML(value=create_map(), label="🗺️ Live Preview")
 
     with gr.Row():
         uploader = gr.File(label="📥 Upload Presence Points (CSV)")
         upload_status = gr.Markdown()
-
-    with gr.Row():
-        show_points_checkbox = gr.Checkbox(value=True, label="🟦 Show Presence Points")
-        show_rasters_checkbox = gr.Checkbox(value=True, label="🟨 Show Predictor Rasters")
 
     with gr.Row():
         layer_selector = gr.CheckboxGroup(
@@ -202,15 +207,13 @@ with gr.Blocks() as app:
         run_status = gr.Markdown()
 
     with gr.Row():
-        show_map_btn = gr.Button("🗺️ Show Suitability Map")
+        show_map_btn = gr.Button("🎯 Show Suitability Map")
         suitability_map_output = gr.HTML()
 
     # --- Actions ---
 
     uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
-    show_points_checkbox.change(fn=update_map_layer_switch, inputs=[uploader, show_points_checkbox, show_rasters_checkbox], outputs=[map_output])
-    show_rasters_checkbox.change(fn=update_map_layer_switch, inputs=[uploader, show_points_checkbox, show_rasters_checkbox], outputs=[map_output])
-    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector], outputs=[fetch_status, layer_selector])
+    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector], outputs=[fetch_status, layer_selector, map_output])
     run_btn.click(fn=run_model, outputs=[run_status])
     show_map_btn.click(fn=show_suitability_map, outputs=[suitability_map_output])
 
