@@ -3,6 +3,7 @@ import json
 import os
 import geemap
 import pandas as pd
+import shutil
 
 # --- Authenticate Earth Engine using Hugging Face Secret ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -13,22 +14,25 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
 
-# --- Ensure output folder exists ---
+# --- Ensure folders and clear cache ---
 os.makedirs("predictor_rasters", exist_ok=True)
+shutil.rmtree("predictor_rasters/wgs84", ignore_errors=True)
+for f in os.listdir("predictor_rasters"):
+    if f.endswith(".tif"):
+        os.remove(os.path.join("predictor_rasters", f))
 
-# --- Get selected layers from environment variable ---
+# --- Get selected layers and landcover classes ---
 selected_layers = os.environ.get('SELECTED_LAYERS', '')
 selected_layers = selected_layers.split(',') if selected_layers else []
 
-# --- Optional: get landcover class IDs to encode ---
 landcover_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES', '')
 landcover_classes = [int(x) for x in landcover_classes.split(',') if x.strip().isdigit()]
 
-# --- Compute dynamic bounding box from presence points ---
+# --- Compute dynamic bounding box from uploaded points ---
 df = pd.read_csv("predictor_rasters/presence_points.csv")
 min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
 min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
-buffer = 0.25  # degree buffer (~25–28 km)
+buffer = 0.25  # degrees
 dynamic_bbox = ee.Geometry.BBox(
     min_lon - buffer,
     min_lat - buffer,
@@ -36,7 +40,7 @@ dynamic_bbox = ee.Geometry.BBox(
     max_lat + buffer
 )
 
-# --- Define layer sources ---
+# --- Define EE sources ---
 bio_image = ee.Image("WORLDCLIM/V1/BIO")
 terrain = ee.Terrain.products(ee.Image("USGS/SRTMGL1_003"))
 
@@ -49,7 +53,6 @@ layer_sources.update({
     "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select('LC_Type1').first(),
 })
 
-# --- Landcover class labels ---
 landcover_labels = {
     0: "water",
     1: "evergreen_needleleaf_forest",
@@ -70,7 +73,7 @@ landcover_labels = {
     16: "barren_or_sparsely_vegetated"
 }
 
-# --- Export selected layers ---
+# --- Export layers ---
 for layer_name in selected_layers:
     if layer_name == "landcover":
         print("🌱 One-hot encoding selected MODIS landcover classes...")
@@ -98,20 +101,20 @@ for layer_name in selected_layers:
             except Exception as e:
                 print(f"❗ Failed to save {class_id} ({class_name}): {e}")
 
-        continue  # skip raw landcover export
+        continue
 
     if layer_name not in layer_sources:
         print(f"⚠️ Layer {layer_name} not recognized.")
         continue
 
-    image = layer_sources[layer_name]
+    image = layer_sources[layer_name].clip(dynamic_bbox)
     out_file = f"predictor_rasters/{layer_name}.tif"
 
     print(f"📥 Fetching {layer_name}...")
 
     try:
         geemap.ee_export_image(
-            image.clip(dynamic_bbox),
+            image,
             filename=out_file,
             scale=1000,
             region=dynamic_bbox,
