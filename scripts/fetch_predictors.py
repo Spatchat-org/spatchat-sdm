@@ -21,34 +21,32 @@ print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
 
 # --- Wait for presence points to appear ---
 csv_path = "inputs/presence_points.csv"
-for i in range(5):
+for _ in range(5):
     if os.path.exists(csv_path):
         break
-    print(f"⏳ Waiting for presence_points.csv... ({i+1}s)")
+    print("⏳ Waiting for presence_points.csv...")
     time.sleep(1)
 if not os.path.exists(csv_path):
     raise FileNotFoundError("❗ 'inputs/presence_points.csv' not found after wait.")
 
-# --- Load uploaded presence points ---
+# --- Load presence points ---
 df = pd.read_csv(csv_path)
 if not {'latitude', 'longitude'}.issubset(df.columns):
     raise ValueError("❗ CSV must contain 'latitude' and 'longitude' columns.")
 print(f"📍 Loaded {len(df)} presence points.")
 
-# --- Compute study area bounding box (with buffer) ---
+# --- Compute study area bbox + buffer ---
 min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
 min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
 buffer = 0.25
-# Geometry for clipping
-region_geom = ee.Geometry.BBox(min_lon-buffer, min_lat-buffer, max_lon+buffer, max_lat+buffer)
-# Bounding box list for export
-region_bbox = [min_lon-buffer, min_lat-buffer, max_lon+buffer, max_lat+buffer]
+region_geom = ee.Geometry.BBox(min_lon - buffer, min_lat - buffer,
+                               max_lon + buffer, max_lat + buffer)
 
-# --- Define standard projection grid ---
-res = 0.01  # degrees (~1km)
+# --- Define target grid in WGS84 ---
+res = 0.01  # deg (~1km)
 crs = CRS.from_epsg(4326)
-x_size = int((max_lon + buffer - (min_lon - buffer)) / res)
-y_size = int((max_lat + buffer - (min_lat - buffer)) / res)
+x_size = int((max_lon - min_lon + 2 * buffer) / res)
+y_size = int((max_lat - min_lat + 2 * buffer) / res)
 transform = from_bounds(
     min_lon - buffer,
     min_lat - buffer,
@@ -58,15 +56,15 @@ transform = from_bounds(
     y_size
 )
 
-# --- Fetch selection from environment ---
+# --- Selection from env ---
 selected_layers = os.environ.get('SELECTED_LAYERS', '').split(',')
 selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES', '').split(',')
 
-# --- Prepare output directories ---
+# --- Ensure output dirs ---
 os.makedirs("predictor_rasters", exist_ok=True)
 os.makedirs("predictor_rasters/wgs84", exist_ok=True)
 
-# --- Define Earth Engine layer sources ---
+# --- Earth Engine sources ---
 layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('slope'),
@@ -77,29 +75,30 @@ layer_sources = {
 for i in range(1, 20):
     layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO").select(f"bio{str(i).zfill(2)}")
 
-# --- Export & reproject helper ---
+# --- Export & reproject function ---
 def export_and_reproject(image, name):
     raw_path = f"predictor_rasters/{name}.tif"
     aligned_path = f"predictor_rasters/wgs84/{name}.tif"
 
-    # Export using bounding box list (not ee.Geometry)
+    # Export directly in EPSG:4326 using ee.Geometry
     geemap.ee_export_image(
         image.clip(region_geom),
         raw_path,
         scale=1000,
-        region=region_bbox,
+        crs='EPSG:4326',
+        region=region_geom,
         file_per_band=False,
         timeout=600
     )
-    print(f"✅ Saved raw layer: {raw_path}")
+    print(f"✅ Exported raw layer: {raw_path}")
 
-    # Read & reproject to study grid
+    # Read & reproject to exact grid
     with rasterio.open(raw_path) as src:
-        src_data = src.read(1)
-        dst_data = np.empty((y_size, x_size), dtype=src_data.dtype)
+        src_arr = src.read(1)
+        dst_arr = np.full((y_size, x_size), src.nodata or np.nan, dtype=src_arr.dtype)
         reproject(
-            source=src_data,
-            destination=dst_data,
+            source=src_arr,
+            destination=dst_arr,
             src_transform=src.transform,
             src_crs=src.crs,
             dst_transform=transform,
@@ -107,43 +106,38 @@ def export_and_reproject(image, name):
             resampling=Resampling.nearest
         )
         profile = src.profile.copy()
-        profile.update({
-            'driver': 'GTiff',
-            'height': y_size,
-            'width': x_size,
-            'transform': transform,
-            'crs': crs,
-            'count': 1
-        })
+    profile.update({
+        'driver': 'GTiff',
+        'height': y_size,
+        'width': x_size,
+        'crs': crs,
+        'transform': transform,
+        'count': 1
+    })
     with rasterio.open(aligned_path, 'w', **profile) as dst:
-        dst.write(dst_data, 1)
-    print(f"🌐 Reprojected to: {aligned_path}")
+        dst.write(dst_arr, 1)
+    print(f"🌐 Reprojected layer: {aligned_path}")
 
-# --- Process regular predictors ---
+# --- Regular predictors ---
 for name in selected_layers:
-    if name == "landcover":
+    if name == 'landcover':
         continue
     if name not in layer_sources:
-        print(f"⚠️ Skipping unknown layer: {name}")
+        print(f"⚠️ Unknown layer: {name}")
         continue
-    print(f"📥 Fetching {name}...")
+    print(f"📥 Fetching '{name}'...")
     export_and_reproject(layer_sources[name], name)
 
-# --- One-hot encode landcover classes ---
-if "landcover" in selected_layers and selected_classes:
-    print("🌱 One-hot encoding MODIS landcover classes...")
-    landcover_img = layer_sources["landcover"]
-    # Load label map
-    label_map = {}
-    label_map_path = "modis_landcover_code_name.json"
-    if os.path.exists(label_map_path):
-        with open(label_map_path) as f:
-            label_map = json.load(f)
-    # Export each selected class
+# --- One-hot landcover ---
+if 'landcover' in selected_layers and selected_classes:
+    print("🌱 One-hot encoding landcover...")
+    with open('modis_landcover_code_name.json') as f:
+        label_map = json.load(f)
+    lc_img = layer_sources['landcover']
     for code in selected_classes:
         if not code.isdigit():
             continue
         code_int = int(code)
-        label = label_map.get(str(code_int), f"class_{code_int}")
-        binary_img = landcover_img.eq(code_int)
-        export_and_reproject(binary_img, f"{code}_{label}")
+        label = label_map.get(str(code_int), f'class_{code_int}')
+        mask = lc_img.eq(code_int)
+        export_and_reproject(mask, f"{code}_{label}")
