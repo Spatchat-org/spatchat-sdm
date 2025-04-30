@@ -1,21 +1,23 @@
-import os
-import subprocess
+# =====================
+# run_full_pipeline.py
+# =====================
 
-# --- Read Selections ---
-with open("scripts/user_layer_selection.txt", "r") as f:
-    selected_layers = [line.strip() for line in f.readlines()]
+import sys
+from scripts.predictor_fetcher import fetch_predictors
+from scripts.sdm_runner import run_logistic_sdm
 
-with open("scripts/user_landcover_selection.txt", "r") as f:
-    selected_landcover_classes = [int(line.strip()) for line in f.readlines()]
+if len(sys.argv) < 2:
+    print("Usage: python run_full_pipeline.py <layer1> <layer2> ... [--lc <landcover_class1> <landcover_class2> ...]")
+    sys.exit(1)
 
-# --- Save to environment variables for fetch script ---
-os.environ['SELECTED_LAYERS'] = ",".join(selected_layers)
-os.environ['SELECTED_LANDCOVER_CLASSES'] = ",".join(map(str, selected_landcover_classes))
+if "--lc" in sys.argv:
+    lc_index = sys.argv.index("--lc")
+    selected_layers = sys.argv[1:lc_index]
+    landcover_classes = list(map(int, sys.argv[lc_index + 1:]))
+else:
+    selected_layers = sys.argv[1:]
+    landcover_classes = []
 
-# --- Run Fetch Predictors ---
-print("📥 Fetching predictors...")
-subprocess.run(["python", "scripts/fetch_predictors.py"])
-
-# --- Run Logistic SDM ---
-print("🚀 Running SDM...")
-subprocess.run(["python", "scripts/run_logistic_sdm.py"])
+csv_path = "predictor_rasters/presence_points.csv"
+fetch_predictors(csv_path, selected_layers, landcover_classes)
+run_logistic_sdm(csv_path)
