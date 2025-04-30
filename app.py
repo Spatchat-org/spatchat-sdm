@@ -166,14 +166,20 @@ def create_map(presence_points=None):
     safe_html = html_lib.escape(raw_html)
     return f"""<iframe srcdoc=\"{safe_html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"""
 
-
 def handle_upload(file):
     global uploaded_csv
+    if file is None or not hasattr(file, "name"):
+        return create_map(), "⚠️ No file uploaded."
+
     uploaded_csv = file
+
+    # Optional: re-clean folders when uploading new points
+    shutil.rmtree("predictor_rasters", ignore_errors=True)
+    shutil.rmtree("outputs", ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
+
     shutil.copy(file.name, "inputs/presence_points.csv")
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
-
 
 def fetch_predictors(selected_layers, selected_classes):
     global uploaded_csv
