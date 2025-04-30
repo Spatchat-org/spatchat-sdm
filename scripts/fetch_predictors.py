@@ -5,7 +5,7 @@ import ee
 import geemap
 import rasterio
 import numpy as np
-from rasterio.enums import Resampling
+from rasterio.warp import reproject, Resampling, calculate_default_transform
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 import pandas as pd
@@ -69,8 +69,8 @@ layer_sources = {
 for i in range(1, 20):
     layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO").select(f"bio{str(i).zfill(2)}")
 
-# --- Export and resample each layer ---
-def export_and_resample(image, name, is_landcover_class=False):
+# --- Export and reproject each layer ---
+def export_and_reproject(image, name):
     raw_path = f"predictor_rasters/{name}.tif"
     aligned_path = f"predictor_rasters/wgs84/{name}.tif"
 
@@ -85,7 +85,23 @@ def export_and_resample(image, name, is_landcover_class=False):
     print(f"✅ Saved raw layer: {raw_path}")
 
     with rasterio.open(raw_path) as src:
-        data = src.read(1, out_shape=(y_size, x_size), resampling=Resampling.nearest)
+        src_data = src.read(1)
+        dst_data = np.empty((y_size, x_size), dtype=src_data.dtype)
+
+        dst_transform, _, _ = calculate_default_transform(
+            src.crs, crs, src.width, src.height, *src.bounds
+        )
+
+        reproject(
+            source=src_data,
+            destination=dst_data,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=transform,
+            dst_crs=crs,
+            resampling=Resampling.nearest
+        )
+
         profile = src.profile.copy()
         profile.update({
             'height': y_size,
@@ -95,9 +111,10 @@ def export_and_resample(image, name, is_landcover_class=False):
             'driver': 'GTiff',
             'count': 1
         })
+
         with rasterio.open(aligned_path, 'w', **profile) as dst:
-            dst.write(data, 1)
-    print(f"📐 Resampled to: {aligned_path}")
+            dst.write(dst_data, 1)
+    print(f"🌐 Reprojected to: {aligned_path}")
 
 # --- Regular predictors ---
 for name in selected_layers:
@@ -107,7 +124,7 @@ for name in selected_layers:
         print(f"⚠️ Skipping unknown layer: {name}")
         continue
     print(f"📥 Fetching {name}...")
-    export_and_resample(layer_sources[name], name)
+    export_and_reproject(layer_sources[name], name)
 
 # --- One-hot encode landcover classes ---
 if "landcover" in selected_layers and selected_classes:
@@ -126,4 +143,4 @@ if "landcover" in selected_layers and selected_classes:
         code_int = int(code)
         label = label_map.get(str(code_int), f"class_{code_int}")
         binary_img = landcover_img.eq(code_int)
-        export_and_resample(binary_img, f"{code}_{label}")
+        export_and_reproject(binary_img, f"{code}_{label}")
