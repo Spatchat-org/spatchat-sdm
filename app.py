@@ -49,7 +49,6 @@ landcover_options = {
 }
 landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
 
-# --- Landcover Code Name Map (for use in fetch_predictors.py) ---
 modis_landcover_code_name = {
     0: "water",
     1: "evergreen_needleleaf_forest",
@@ -69,8 +68,63 @@ modis_landcover_code_name = {
     15: "snow_and_ice",
     16: "barren_or_sparsely_vegetated"
 }
-
 with open("modis_landcover_code_name.json", "w") as f:
     json.dump(modis_landcover_code_name, f)
 
-# The rest of the code remains unchanged
+# Dummy map output function to avoid undefined error in UI init
+def create_map():
+    return "<p>🗺️ Map will appear here.</p>"
+
+# --- Gradio UI Setup ---
+with gr.Blocks() as app:
+    gr.Markdown("## 🧬 Spatchat-SDM: Global Species Distribution Modeling")
+
+    map_output = gr.HTML(value=create_map(), label="🗺️ Preview")
+
+    with gr.Row():
+        uploader = gr.File(label="📥 Upload Presence Points (CSV)")
+        upload_status = gr.Markdown()
+
+    with gr.Row():
+        layer_selector = gr.CheckboxGroup(
+            label="🌎 Select Environmental Predictors",
+            choices=[f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"]
+        )
+        landcover_class_selector = gr.CheckboxGroup(
+            label="🧮 Landcover Classes (only if 'landcover' is selected)",
+            choices=landcover_choices,
+            visible=False
+        )
+
+    with gr.Row():
+        fetch_btn = gr.Button("📥 Fetch Predictors")
+        fetch_status = gr.Markdown()
+
+    with gr.Row():
+        run_btn = gr.Button("🚀 Run SDM Model")
+        run_status = gr.Markdown()
+
+    with gr.Row():
+        show_map_btn = gr.Button("🎯 Show Suitability Map")
+
+    # Dummy handlers
+    def handle_upload(file):
+        return create_map(), "✅ File uploaded!"
+
+    def fetch_predictors(layers, classes):
+        return "Fetched", gr.update(choices=layers), create_map()
+
+    def run_model():
+        return "Ran model", create_map()
+
+    def toggle_landcover_class_selector(selected):
+        return gr.update(visible="landcover" in selected)
+
+    # UI callbacks
+    uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
+    layer_selector.change(fn=toggle_landcover_class_selector, inputs=[layer_selector], outputs=[landcover_class_selector])
+    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector, landcover_class_selector], outputs=[fetch_status, layer_selector, map_output])
+    run_btn.click(fn=run_model, outputs=[run_status, map_output])
+    show_map_btn.click(fn=create_map, outputs=[map_output])
+
+app.launch()
