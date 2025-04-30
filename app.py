@@ -196,6 +196,8 @@ def run_model():
     if uploaded_csv is None:
         return "⚠️ Please upload presence points first.", create_map(uploaded_csv)
 
+    shutil.copy(uploaded_csv.name, "predictor_rasters/presence_points.csv")
+
     os.system("python scripts/run_logistic_sdm.py")
 
     if os.path.exists("outputs/suitability_map.tif"):
