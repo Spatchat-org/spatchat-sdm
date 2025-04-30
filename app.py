@@ -27,9 +27,6 @@ shutil.rmtree("outputs", ignore_errors=True)
 shutil.rmtree("inputs", ignore_errors=True)
 os.makedirs("inputs", exist_ok=True)
 
-# --- Global State ---
-uploaded_csv = None
-
 # --- Landcover Labels ---
 landcover_options = {
     0: "water",
@@ -90,13 +87,14 @@ def reproject_to_wgs84(src_path, dst_path):
                 )
         print(f"🌐 Reprojected: {dst_path}")
 
-def create_map(presence_points=None):
+def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
-    if presence_points is not None:
+    presence_path = "inputs/presence_points.csv"
+    if os.path.exists(presence_path):
         try:
-            df = pd.read_csv(presence_points.name)
+            df = pd.read_csv(presence_path)
             if {'latitude', 'longitude'}.issubset(df.columns):
                 latlons = []
                 points_layer = folium.FeatureGroup(name="🟦 Presence Points")
@@ -164,19 +162,16 @@ def create_map(presence_points=None):
     return f"""<iframe srcdoc=\"{safe_html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"""
 
 def handle_upload(file):
-    global uploaded_csv
     if file is None or not hasattr(file, "name"):
         return create_map(), "⚠️ No file uploaded."
 
     print(f"📤 Received new file: {file.name}")
 
-    # Clear prior run cache BEFORE saving the new CSV
     shutil.rmtree("predictor_rasters", ignore_errors=True)
     shutil.rmtree("outputs", ignore_errors=True)
     shutil.rmtree("inputs", ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
 
-    uploaded_csv = file
     shutil.copy(file.name, "inputs/presence_points.csv")
 
-    return create_map(uploaded_csv), "✅ Presence points uploaded!"
+    return create_map(), "✅ Presence points uploaded!"
