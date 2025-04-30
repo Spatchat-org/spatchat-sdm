@@ -13,8 +13,12 @@ def fetch_predictors(csv_path, selected_layers, landcover_classes):
         )
         ee.Initialize(credentials)
 
-    shutil.rmtree("predictor_rasters", ignore_errors=True)
-    os.makedirs("predictor_rasters", exist_ok=True)
+    if os.path.exists("predictor_rasters"):
+        for f in os.listdir("predictor_rasters"):
+            if f != "presence_points.csv":
+                os.remove(os.path.join("predictor_rasters", f))
+else:
+        os.makedirs("predictor_rasters", exist_ok=True)
     shutil.rmtree("predictor_rasters/wgs84", ignore_errors=True)
 
     df = pd.read_csv(csv_path)
@@ -57,4 +61,3 @@ def fetch_predictors(csv_path, selected_layers, landcover_classes):
                 filename=f"predictor_rasters/{layer}.tif",
                 scale=1000, region=bbox, timeout=600
             )
-
