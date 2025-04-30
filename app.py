@@ -84,7 +84,6 @@ def reproject_to_wgs84(src_path, dst_path):
                 )
         print(f"🌐 Reprojected: {dst_path}")
 
-
 def create_map(presence_points=None):
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
@@ -93,21 +92,16 @@ def create_map(presence_points=None):
         try:
             df = pd.read_csv(presence_points.name)
             if {'latitude', 'longitude'}.issubset(df.columns):
-                latlons = []
                 points_layer = folium.FeatureGroup(name="🟦 Presence Points")
                 for _, row in df.iterrows():
-                    latlon = [row['latitude'], row['longitude']]
-                    latlons.append(latlon)
                     folium.CircleMarker(
-                        location=latlon,
+                        location=[row['latitude'], row['longitude']],
                         radius=3,
                         color='blue',
                         fill=True,
                         fill_opacity=0.7
                     ).add_to(points_layer)
                 points_layer.add_to(m)
-                if latlons:
-                    m.fit_bounds(latlons)
         except Exception as e:
             print(f"⚠️ Error reading CSV: {e}")
 
@@ -118,30 +112,38 @@ def create_map(presence_points=None):
                 try:
                     path = os.path.join(wgs84_dir, tif)
                     with rasterio.open(path) as src:
+                        print(f"🌍 Raster: {tif}, CRS: {src.crs}")
                         if src.count == 0:
+                            print(f"⚠️ Skipping empty raster: {tif}")
                             continue
                         bounds = src.bounds
                         img = src.read(1)
+
                         if np.nanmin(img) != np.nanmax(img):
                             img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
-                        folium.raster_layers.ImageOverlay(
+
+                        raster_layer = folium.raster_layers.ImageOverlay(
                             image=img,
                             bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
                             opacity=0.4,
                             colormap=lambda x: (0, 1, 0, x),
                             name=f"🟨 {tif}"
-                        ).add_to(m)
+                        )
+                        raster_layer.add_to(m)
                 except Exception as e:
                     print(f"⚠️ Error displaying raster {tif}: {e}")
 
+    # Show suitability map if it exists
     suitability_path = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(suitability_path):
         try:
             with rasterio.open(suitability_path) as src:
                 bounds = src.bounds
                 img = src.read(1)
+
                 if np.nanmin(img) != np.nanmax(img):
                     img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
+
                 folium.raster_layers.ImageOverlay(
                     image=img,
                     bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
@@ -149,6 +151,7 @@ def create_map(presence_points=None):
                     colormap=lambda x: (1, 0, 0, x),
                     name="🎯 Suitability Map"
                 ).add_to(m)
+
                 m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
         except Exception as e:
             print(f"⚠️ Could not load suitability map: {e}")
@@ -156,8 +159,7 @@ def create_map(presence_points=None):
     folium.LayerControl(collapsed=False).add_to(m)
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
-    return f"""<iframe srcdoc=\"{safe_html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"""
-
+    return f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
 
 def handle_upload(file):
     global uploaded_csv
@@ -166,14 +168,10 @@ def handle_upload(file):
     shutil.copy(file.name, "predictor_rasters/presence_points.csv")
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
 
-
 def fetch_predictors(selected_layers, selected_classes):
     global uploaded_csv
     if not selected_layers:
         return "⚠️ No predictors selected.", gr.update(choices=[]), create_map(uploaded_csv)
-
-    if uploaded_csv is not None:
-        shutil.copy(uploaded_csv.name, "predictor_rasters/presence_points.csv")
 
     os.environ["SELECTED_LAYERS"] = ",".join(selected_layers)
     class_ids = [s.split("–")[0].strip() for s in selected_classes]
@@ -191,12 +189,9 @@ def fetch_predictors(selected_layers, selected_classes):
     available_files = [f for f in os.listdir("predictor_rasters") if f.endswith(".tif")]
     return "✅ Predictors fetched.", gr.update(choices=available_files), create_map(uploaded_csv)
 
-
 def run_model():
     if uploaded_csv is None:
-        return "⚠️ Please upload presence points first.", create_map(uploaded_csv)
-
-    shutil.copy(uploaded_csv.name, "predictor_rasters/presence_points.csv")
+        return "⚠️ Please upload presence points first."
 
     os.system("python scripts/run_logistic_sdm.py")
 
@@ -209,7 +204,7 @@ def run_model():
     else:
         return "❗ Model ran but no suitability map was generated.", create_map(uploaded_csv)
 
-# --- Gradio UI ---
+# --- Gradio App Layout ---
 
 with gr.Blocks() as app:
     gr.Markdown("## 🧬 Spatchat-SDM: Global Species Distribution Modeling")
@@ -242,6 +237,7 @@ with gr.Blocks() as app:
     with gr.Row():
         show_map_btn = gr.Button("🎯 Show Suitability Map")
 
+    # --- Interactions ---
     def toggle_landcover_class_selector(selected):
         return gr.update(visible="landcover" in selected)
 
@@ -251,4 +247,5 @@ with gr.Blocks() as app:
     run_btn.click(fn=run_model, outputs=[run_status, map_output])
     show_map_btn.click(fn=create_map, outputs=[map_output])
 
+# --- Launch App ---
 app.launch()
