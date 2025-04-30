@@ -1,15 +1,17 @@
 import gradio as gr
+import geemap.foliumap as foliumap
 import folium
 import html as html_lib
 import pandas as pd
 import numpy as np
 import rasterio
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import os
 import json
 import ee
 import joblib
 import shutil
-import subprocess
+import matplotlib.cm as mpl_cm
 
 # --- Authenticate Earth Engine using Hugging Face Secret ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -48,103 +50,70 @@ landcover_options = {
 }
 landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
 
-# --- Landcover Code Name Map (for use in fetch_predictors.py) ---
-modis_landcover_code_name = {
-    0: "water",
-    1: "evergreen_needleleaf_forest",
-    2: "evergreen_broadleaf_forest",
-    3: "deciduous_needleleaf_forest",
-    4: "deciduous_broadleaf_forest",
-    5: "mixed_forest",
-    6: "closed_shrublands",
-    7: "open_shrublands",
-    8: "woody_savannas",
-    9: "savannas",
-    10: "grasslands",
-    11: "permanent_wetlands",
-    12: "croplands",
-    13: "urban_and_built_up",
-    14: "cropland_natural_vegetation_mosaic",
-    15: "snow_and_ice",
-    16: "barren_or_sparsely_vegetated"
-}
+# --- Helper Functions ---
 
-with open("modis_landcover_code_name.json", "w") as f:
-    json.dump(modis_landcover_code_name, f)
-
-# --- Generate map preview ---
 def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
+    # Presence points
     presence_path = "inputs/presence_points.csv"
     if os.path.exists(presence_path):
-        try:
-            df = pd.read_csv(presence_path)
-            if {'latitude', 'longitude'}.issubset(df.columns):
-                latlons = []
-                layer = folium.FeatureGroup(name="🏦 Presence Points")
-                for _, row in df.iterrows():
-                    latlon = [row['latitude'], row['longitude']]
-                    latlons.append(latlon)
-                    folium.CircleMarker(
-                        location=latlon,
-                        radius=3,
-                        color='blue',
-                        fill=True,
-                        fill_opacity=0.7
-                    ).add_to(layer)
-                layer.add_to(m)
-                if latlons:
-                    m.fit_bounds(latlons)
-        except Exception as e:
-            print(f"⚠️ Error reading CSV: {e}")
+        df = pd.read_csv(presence_path)
+        if {'latitude','longitude'}.issubset(df.columns):
+            latlons = df[['latitude','longitude']].values.tolist()
+            layer = folium.FeatureGroup(name="🟦 Presence Points")
+            for lat, lon in latlons:
+                folium.CircleMarker([lat, lon], radius=4, color='blue', fill=True, fill_opacity=0.8).add_to(layer)
+            layer.add_to(m)
+            if latlons:
+                m.fit_bounds(latlons)
 
-    raster_dir = "predictor_rasters/wgs84"
-    if os.path.exists(raster_dir):
-        for tif in os.listdir(raster_dir):
-            if tif.endswith(".tif"):
-                try:
-                    path = os.path.join(raster_dir, tif)
-                    with rasterio.open(path) as src:
-                        img = src.read(1)
-                        if np.nanmin(img) != np.nanmax(img):
-                            img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
-                        bounds = src.bounds
-                        folium.raster_layers.ImageOverlay(
-                            image=img,
-                            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-                            opacity=0.4,
-                            colormap=lambda x: (0, 1, 0, x),
-                            name=f"📏 {tif}"
-                        ).add_to(m)
-                except Exception as e:
-                    print(f"⚠️ Error displaying raster {tif}: {e}")
-
-    suitability_path = "outputs/suitability_map.tif"
-    if os.path.exists(suitability_path):
-        try:
-            with rasterio.open(suitability_path) as src:
-                bounds = src.bounds
-                img = src.read(1)
-                if np.nanmin(img) != np.nanmax(img):
-                    img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
+    # Predictor rasters
+    rasters_dir = "predictor_rasters/wgs84"
+    if os.path.isdir(rasters_dir):
+        for fname in sorted(os.listdir(rasters_dir)):
+            if fname.endswith('.tif'):
+                path = os.path.join(rasters_dir, fname)
+                with rasterio.open(path) as src:
+                    img = src.read(1)
+                    bounds = src.bounds
+                # normalize
+                vmin, vmax = np.nanmin(img), np.nanmax(img)
+                if vmin == vmax:
+                    continue
+                norm = (img - vmin) / (vmax - vmin)
+                # apply a matplotlib colormap
+                cmap = mpl_cm.get_cmap('viridis')
+                rgba = cmap(norm)  # shape (h, w, 4)
                 folium.raster_layers.ImageOverlay(
-                    image=img,
-                    bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-                    opacity=0.6,
-                    colormap=lambda x: (1, 0, 0, x),
-                    name="🎯 Suitability Map"
+                    image=rgba,
+                    bounds=[[bounds.bottom, bounds.left],[bounds.top, bounds.right]],
+                    opacity=1.0,
+                    name=f"🟨 {fname}"
                 ).add_to(m)
-        except Exception as e:
-            print(f"⚠️ Could not load suitability map: {e}")
+
+    # Suitability map
+    suit_path = "outputs/suitability_map_wgs84.tif"
+    if os.path.exists(suit_path):
+        with rasterio.open(suit_path) as src:
+            img = src.read(1)
+            bounds = src.bounds
+        vmin, vmax = np.nanmin(img), np.nanmax(img)
+        norm = (img - vmin) / (vmax - vmin)
+        cmap = mpl_cm.get_cmap('plasma')
+        rgba = cmap(norm)
+        folium.raster_layers.ImageOverlay(
+            image=rgba,
+            bounds=[[bounds.bottom, bounds.left],[bounds.top, bounds.right]],
+            opacity=0.7,
+            name="🎯 Suitability Map"
+        ).add_to(m)
+        m.fit_bounds([[bounds.bottom, bounds.left],[bounds.top, bounds.right]])
 
     folium.LayerControl(collapsed=False).add_to(m)
-    raw_html = m.get_root().render()
-    safe_html = html_lib.escape(raw_html)
-    return f"""<iframe srcdoc=\"{safe_html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"""
-
-map_output = gr.HTML(value=create_map(), label="🗜️ Preview")
+    html = html_lib.escape(m.get_root().render())
+    return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
 # --- Launch app ---
 with gr.Blocks() as demo:
