@@ -2,6 +2,7 @@ import ee
 import json
 import os
 import geemap
+import pandas as pd
 
 # --- Authenticate Earth Engine using Hugging Face Secret ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -23,12 +24,23 @@ selected_layers = selected_layers.split(',') if selected_layers else []
 landcover_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES', '')
 landcover_classes = [int(x) for x in landcover_classes.split(',') if x.strip().isdigit()]
 
+# --- Compute dynamic bounding box from presence points ---
+df = pd.read_csv("predictor_rasters/presence_points.csv")
+min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
+min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
+buffer = 0.25  # degree buffer (~25–28 km)
+dynamic_bbox = ee.Geometry.BBox(
+    min_lon - buffer,
+    min_lat - buffer,
+    max_lon + buffer,
+    max_lat + buffer
+)
+
 # --- Define layer sources ---
 bio_image = ee.Image("WORLDCLIM/V1/BIO")
 terrain = ee.Terrain.products(ee.Image("USGS/SRTMGL1_003"))
 
 layer_sources = {f"bio{i}": bio_image.select(f"bio{str(i).zfill(2)}") for i in range(1, 20)}
-
 layer_sources.update({
     "slope": terrain.select("slope"),
     "aspect": terrain.select("aspect"),
@@ -58,14 +70,11 @@ landcover_labels = {
     16: "barren_or_sparsely_vegetated"
 }
 
-# --- Clip region (Oregon-ish default) ---
-default_bbox = ee.Geometry.BBox(-125, 40, -115, 50)
-
 # --- Export selected layers ---
 for layer_name in selected_layers:
     if layer_name == "landcover":
         print("🌱 One-hot encoding selected MODIS landcover classes...")
-        lc_image = layer_sources["landcover"].clip(default_bbox)
+        lc_image = layer_sources["landcover"].clip(dynamic_bbox)
 
         for class_id in landcover_classes:
             if class_id not in landcover_labels:
@@ -81,7 +90,7 @@ for layer_name in selected_layers:
                     binary_mask,
                     filename=out_file,
                     scale=500,
-                    region=default_bbox,
+                    region=dynamic_bbox,
                     file_per_band=False,
                     timeout=300
                 )
@@ -89,7 +98,7 @@ for layer_name in selected_layers:
             except Exception as e:
                 print(f"❗ Failed to save {class_id} ({class_name}): {e}")
 
-        continue  # skip regular export of the raw landcover layer
+        continue  # skip raw landcover export
 
     if layer_name not in layer_sources:
         print(f"⚠️ Layer {layer_name} not recognized.")
@@ -102,10 +111,10 @@ for layer_name in selected_layers:
 
     try:
         geemap.ee_export_image(
-            image.clip(default_bbox),
+            image.clip(dynamic_bbox),
             filename=out_file,
             scale=1000,
-            region=default_bbox,
+            region=dynamic_bbox,
             file_per_band=False,
             timeout=600
         )
