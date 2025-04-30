@@ -83,13 +83,18 @@ for name in selected_layers:
 if "landcover" in selected_layers and selected_classes:
     landcover = layer_sources["landcover"]
     print("🌱 One-hot encoding selected MODIS landcover classes...")
+
+    # Load static MODIS class name map
+    with open("modis_landcover_code_name.json") as f:
+        modis_map = json.load(f)
+
     for code in selected_classes:
         if not code.isdigit() or int(code) >= 250:
             continue
         code_int = int(code)
-        label = code_int
+        name = modis_map.get(str(code_int), f"class_{code_int}")
         binary_image = landcover.eq(code_int)
-        out_file = f"predictor_rasters/{label}_{geemap.modis_landcover_dict.get(code_int, 'unknown').lower().replace(' ', '_')}.tif"
+        out_file = f"predictor_rasters/{code_int}_{name}.tif"
         try:
             geemap.ee_export_image(
                 binary_image.clip(region),
