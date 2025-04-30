@@ -25,12 +25,10 @@ print("✅ Earth Engine authenticated using Service Account!")
 shutil.rmtree("predictor_rasters", ignore_errors=True)
 shutil.rmtree("outputs", ignore_errors=True)
 shutil.rmtree("inputs", ignore_errors=True)
+os.makedirs("inputs", exist_ok=True)
 
 # --- Global State ---
 uploaded_csv = None
-
-# --- Ensure input directory exists ---
-os.makedirs("inputs", exist_ok=True)
 
 # --- Landcover Labels ---
 landcover_options = {
@@ -91,7 +89,6 @@ def reproject_to_wgs84(src_path, dst_path):
                     resampling=Resampling.nearest
                 )
         print(f"🌐 Reprojected: {dst_path}")
-
 
 def create_map(presence_points=None):
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
@@ -171,97 +168,12 @@ def handle_upload(file):
     if file is None or not hasattr(file, "name"):
         return create_map(), "⚠️ No file uploaded."
 
+    print(f"📤 Received new file: {file.name}")
     uploaded_csv = file
 
-    # Optional: re-clean folders when uploading new points
     shutil.rmtree("predictor_rasters", ignore_errors=True)
     shutil.rmtree("outputs", ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
 
     shutil.copy(file.name, "inputs/presence_points.csv")
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
-
-def fetch_predictors(selected_layers, selected_classes):
-    global uploaded_csv
-    if not selected_layers:
-        return "⚠️ No predictors selected.", gr.update(choices=[]), create_map(uploaded_csv)
-
-    if uploaded_csv is not None:
-        shutil.copy(uploaded_csv.name, "inputs/presence_points.csv")
-
-    os.environ["SELECTED_LAYERS"] = ",".join(selected_layers)
-    class_ids = [s.split("–")[0].strip() for s in selected_classes]
-    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(class_ids)
-
-    os.system("python scripts/fetch_predictors.py")
-
-    os.makedirs("predictor_rasters/wgs84", exist_ok=True)
-    for tif in os.listdir("predictor_rasters"):
-        if tif.endswith(".tif"):
-            src_path = os.path.join("predictor_rasters", tif)
-            dst_path = os.path.join("predictor_rasters/wgs84", tif)
-            reproject_to_wgs84(src_path, dst_path)
-
-    available_files = [f for f in os.listdir("predictor_rasters") if f.endswith(".tif")]
-    return "✅ Predictors fetched.", gr.update(choices=available_files), create_map(uploaded_csv)
-
-
-def run_model():
-    if uploaded_csv is None:
-        return "⚠️ Please upload presence points first.", create_map(uploaded_csv)
-
-    shutil.copy(uploaded_csv.name, "inputs/presence_points.csv")
-    os.system("python scripts/run_logistic_sdm.py")
-
-    if os.path.exists("outputs/suitability_map.tif"):
-        reproject_to_wgs84(
-            "outputs/suitability_map.tif",
-            "outputs/suitability_map_wgs84.tif"
-        )
-        return "✅ Model trained and reprojected!", create_map(uploaded_csv)
-    else:
-        return "❗ Model ran but no suitability map was generated.", create_map(uploaded_csv)
-
-# --- Gradio UI ---
-
-with gr.Blocks() as app:
-    gr.Markdown("## 🧬 Spatchat-SDM: Global Species Distribution Modeling")
-
-    map_output = gr.HTML(value=create_map(), label="🗺️ Live Preview")
-
-    with gr.Row():
-        uploader = gr.File(label="📥 Upload Presence Points (CSV)")
-        upload_status = gr.Markdown()
-
-    with gr.Row():
-        layer_selector = gr.CheckboxGroup(
-            label="🌎 Select Environmental Predictors",
-            choices=[f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"]
-        )
-        landcover_class_selector = gr.CheckboxGroup(
-            label="🧮 Landcover Classes (only if 'landcover' is selected)",
-            choices=landcover_choices,
-            visible=False
-        )
-
-    with gr.Row():
-        fetch_btn = gr.Button("📥 Fetch Predictors")
-        fetch_status = gr.Markdown()
-
-    with gr.Row():
-        run_btn = gr.Button("🚀 Run SDM Model")
-        run_status = gr.Markdown()
-
-    with gr.Row():
-        show_map_btn = gr.Button("🎯 Show Suitability Map")
-
-    def toggle_landcover_class_selector(selected):
-        return gr.update(visible="landcover" in selected)
-
-    layer_selector.change(fn=toggle_landcover_class_selector, inputs=[layer_selector], outputs=[landcover_class_selector])
-    uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
-    fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector, landcover_class_selector], outputs=[fetch_status, layer_selector, map_output])
-    run_btn.click(fn=run_model, outputs=[run_status, map_output])
-    show_map_btn.click(fn=create_map, outputs=[map_output])
-
-app.launch()
