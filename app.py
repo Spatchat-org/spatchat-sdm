@@ -211,6 +211,7 @@ with gr.Blocks() as app:
         return gr.update(visible="landcover" in selected)
 
     def fetch_predictors(selected_layers, selected_classes):
+        selected_layers = list(dict.fromkeys(selected_layers))  # Deduplicate to prevent Gradio crash
         os.environ["SELECTED_LAYERS"] = ",".join(selected_layers)
         os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join([c.split("–")[0].strip() for c in selected_classes])
         os.system("python scripts/fetch_predictors.py")
