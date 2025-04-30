@@ -1,9 +1,14 @@
-import ee
-import json
 import os
-import geemap
-import pandas as pd
+import json
 import time
+import ee
+import geemap
+import rasterio
+import numpy as np
+from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
+from rasterio.crs import CRS
+import pandas as pd
 
 # --- Authenticate Earth Engine using Hugging Face Secret ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -32,20 +37,28 @@ if not {'latitude', 'longitude'}.issubset(df.columns):
 
 print(f"📍 Loaded {len(df)} presence points.")
 
-# --- Compute bounding box (expanded) ---
+# --- Compute study area bounding box (with buffer) ---
 min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
 min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
 buffer = 0.25
 region = ee.Geometry.BBox(min_lon - buffer, min_lat - buffer, max_lon + buffer, max_lat + buffer)
 
-# --- Ensure output folder exists ---
-os.makedirs("predictor_rasters", exist_ok=True)
+# --- Define standard projection grid ---
+res = 0.01  # degrees ~1km
+crs = CRS.from_epsg(4326)
+x_size = int((max_lon + buffer - (min_lon - buffer)) / res)
+y_size = int((max_lat + buffer - (min_lat - buffer)) / res)
+transform = from_bounds(min_lon - buffer, min_lat - buffer, max_lon + buffer, max_lat + buffer, x_size, y_size)
 
-# --- Get selected layers from environment variable ---
+# --- Fetch layer list from environment ---
 selected_layers = os.environ.get('SELECTED_LAYERS', '').split(',')
 selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES', '').split(',')
 
-# --- Define Earth Engine layer sources ---
+# --- Prepare output directories ---
+os.makedirs("predictor_rasters", exist_ok=True)
+os.makedirs("predictor_rasters/wgs84", exist_ok=True)
+
+# --- Define layer sources ---
 layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select('slope'),
@@ -56,54 +69,61 @@ layer_sources = {
 for i in range(1, 20):
     layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO").select(f"bio{str(i).zfill(2)}")
 
-# --- Export regular layers ---
+# --- Export and resample each layer ---
+def export_and_resample(image, name, is_landcover_class=False):
+    raw_path = f"predictor_rasters/{name}.tif"
+    aligned_path = f"predictor_rasters/wgs84/{name}.tif"
+
+    geemap.ee_export_image(
+        image.clip(region),
+        filename=raw_path,
+        scale=1000,
+        region=region,
+        file_per_band=False,
+        timeout=600
+    )
+    print(f"✅ Saved raw layer: {raw_path}")
+
+    with rasterio.open(raw_path) as src:
+        data = src.read(1, out_shape=(y_size, x_size), resampling=Resampling.nearest)
+        profile = src.profile.copy()
+        profile.update({
+            'height': y_size,
+            'width': x_size,
+            'transform': transform,
+            'crs': crs,
+            'driver': 'GTiff',
+            'count': 1
+        })
+        with rasterio.open(aligned_path, 'w', **profile) as dst:
+            dst.write(data, 1)
+    print(f"📐 Resampled to: {aligned_path}")
+
+# --- Regular predictors ---
 for name in selected_layers:
     if name == "landcover":
-        continue  # handled below
-    if name not in layer_sources:
-        print(f"⚠️ Layer {name} not recognized.")
         continue
-    image = layer_sources[name]
-    out_file = f"predictor_rasters/{name}.tif"
+    if name not in layer_sources:
+        print(f"⚠️ Skipping unknown layer: {name}")
+        continue
     print(f"📥 Fetching {name}...")
-    try:
-        geemap.ee_export_image(
-            image.clip(region),
-            filename=out_file,
-            scale=1000,
-            region=region,
-            file_per_band=False,
-            timeout=600
-        )
-        print(f"✅ Saved {name} to {out_file}")
-    except Exception as e:
-        print(f"❗ Failed to fetch {name}: {e}")
+    export_and_resample(layer_sources[name], name)
 
-# --- One-hot encode selected MODIS landcover classes ---
+# --- One-hot encode landcover classes ---
 if "landcover" in selected_layers and selected_classes:
-    landcover = layer_sources["landcover"]
-    print("🌱 One-hot encoding selected MODIS landcover classes...")
-
-    # Load static MODIS class name map
-    with open("modis_landcover_code_name.json") as f:
-        modis_map = json.load(f)
+    print("🌱 One-hot encoding MODIS landcover classes...")
+    landcover_img = layer_sources["landcover"]
+    label_map_path = "modis_landcover_code_name.json"
+    if os.path.exists(label_map_path):
+        with open(label_map_path) as f:
+            label_map = json.load(f)
+    else:
+        label_map = {}
 
     for code in selected_classes:
-        if not code.isdigit() or int(code) >= 250:
+        if not code.isdigit():
             continue
         code_int = int(code)
-        name = modis_map.get(str(code_int), f"class_{code_int}")
-        binary_image = landcover.eq(code_int)
-        out_file = f"predictor_rasters/{code_int}_{name}.tif"
-        try:
-            geemap.ee_export_image(
-                binary_image.clip(region),
-                filename=out_file,
-                scale=1000,
-                region=region,
-                file_per_band=False,
-                timeout=600
-            )
-            print(f"✅ Saved class {code_int}: {out_file}")
-        except Exception as e:
-            print(f"❗ Failed class {code_int}: {e}")
+        label = label_map.get(str(code_int), f"class_{code_int}")
+        binary_img = landcover_img.eq(code_int)
+        export_and_resample(binary_img, f"{code}_{label}")
