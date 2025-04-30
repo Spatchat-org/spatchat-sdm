@@ -21,6 +21,11 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 print("✅ Earth Engine authenticated using Service Account!")
 
+# --- Clean up previous session cache ---
+shutil.rmtree("predictor_rasters", ignore_errors=True)
+shutil.rmtree("outputs", ignore_errors=True)
+shutil.rmtree("inputs", ignore_errors=True)
+
 # --- Global State ---
 uploaded_csv = None
 
