@@ -169,11 +169,14 @@ def handle_upload(file):
         return create_map(), "⚠️ No file uploaded."
 
     print(f"📤 Received new file: {file.name}")
-    uploaded_csv = file
 
+    # Clear prior run cache BEFORE saving the new CSV
     shutil.rmtree("predictor_rasters", ignore_errors=True)
     shutil.rmtree("outputs", ignore_errors=True)
+    shutil.rmtree("inputs", ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
 
     shutil.copy(file.name, "inputs/presence_points.csv")
+    uploaded_csv = file
+
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
