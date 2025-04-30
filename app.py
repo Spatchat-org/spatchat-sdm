@@ -175,3 +175,16 @@ def handle_upload(file):
     shutil.copy(file.name, "inputs/presence_points.csv")
 
     return create_map(), "✅ Presence points uploaded!"
+
+# --- Gradio App Launch ---
+
+with gr.Blocks() as app:
+    gr.Markdown("## 🧬 Spatchat-SDM")
+
+    map_output = gr.HTML(value=create_map(), label="🗺️ Preview")
+    uploader = gr.File(label="📤 Upload CSV with Presence Points")
+    upload_status = gr.Markdown()
+
+    uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
+
+app.launch()
