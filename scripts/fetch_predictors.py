@@ -86,27 +86,26 @@ def export_and_reproject(image, name):
 
     with rasterio.open(raw_path) as src:
         src_data = src.read(1)
-        dst_data = np.empty((y_size, x_size), dtype=src_data.dtype)
-
-        dst_transform, _, _ = calculate_default_transform(
+        dst_transform, width, height = calculate_default_transform(
             src.crs, crs, src.width, src.height, *src.bounds
         )
+        dst_data = np.empty((height, width), dtype=src_data.dtype)
 
         reproject(
             source=src_data,
             destination=dst_data,
             src_transform=src.transform,
             src_crs=src.crs,
-            dst_transform=transform,
+            dst_transform=dst_transform,
             dst_crs=crs,
             resampling=Resampling.nearest
         )
 
         profile = src.profile.copy()
         profile.update({
-            'height': y_size,
-            'width': x_size,
-            'transform': transform,
+            'height': height,
+            'width': width,
+            'transform': dst_transform,
             'crs': crs,
             'driver': 'GTiff',
             'count': 1
