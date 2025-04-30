@@ -111,6 +111,9 @@ def create_map(presence_points=None):
 def handle_upload(file, selected_layers, selected_classes):
     global uploaded_csv
     uploaded_csv = file
+
+    os.makedirs("predictor_rasters", exist_ok=True)
+
     shutil.copy(file.name, "predictor_rasters/presence_points.csv")
     class_ids = [s.split(" –")[0].strip() for s in selected_classes]
     fetch_predictors("predictor_rasters/presence_points.csv", selected_layers, list(map(int, class_ids)))
