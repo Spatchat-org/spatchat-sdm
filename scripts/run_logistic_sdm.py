@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
+from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
 import joblib
 
@@ -18,28 +20,28 @@ lats = df['latitude'].values
 lons = df['longitude'].values
 print(f"📍 Loaded {len(df)} presence points.")
 
-# --- Load and stack predictors ---
+# --- Compute study area bounds ---
+buffer = 0.25
+min_lat, max_lat = lats.min() - buffer, lats.max() + buffer
+min_lon, max_lon = lons.min() - buffer, lons.max() + buffer
+print(f"🗺️ Study area bounds: ({min_lat}, {min_lon}) to ({max_lat}, {max_lon})")
+
+# --- Define reference raster specs ---
+res = 0.01  # approx 1km resolution
+y_size = int((max_lat - min_lat) / res)
+x_size = int((max_lon - min_lon) / res)
+transform = from_bounds(min_lon, min_lat, max_lon, max_lat, x_size, y_size)
+crs = CRS.from_epsg(4326)
+
+# --- Load and reproject predictors ---
 raster_paths = sorted([os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith(".tif")])
-base_profile = None
-base_shape = None
-base_transform = None
 layers = []
 layer_names = []
-
-# Read first raster as base
-with rasterio.open(raster_paths[0]) as base:
-    base_profile = base.profile
-    base_shape = base.shape
-    base_transform = base.transform
-    base_array = base.read(1)
-    layers.append(base_array)
-    layer_names.append(os.path.basename(raster_paths[0]))
-    print(f"🧪 {layer_names[-1]} → NaN %: {np.isnan(base_array).mean() * 100:.2f}%")
-
-# Align others to base
-for path in raster_paths[1:]:
+for path in raster_paths:
     with rasterio.open(path) as src:
-        arr = src.read(1, out_shape=base_shape, resampling=Resampling.nearest)
+        arr = src.read(1, out_shape=(y_size, x_size), resampling=Resampling.nearest)
+        if src.crs != crs or src.transform != transform:
+            print(f"📐 Resampling {os.path.basename(path)} to match reference shape and transform.")
         print(f"🧪 {os.path.basename(path)} → NaN %: {np.isnan(arr).mean() * 100:.2f}%")
         layers.append(arr)
         layer_names.append(os.path.basename(path))
@@ -48,7 +50,7 @@ stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract values at presence points ---
-inv_transform = ~base_transform
+inv_transform = ~transform
 presence_samples = []
 for lat, lon in zip(lats, lons):
     col, row = inv_transform * (lon, lat)
@@ -92,7 +94,15 @@ pred_map[valid_mask] = model.predict_proba(flat_stack[valid_mask])[:, 1]
 raster_pred = pred_map.reshape(stack.shape[:2])
 
 # --- Save suitability map ---
-base_profile.update(dtype=rasterio.float32, count=1)
-with rasterio.open(output_map, 'w', **base_profile) as dst:
+profile = {
+    'driver': 'GTiff',
+    'height': raster_pred.shape[0],
+    'width': raster_pred.shape[1],
+    'count': 1,
+    'dtype': rasterio.float32,
+    'crs': crs,
+    'transform': transform
+}
+with rasterio.open(output_map, 'w', **profile) as dst:
     dst.write(raster_pred.astype(rasterio.float32), 1)
 print(f"🎯 Suitability map saved to {output_map}")
