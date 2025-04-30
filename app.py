@@ -9,6 +9,7 @@ import json
 import ee
 import joblib
 import shutil
+import subprocess
 
 # --- Authenticate Earth Engine using Hugging Face Secret ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -104,14 +105,14 @@ def create_map():
     safe_html = html_lib.escape(raw_html)
     return f"""<iframe srcdoc=\"{safe_html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"""
 
-map_output = gr.HTML(value=create_map(), label="🗺️ Preview")
+map_output = gr.HTML(value=create_map(), label="🗌️ Preview")
 
 # --- Launch app ---
 with gr.Blocks() as demo:
     gr.Markdown("""# SpatChat SDM – Species Distribution Modeling App""")
     with gr.Row():
         with gr.Column(scale=1):
-            upload_input = gr.File(label="📤 Upload Presence CSV", file_types=['.csv'])
+            upload_input = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
             layer_selector = gr.CheckboxGroup(
                 choices=[
                     "bio1", "bio2", "bio3", "bio4", "bio5", "bio6", "bio7", "bio8", "bio9",
@@ -134,7 +135,7 @@ with gr.Blocks() as demo:
         if file is None or not hasattr(file, "name"):
             return create_map(), "⚠️ No file uploaded."
 
-        print(f"📤 Received new file: {file.name}")
+        print(f"📄 Received new file: {file.name}")
 
         shutil.rmtree("predictor_rasters", ignore_errors=True)
         shutil.rmtree("outputs", ignore_errors=True)
@@ -144,6 +145,33 @@ with gr.Blocks() as demo:
         shutil.copy(file.name, "inputs/presence_points.csv")
         return create_map(), "✅ Presence points uploaded!"
 
+    def run_fetch(selected_layers, selected_landcover):
+        if not selected_layers:
+            return status_output.value, "⚠️ Please select at least one layer."
+
+        os.environ['SELECTED_LAYERS'] = ','.join(selected_layers)
+        selected_codes = [c.split(" – ")[0] for c in selected_landcover]
+        os.environ['SELECTED_LANDCOVER_CLASSES'] = ','.join(selected_codes)
+
+        result = subprocess.run(["python", "scripts/fetch_predictors.py"], capture_output=True, text=True)
+        print(result.stdout)
+        print(result.stderr)
+        if result.returncode == 0:
+            return create_map(), "✅ Predictors fetched successfully."
+        else:
+            return status_output.value, "❌ Fetching failed. Check logs."
+
+    def run_model():
+        result = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+        print(result.stdout)
+        print(result.stderr)
+        if result.returncode == 0:
+            return create_map(), "✅ Model ran successfully."
+        else:
+            return status_output.value, "❌ Model run failed. Check logs."
+
     upload_input.change(fn=handle_upload, inputs=upload_input, outputs=[map_output, status_output])
+    fetch_button.click(fn=run_fetch, inputs=[layer_selector, landcover_selector], outputs=[map_output, status_output])
+    run_button.click(fn=run_model, outputs=[map_output, status_output])
 
     demo.launch()
