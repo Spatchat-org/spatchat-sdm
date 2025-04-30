@@ -133,6 +133,29 @@ def create_map(presence_points=None):
                 except Exception as e:
                     print(f"⚠️ Error displaying raster {tif}: {e}")
 
+    # Show suitability map if it exists
+    suitability_path = "outputs/suitability_map_wgs84.tif"
+    if os.path.exists(suitability_path):
+        try:
+            with rasterio.open(suitability_path) as src:
+                bounds = src.bounds
+                img = src.read(1)
+
+                if np.nanmin(img) != np.nanmax(img):
+                    img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
+
+                folium.raster_layers.ImageOverlay(
+                    image=img,
+                    bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                    opacity=0.6,
+                    colormap=lambda x: (1, 0, 0, x),
+                    name="🎯 Suitability Map"
+                ).add_to(m)
+
+                m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
+        except Exception as e:
+            print(f"⚠️ Could not load suitability map: {e}")
+
     folium.LayerControl(collapsed=False).add_to(m)
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
@@ -177,39 +200,9 @@ def run_model():
             "outputs/suitability_map.tif",
             "outputs/suitability_map_wgs84.tif"
         )
-        return "✅ Model trained and reprojected!"
+        return "✅ Model trained and reprojected!", create_map(uploaded_csv)
     else:
-        return "❗ Model ran but no suitability map was generated."
-
-def show_suitability_map():
-    path = "outputs/suitability_map_wgs84.tif"
-    if not os.path.exists(path):
-        return "❗ No suitability map available yet."
-
-    with rasterio.open(path) as src:
-        print(f"🗺️ Suitability map CRS: {src.crs}")
-        bounds = src.bounds
-        img = src.read(1)
-        m = folium.Map(control_scale=True)
-        folium.TileLayer('OpenStreetMap').add_to(m)
-
-        if np.nanmin(img) != np.nanmax(img):
-            img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
-
-        folium.raster_layers.ImageOverlay(
-            image=img,
-            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-            opacity=0.6,
-            colormap=lambda x: (1, 0, 0, x),
-            name="🎯 Suitability Map"
-        ).add_to(m)
-
-        m.fit_bounds([[bounds.bottom, bounds.left], [bounds.top, bounds.right]])
-        folium.LayerControl(collapsed=False).add_to(m)
-
-    raw_html = m.get_root().render()
-    safe_html = html_lib.escape(raw_html)
-    return f"""<iframe srcdoc="{safe_html}" style="width:100%; height:600px; border:none;"></iframe>"""
+        return "❗ Model ran but no suitability map was generated.", create_map(uploaded_csv)
 
 # --- Gradio App Layout ---
 
@@ -243,7 +236,6 @@ with gr.Blocks() as app:
 
     with gr.Row():
         show_map_btn = gr.Button("🎯 Show Suitability Map")
-        suitability_map_output = gr.HTML()
 
     # --- Interactions ---
     def toggle_landcover_class_selector(selected):
@@ -252,8 +244,8 @@ with gr.Blocks() as app:
     layer_selector.change(fn=toggle_landcover_class_selector, inputs=[layer_selector], outputs=[landcover_class_selector])
     uploader.change(fn=handle_upload, inputs=[uploader], outputs=[map_output, upload_status])
     fetch_btn.click(fn=fetch_predictors, inputs=[layer_selector, landcover_class_selector], outputs=[fetch_status, layer_selector, map_output])
-    run_btn.click(fn=run_model, outputs=[run_status])
-    show_map_btn.click(fn=show_suitability_map, outputs=[suitability_map_output])
+    run_btn.click(fn=run_model, outputs=[run_status, map_output])
+    show_map_btn.click(fn=create_map, outputs=[map_output])
 
 # --- Launch App ---
 app.launch()
