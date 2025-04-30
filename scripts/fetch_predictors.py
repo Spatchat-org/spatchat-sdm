@@ -5,7 +5,7 @@ import ee
 import geemap
 import rasterio
 import numpy as np
-from rasterio.warp import reproject, Resampling, calculate_default_transform
+from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 import pandas as pd
@@ -86,26 +86,23 @@ def export_and_reproject(image, name):
 
     with rasterio.open(raw_path) as src:
         src_data = src.read(1)
-        dst_transform, width, height = calculate_default_transform(
-            src.crs, crs, src.width, src.height, *src.bounds
-        )
-        dst_data = np.empty((height, width), dtype=src_data.dtype)
+        dst_data = np.empty((y_size, x_size), dtype=src_data.dtype)
 
         reproject(
             source=src_data,
             destination=dst_data,
             src_transform=src.transform,
             src_crs=src.crs,
-            dst_transform=dst_transform,
+            dst_transform=transform,
             dst_crs=crs,
             resampling=Resampling.nearest
         )
 
         profile = src.profile.copy()
         profile.update({
-            'height': height,
-            'width': width,
-            'transform': dst_transform,
+            'height': y_size,
+            'width': x_size,
+            'transform': transform,
             'crs': crs,
             'driver': 'GTiff',
             'count': 1
