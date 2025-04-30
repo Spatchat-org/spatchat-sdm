@@ -11,6 +11,7 @@ import json
 import ee
 import joblib
 import shutil
+import subprocess                   # ← added
 import matplotlib.cm as mpl_cm
 
 # --- Authenticate Earth Engine using Hugging Face Secret ---
@@ -64,7 +65,13 @@ def create_map():
             latlons = df[['latitude','longitude']].values.tolist()
             layer = folium.FeatureGroup(name="🟦 Presence Points")
             for lat, lon in latlons:
-                folium.CircleMarker([lat, lon], radius=4, color='blue', fill=True, fill_opacity=0.8).add_to(layer)
+                folium.CircleMarker(
+                    [lat, lon],
+                    radius=4,
+                    color='blue',
+                    fill=True,
+                    fill_opacity=0.8
+                ).add_to(layer)
             layer.add_to(m)
             if latlons:
                 m.fit_bounds(latlons)
@@ -73,25 +80,25 @@ def create_map():
     rasters_dir = "predictor_rasters/wgs84"
     if os.path.isdir(rasters_dir):
         for fname in sorted(os.listdir(rasters_dir)):
-            if fname.endswith('.tif'):
-                path = os.path.join(rasters_dir, fname)
-                with rasterio.open(path) as src:
-                    img = src.read(1)
-                    bounds = src.bounds
-                # normalize
-                vmin, vmax = np.nanmin(img), np.nanmax(img)
-                if vmin == vmax:
-                    continue
-                norm = (img - vmin) / (vmax - vmin)
-                # apply a matplotlib colormap
-                cmap = mpl_cm.get_cmap('viridis')
-                rgba = cmap(norm)  # shape (h, w, 4)
-                folium.raster_layers.ImageOverlay(
-                    image=rgba,
-                    bounds=[[bounds.bottom, bounds.left],[bounds.top, bounds.right]],
-                    opacity=1.0,
-                    name=f"🟨 {fname}"
-                ).add_to(m)
+            if not fname.endswith('.tif'):
+                continue
+            path = os.path.join(rasters_dir, fname)
+            with rasterio.open(path) as src:
+                img = src.read(1)
+                bounds = src.bounds
+            vmin, vmax = np.nanmin(img), np.nanmax(img)
+            if vmin == vmax:
+                continue
+            norm = (img - vmin) / (vmax - vmin)
+            cmap = mpl_cm.get_cmap('viridis')
+            rgba = cmap(norm)  # (h, w, 4)
+            folium.raster_layers.ImageOverlay(
+                image=rgba,
+                bounds=[[bounds.bottom, bounds.left],
+                        [bounds.top,    bounds.right]],
+                opacity=1.0,
+                name=f"🟨 {fname}"
+            ).add_to(m)
 
     # Suitability map
     suit_path = "outputs/suitability_map_wgs84.tif"
@@ -105,81 +112,90 @@ def create_map():
         rgba = cmap(norm)
         folium.raster_layers.ImageOverlay(
             image=rgba,
-            bounds=[[bounds.bottom, bounds.left],[bounds.top, bounds.right]],
+            bounds=[[bounds.bottom, bounds.left],
+                    [bounds.top,    bounds.right]],
             opacity=0.7,
             name="🎯 Suitability Map"
         ).add_to(m)
-        m.fit_bounds([[bounds.bottom, bounds.left],[bounds.top, bounds.right]])
+        m.fit_bounds([[bounds.bottom, bounds.left],
+                      [bounds.top,    bounds.right]])
 
     folium.LayerControl(collapsed=False).add_to(m)
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
-# --- Launch app ---
+# --- Build and launch Gradio UI ---
 with gr.Blocks() as demo:
-    gr.Markdown("""# SpatChat SDM – Species Distribution Modeling App""")
+    gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
+
     with gr.Row():
         with gr.Column(scale=1):
-            upload_input = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
-            layer_selector = gr.CheckboxGroup(
-                choices=[
-                    "bio1", "bio2", "bio3", "bio4", "bio5", "bio6", "bio7", "bio8", "bio9",
-                    "bio10", "bio11", "bio12", "bio13", "bio14", "bio15", "bio16", "bio17",
-                    "bio18", "bio19", "elevation", "slope", "aspect", "ndvi", "landcover"
-                ],
-                label="🧬 Environmental Layers"
-            )
-            landcover_selector = gr.CheckboxGroup(
-                choices=landcover_choices,
-                label="🌿 MODIS Landcover Classes (One-hot Encoded)"
-            )
-            fetch_button = gr.Button("🌐 Fetch Predictors")
-            run_button = gr.Button("🧠 Run Model")
+            upload_input      = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
+            layer_selector    = gr.CheckboxGroup(
+                                    choices=[
+                                        *[f"bio{i}" for i in range(1,20)],
+                                        "elevation","slope","aspect","ndvi","landcover"
+                                    ],
+                                    label="🧬 Environmental Layers"
+                                )
+            landcover_selector= gr.CheckboxGroup(
+                                    choices=landcover_choices,
+                                    label="🌿 MODIS Landcover Classes (One-hot)"
+                                )
+            fetch_button      = gr.Button("🌐 Fetch Predictors")
+            run_button        = gr.Button("🧠 Run Model")
+
         with gr.Column(scale=3):
-            map_output.render()
+            # ← define map_output once, with initial empty map
+            map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
             status_output = gr.Textbox(label="Status", interactive=False)
 
+    # --- Callbacks ---
+
     def handle_upload(file):
-        if file is None or not hasattr(file, "name"):
+        if not file or not hasattr(file, "name"):
             return create_map(), "⚠️ No file uploaded."
-
-        print(f"📄 Received new file: {file.name}")
-
         shutil.rmtree("predictor_rasters", ignore_errors=True)
         shutil.rmtree("outputs", ignore_errors=True)
         shutil.rmtree("inputs", ignore_errors=True)
         os.makedirs("inputs", exist_ok=True)
-
         shutil.copy(file.name, "inputs/presence_points.csv")
         return create_map(), "✅ Presence points uploaded!"
 
     def run_fetch(selected_layers, selected_landcover):
         if not selected_layers:
-            return status_output.value, "⚠️ Please select at least one layer."
-
+            return create_map(), "⚠️ Select at least one predictor."
         os.environ['SELECTED_LAYERS'] = ','.join(selected_layers)
-        selected_codes = [c.split(" – ")[0] for c in selected_landcover]
-        os.environ['SELECTED_LANDCOVER_CLASSES'] = ','.join(selected_codes)
-
-        result = subprocess.run(["python", "scripts/fetch_predictors.py"], capture_output=True, text=True)
-        print(result.stdout)
-        print(result.stderr)
-        if result.returncode == 0:
-            return create_map(), "✅ Predictors fetched successfully."
+        codes = [c.split(" – ")[0] for c in selected_landcover]
+        os.environ['SELECTED_LANDCOVER_CLASSES'] = ','.join(codes)
+        res = subprocess.run(
+            ["python", "scripts/fetch_predictors.py"],
+            capture_output=True, text=True
+        )
+        print(res.stdout, res.stderr)
+        if res.returncode==0:
+            return create_map(), "✅ Predictors fetched."
         else:
-            return status_output.value, "❌ Fetching failed. Check logs."
+            return create_map(), "❌ Fetch failed; see logs."
 
     def run_model():
-        result = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
-        print(result.stdout)
-        print(result.stderr)
-        if result.returncode == 0:
-            return create_map(), "✅ Model ran successfully."
+        res = subprocess.run(
+            ["python", "scripts/run_logistic_sdm.py"],
+            capture_output=True, text=True
+        )
+        print(res.stdout, res.stderr)
+        if res.returncode==0:
+            return create_map(), "✅ Model completed."
         else:
-            return status_output.value, "❌ Model run failed. Check logs."
+            return create_map(), "❌ Model run failed."
 
-    upload_input.change(fn=handle_upload, inputs=upload_input, outputs=[map_output, status_output])
-    fetch_button.click(fn=run_fetch, inputs=[layer_selector, landcover_selector], outputs=[map_output, status_output])
-    run_button.click(fn=run_model, outputs=[map_output, status_output])
+    upload_input.change(fn=handle_upload,
+                        inputs=[upload_input],
+                        outputs=[map_output, status_output])
+    fetch_button.click(fn=run_fetch,
+                       inputs=[layer_selector, landcover_selector],
+                       outputs=[map_output, status_output])
+    run_button.click(fn=run_model,
+                     outputs=[map_output, status_output])
 
     demo.launch()
