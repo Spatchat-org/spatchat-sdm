@@ -16,7 +16,7 @@ credentials = ee.ServiceAccountCredentials(
     email=service_account_info['client_email'],
     key_data=json.dumps(service_account_info)
 )
-ee.Initialize(credentials, project='ee-hoyiwan')
+ee.Initialize(credentials)
 print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
 
 # --- Wait for presence points to appear ---
