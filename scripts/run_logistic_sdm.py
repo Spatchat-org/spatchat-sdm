@@ -53,8 +53,8 @@ print(f"📍 Presence samples: {presence_samples.shape}")
 # --- Sample background ---
 np.random.seed(42)
 flat_stack = stack.reshape(-1, stack.shape[-1])
-mask = ~np.any(np.isnan(flat_stack), axis=1)
-background_pool = flat_stack[mask]
+valid_mask = ~np.any(np.isnan(flat_stack), axis=1)
+background_pool = flat_stack[valid_mask]
 background_samples = background_pool[np.random.choice(len(background_pool), size=5 * len(presence_samples), replace=False)]
 print(f"🌎 Background samples: {background_samples.shape}")
 
@@ -73,10 +73,9 @@ joblib.dump(model, "outputs/logistic_model.pkl")
 print("🧠 Logistic regression model trained.")
 
 # --- Predict across the raster stack ---
-flat_pred = model.predict_proba(flat_stack)[:, 1]
-map_pred = np.full(flat_stack.shape[0], np.nan)
-map_pred[mask] = flat_pred
-raster_pred = map_pred.reshape(stack.shape[:2])
+pred_map = np.full(flat_stack.shape[0], np.nan)
+pred_map[valid_mask] = model.predict_proba(flat_stack[valid_mask])[:, 1]
+raster_pred = pred_map.reshape(stack.shape[:2])
 
 # --- Save suitability map ---
 profile.update(dtype=rasterio.float32, count=1)
