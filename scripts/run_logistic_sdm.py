@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import rasterio
+from rasterio.enums import Resampling
 from sklearn.linear_model import LogisticRegression
 import joblib
 
@@ -18,23 +19,36 @@ lons = df['longitude'].values
 print(f"📍 Loaded {len(df)} presence points.")
 
 # --- Load and stack predictors ---
+raster_paths = sorted([os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith(".tif")])
+base_profile = None
+base_shape = None
+base_transform = None
 layers = []
 layer_names = []
-for fname in sorted(os.listdir(raster_dir)):
-    if fname.endswith(".tif"):
-        path = os.path.join(raster_dir, fname)
-        with rasterio.open(path) as src:
-            print(f"🧪 {fname} → NaN %: {np.isnan(src.read(1)).mean() * 100:.2f}%")
-            arr = src.read(1)
-            layers.append(arr)
-            layer_names.append(fname)
-            profile = src.profile
+
+# Read first raster as base
+with rasterio.open(raster_paths[0]) as base:
+    base_profile = base.profile
+    base_shape = base.shape
+    base_transform = base.transform
+    base_array = base.read(1)
+    layers.append(base_array)
+    layer_names.append(os.path.basename(raster_paths[0]))
+    print(f"🧪 {layer_names[-1]} → NaN %: {np.isnan(base_array).mean() * 100:.2f}%")
+
+# Align others to base
+for path in raster_paths[1:]:
+    with rasterio.open(path) as src:
+        arr = src.read(1, out_shape=base_shape, resampling=Resampling.nearest)
+        print(f"🧪 {os.path.basename(path)} → NaN %: {np.isnan(arr).mean() * 100:.2f}%")
+        layers.append(arr)
+        layer_names.append(os.path.basename(path))
+
 stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract values at presence points ---
-transform = profile["transform"]
-inv_transform = ~transform
+inv_transform = ~base_transform
 presence_samples = []
 for lat, lon in zip(lats, lons):
     col, row = inv_transform * (lon, lat)
@@ -78,7 +92,7 @@ pred_map[valid_mask] = model.predict_proba(flat_stack[valid_mask])[:, 1]
 raster_pred = pred_map.reshape(stack.shape[:2])
 
 # --- Save suitability map ---
-profile.update(dtype=rasterio.float32, count=1)
-with rasterio.open(output_map, 'w', **profile) as dst:
+base_profile.update(dtype=rasterio.float32, count=1)
+with rasterio.open(output_map, 'w', **base_profile) as dst:
     dst.write(raster_pred.astype(rasterio.float32), 1)
 print(f"🎯 Suitability map saved to {output_map}")
