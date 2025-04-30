@@ -71,10 +71,35 @@ modis_landcover_code_name = {
 with open("modis_landcover_code_name.json", "w") as f:
     json.dump(modis_landcover_code_name, f)
 
-# --- Placeholder map function until layers are fetched ---
+# --- Generate map preview ---
 def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
+
+    presence_path = "inputs/presence_points.csv"
+    if os.path.exists(presence_path):
+        try:
+            df = pd.read_csv(presence_path)
+            if {'latitude', 'longitude'}.issubset(df.columns):
+                latlons = []
+                layer = folium.FeatureGroup(name="🟦 Presence Points")
+                for _, row in df.iterrows():
+                    latlon = [row['latitude'], row['longitude']]
+                    latlons.append(latlon)
+                    folium.CircleMarker(
+                        location=latlon,
+                        radius=3,
+                        color='blue',
+                        fill=True,
+                        fill_opacity=0.7
+                    ).add_to(layer)
+                layer.add_to(m)
+                if latlons:
+                    m.fit_bounds(latlons)
+        except Exception as e:
+            print(f"⚠️ Error reading CSV: {e}")
+
+    folium.LayerControl(collapsed=False).add_to(m)
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
     return f"""<iframe srcdoc=\"{safe_html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"""
@@ -87,6 +112,18 @@ with gr.Blocks() as demo:
     with gr.Row():
         with gr.Column(scale=1):
             upload_input = gr.File(label="📤 Upload Presence CSV", file_types=['.csv'])
+            layer_selector = gr.CheckboxGroup(
+                choices=[
+                    "bio1", "bio2", "bio3", "bio4", "bio5", "bio6", "bio7", "bio8", "bio9",
+                    "bio10", "bio11", "bio12", "bio13", "bio14", "bio15", "bio16", "bio17",
+                    "bio18", "bio19", "elevation", "slope", "aspect", "ndvi", "landcover"
+                ],
+                label="🧬 Environmental Layers"
+            )
+            landcover_selector = gr.CheckboxGroup(
+                choices=landcover_choices,
+                label="🌿 MODIS Landcover Classes (One-hot Encoded)"
+            )
             fetch_button = gr.Button("🌐 Fetch Predictors")
             run_button = gr.Button("🧠 Run Model")
         with gr.Column(scale=3):
