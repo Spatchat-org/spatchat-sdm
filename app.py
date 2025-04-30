@@ -186,10 +186,10 @@ def handle_upload(file):
     print(f"📤 Received new file: {file.name}")
     shutil.rmtree("predictor_rasters", ignore_errors=True)
     shutil.rmtree("outputs", ignore_errors=True)
-    shutil.rmtree("inputs", ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
     shutil.copy(file.name, "inputs/presence_points.csv")
     return create_map(), "✅ Presence points uploaded!"
+
 
 def fetch_predictors(layers, classes):
     os.environ['SELECTED_LAYERS'] = ','.join(layers)
@@ -201,6 +201,7 @@ def fetch_predictors(layers, classes):
             reproject_to_wgs84(os.path.join("predictor_rasters", tif), os.path.join("predictor_rasters/wgs84", tif))
     return "✅ Predictors fetched.", gr.update(choices=layers), create_map()
 
+
 def run_model():
     os.system("python scripts/run_logistic_sdm.py")
     if os.path.exists("outputs/suitability_map.tif"):
@@ -208,6 +209,7 @@ def run_model():
         return "✅ Model trained and reprojected!", create_map()
     else:
         return "❗ Model ran but no suitability map was generated.", create_map()
+
 
 def toggle_landcover_class_selector(selected):
     return gr.update(visible="landcover" in selected)
