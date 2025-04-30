@@ -2,6 +2,10 @@
 # app.py
 # =====================
 
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), "scripts"))
+
 import gradio as gr
 import geemap.foliumap as foliumap
 import folium
@@ -14,8 +18,8 @@ import json
 import shutil
 import uuid
 
-from scripts.predictor_fetcher import fetch_predictors
-from scripts.sdm_runner import run_logistic_sdm
+from predictor_fetcher import fetch_predictors
+from sdm_runner import run_logistic_sdm
 
 import ee
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
