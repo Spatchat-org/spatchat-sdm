@@ -1,5 +1,3 @@
-this is run_logistic_sdm.py
-
 import os
 import glob
 import numpy as np
