@@ -176,7 +176,7 @@ def handle_upload(file):
     shutil.rmtree("inputs", ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
 
-    shutil.copy(file.name, "inputs/presence_points.csv")
     uploaded_csv = file
+    shutil.copy(file.name, "inputs/presence_points.csv")
 
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
