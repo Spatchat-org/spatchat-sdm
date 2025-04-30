@@ -10,7 +10,7 @@ import joblib
 
 # --- Paths ---
 csv_path = "inputs/presence_points.csv"
-raster_dir = "predictor_rasters/wgs84"
+raster_dir = "predictor_rasters"
 output_map = "outputs/suitability_map.tif"
 os.makedirs("outputs", exist_ok=True)
 
