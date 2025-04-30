@@ -83,7 +83,7 @@ def create_map():
             df = pd.read_csv(presence_path)
             if {'latitude', 'longitude'}.issubset(df.columns):
                 latlons = []
-                layer = folium.FeatureGroup(name="🟦 Presence Points")
+                layer = folium.FeatureGroup(name="🏦 Presence Points")
                 for _, row in df.iterrows():
                     latlon = [row['latitude'], row['longitude']]
                     latlons.append(latlon)
@@ -100,12 +100,51 @@ def create_map():
         except Exception as e:
             print(f"⚠️ Error reading CSV: {e}")
 
+    raster_dir = "predictor_rasters/wgs84"
+    if os.path.exists(raster_dir):
+        for tif in os.listdir(raster_dir):
+            if tif.endswith(".tif"):
+                try:
+                    path = os.path.join(raster_dir, tif)
+                    with rasterio.open(path) as src:
+                        img = src.read(1)
+                        if np.nanmin(img) != np.nanmax(img):
+                            img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
+                        bounds = src.bounds
+                        folium.raster_layers.ImageOverlay(
+                            image=img,
+                            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                            opacity=0.4,
+                            colormap=lambda x: (0, 1, 0, x),
+                            name=f"📏 {tif}"
+                        ).add_to(m)
+                except Exception as e:
+                    print(f"⚠️ Error displaying raster {tif}: {e}")
+
+    suitability_path = "outputs/suitability_map.tif"
+    if os.path.exists(suitability_path):
+        try:
+            with rasterio.open(suitability_path) as src:
+                bounds = src.bounds
+                img = src.read(1)
+                if np.nanmin(img) != np.nanmax(img):
+                    img = (img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img))
+                folium.raster_layers.ImageOverlay(
+                    image=img,
+                    bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                    opacity=0.6,
+                    colormap=lambda x: (1, 0, 0, x),
+                    name="🎯 Suitability Map"
+                ).add_to(m)
+        except Exception as e:
+            print(f"⚠️ Could not load suitability map: {e}")
+
     folium.LayerControl(collapsed=False).add_to(m)
     raw_html = m.get_root().render()
     safe_html = html_lib.escape(raw_html)
     return f"""<iframe srcdoc=\"{safe_html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"""
 
-map_output = gr.HTML(value=create_map(), label="🗌️ Preview")
+map_output = gr.HTML(value=create_map(), label="🗜️ Preview")
 
 # --- Launch app ---
 with gr.Blocks() as demo:
