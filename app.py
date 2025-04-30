@@ -24,6 +24,9 @@ print("✅ Earth Engine authenticated using Service Account!")
 # --- Global State ---
 uploaded_csv = None
 
+# --- Ensure input directory exists ---
+os.makedirs("inputs", exist_ok=True)
+
 # --- Landcover Labels ---
 landcover_options = {
     0: "water",
@@ -162,8 +165,8 @@ def create_map(presence_points=None):
 def handle_upload(file):
     global uploaded_csv
     uploaded_csv = file
-    os.makedirs("predictor_rasters", exist_ok=True)
-    shutil.copy(file.name, "predictor_rasters/presence_points.csv")
+    os.makedirs("inputs", exist_ok=True)
+    shutil.copy(file.name, "inputs/presence_points.csv")
     return create_map(uploaded_csv), "✅ Presence points uploaded!"
 
 
@@ -173,7 +176,7 @@ def fetch_predictors(selected_layers, selected_classes):
         return "⚠️ No predictors selected.", gr.update(choices=[]), create_map(uploaded_csv)
 
     if uploaded_csv is not None:
-        shutil.copy(uploaded_csv.name, "predictor_rasters/presence_points.csv")
+        shutil.copy(uploaded_csv.name, "inputs/presence_points.csv")
 
     os.environ["SELECTED_LAYERS"] = ",".join(selected_layers)
     class_ids = [s.split("–")[0].strip() for s in selected_classes]
@@ -196,8 +199,7 @@ def run_model():
     if uploaded_csv is None:
         return "⚠️ Please upload presence points first.", create_map(uploaded_csv)
 
-    shutil.copy(uploaded_csv.name, "predictor_rasters/presence_points.csv")
-
+    shutil.copy(uploaded_csv.name, "inputs/presence_points.csv")
     os.system("python scripts/run_logistic_sdm.py")
 
     if os.path.exists("outputs/suitability_map.tif"):
