@@ -1,5 +1,3 @@
-this is fetch_predictors.py
-
 import ee
 import json
 import os
