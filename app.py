@@ -167,8 +167,7 @@ with gr.Blocks() as demo:
                                  )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
-            download_button    = gr.DownloadButton("📥 Download Results",
-                                                  file_types=[".zip"])
+            download_button    = gr.DownloadButton("📥 Download Results")
 
         with gr.Column(scale=3):
             map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
@@ -210,6 +209,6 @@ with gr.Blocks() as demo:
     fetch_button.click(run_fetch,   inputs=[layer_selector, landcover_selector],
                                          outputs=[map_output, status_output])
     run_button.click  (run_model,   outputs=[map_output, status_output])
-    download_button.click(zip_results, outputs=[download_button])
+    download_button.click(zip_results, None, download_button)
 
     demo.launch()
