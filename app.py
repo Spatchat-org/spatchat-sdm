@@ -159,7 +159,7 @@ def create_map():
 
 def zip_results():
     """Bundle predictor_rasters + outputs into spatchat_results.zip and return its path."""
-    archive = "spatchat_results.zip"
+    archive = "results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -190,7 +190,7 @@ with gr.Blocks() as demo:
             run_button         = gr.Button("🧠 Run Model")
             download_button    = gr.DownloadButton(
                                 label="📥 Download Results",
-                                file_name="spatchat_results.zip"
+                                file_name="results.zip"
                      )
 
         with gr.Column(scale=3):
