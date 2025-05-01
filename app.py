@@ -61,90 +61,82 @@ def create_map():
     folium.TileLayer('OpenStreetMap').add_to(m)
 
     # --- Presence points ---
-    presence_path = "inputs/presence_points.csv"
-    if os.path.exists(presence_path):
-        df = pd.read_csv(presence_path)
+    pp = "inputs/presence_points.csv"
+    if os.path.exists(pp):
+        df = pd.read_csv(pp)
         if {'latitude','longitude'}.issubset(df.columns):
-            latlons = df[['latitude','longitude']].values.tolist()
             pts = folium.FeatureGroup(name="🟦 Presence Points")
-            for lat, lon in latlons:
+            for lat, lon in df[['latitude','longitude']].values:
                 folium.CircleMarker(
                     [lat, lon],
-                    radius=4,
-                    color='blue',
-                    fill=True,
-                    fill_opacity=0.8
+                    radius=4, color='blue',
+                    fill=True, fill_opacity=0.8
                 ).add_to(pts)
             pts.add_to(m)
-            if latlons:
-                m.fit_bounds(latlons)
+            m.fit_bounds(df[['latitude','longitude']].values.tolist())
 
     # --- Predictor rasters ---
     rasters_dir = "predictor_rasters/wgs84"
     if os.path.isdir(rasters_dir):
         for fname in sorted(os.listdir(rasters_dir)):
-            if not fname.endswith('.tif'):
-                continue
+            if not fname.endswith('.tif'): continue
             path = os.path.join(rasters_dir, fname)
             with rasterio.open(path) as src:
                 img = src.read(1)
                 bounds = src.bounds
-
             vmin, vmax = np.nanmin(img), np.nanmax(img)
-            if vmin == vmax:
-                continue
+            if np.isclose(vmin, vmax): continue
             norm = (img - vmin) / (vmax - vmin)
             cmap = colormaps['viridis']
-            rgba = cmap(norm)  # (h, w, 4)
-
+            rgba = cmap(norm)
             folium.raster_layers.ImageOverlay(
                 image=rgba,
                 bounds=[[bounds.bottom, bounds.left],
                         [bounds.top,    bounds.right]],
                 opacity=1.0,
-                name=f"🟨 {fname} ({vmin:.2f}–{vmax:.2f})"
+                name=f"{fname} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
 
     # --- Suitability map ---
-    suit_path = "outputs/suitability_map_wgs84.tif"
-    if os.path.exists(suit_path):
-        with rasterio.open(suit_path) as src:
+    suit = "outputs/suitability_map_wgs84.tif"
+    if os.path.exists(suit):
+        with rasterio.open(suit) as src:
             img = src.read(1)
             bounds = src.bounds
-
         vmin, vmax = np.nanmin(img), np.nanmax(img)
         norm = (img - vmin) / (vmax - vmin)
         cmap = colormaps['viridis']
         rgba = cmap(norm)
-
         folium.raster_layers.ImageOverlay(
             image=rgba,
             bounds=[[bounds.bottom, bounds.left],
                     [bounds.top,    bounds.right]],
             opacity=0.7,
-            name=f"🎯 Suitability ({vmin:.2f}–{vmax:.2f})"
+            name=f"Suitability ({vmin:.2f}–{vmax:.2f})"
         ).add_to(m)
-        # zoom to suitability
         m.fit_bounds([[bounds.bottom, bounds.left],
                       [bounds.top,    bounds.right]])
 
-    # --- Universal low→high legend ---
-    low_hex  = to_hex(colormaps['viridis'](0.0))
-    high_hex = to_hex(colormaps['viridis'](1.0))
+    # --- Universal low→high legend (vertical, top‐right) ---
+    low_color  = to_hex(colormaps['viridis'](0.0))
+    high_color = to_hex(colormaps['viridis'](1.0))
     ramp = bcm.LinearColormap(
-        [low_hex, high_hex],
+        [low_color, high_color],
         vmin=0, vmax=1,
         caption="Normalized (low → high)"
-    ).to_step(2)
-    ramp.width  = 8    # thinner
-    ramp.height = 100  # shorter
+    )
+    # make it discrete into two steps, but vertical
+    ramp = ramp.to_step(2)
+    ramp.position = 'topright'
+    ramp.width  = 10    # slim bar
+    ramp.height = 100   # shorter
     ramp.add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
-# --- Build and launch Gradio UI ---
+# --- Gradio UI ---
 with gr.Blocks() as demo:
     gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
 
@@ -152,18 +144,18 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             upload_input       = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
             layer_selector     = gr.CheckboxGroup(
-                                    choices=[*[f"bio{i}" for i in range(1,20)],
-                                             "elevation","slope","aspect","ndvi","landcover"],
-                                    label="🧬 Environmental Layers"
-                                )
+                choices=[*[f"bio{i}" for i in range(1,20)], "elevation","slope","aspect","ndvi","landcover"],
+                label="🧬 Environmental Layers"
+            )
             landcover_selector = gr.CheckboxGroup(
-                                    choices=landcover_choices,
-                                    label="🌿 MODIS Landcover Classes (One-hot)"
-                                )
+                choices=landcover_choices,
+                label="🌿 MODIS Landcover Classes (One-hot)"
+            )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
+
         with gr.Column(scale=3):
-            map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
+            map_output    = gr.HTML(create_map(), label="🗺️ Map Preview")
             status_output = gr.Textbox(label="Status", interactive=False)
 
     def handle_upload(file):
@@ -182,16 +174,12 @@ with gr.Blocks() as demo:
         os.environ['SELECTED_LAYERS']            = ','.join(selected_layers)
         codes = [c.split(" – ")[0] for c in selected_landcover]
         os.environ['SELECTED_LANDCOVER_CLASSES'] = ','.join(codes)
-
         res = subprocess.run(
             ["python", "scripts/fetch_predictors.py"],
             capture_output=True, text=True
         )
         print(res.stdout, res.stderr)
-        if res.returncode == 0:
-            return create_map(), "✅ Predictors fetched."
-        else:
-            return create_map(), "❌ Fetch failed; see logs."
+        return (create_map(), "✅ Predictors fetched.") if res.returncode==0 else (create_map(), "❌ Fetch failed.")
 
     def run_model():
         res = subprocess.run(
@@ -199,24 +187,10 @@ with gr.Blocks() as demo:
             capture_output=True, text=True
         )
         print(res.stdout, res.stderr)
-        if res.returncode == 0:
-            return create_map(), "✅ Model completed."
-        else:
-            return create_map(), "❌ Model run failed."
+        return (create_map(), "✅ Model completed.") if res.returncode==0 else (create_map(), "❌ Model run failed.")
 
-    upload_input.change(
-        fn=handle_upload,
-        inputs=[upload_input],
-        outputs=[map_output, status_output],
-    )
-    fetch_button.click(
-        fn=run_fetch,
-        inputs=[layer_selector, landcover_selector],
-        outputs=[map_output, status_output],
-    )
-    run_button.click(
-        fn=run_model,
-        outputs=[map_output, status_output],
-    )
+    upload_input.change(fn=handle_upload, inputs=[upload_input], outputs=[map_output, status_output])
+    fetch_button.click(fn=run_fetch, inputs=[layer_selector, landcover_selector], outputs=[map_output, status_output])
+    run_button.click(fn=run_model, outputs=[map_output, status_output])
 
     demo.launch()
