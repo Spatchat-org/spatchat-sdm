@@ -2,10 +2,13 @@ import os
 import numpy as np
 import pandas as pd
 import rasterio
+import joblib
+import pandas as pd
+
 from rasterio.enums import Resampling
 from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
-import joblib
+from sklearn.metrics import roc_auc_score
 
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
@@ -90,6 +93,27 @@ model = LogisticRegression(max_iter=1000)
 model.fit(Xc, yc)
 joblib.dump(model, "outputs/logistic_model.pkl")
 print("🧠 Model trained.")
+
+# Compute AUC on your cleaned training data
+y_prob = model.predict_proba(X_clean)[:,1]
+auc = roc_auc_score(y_clean, y_prob)
+
+# Get feature names from your raster filenames
+coef_df = pd.DataFrame({
+    'predictor': layer_names,
+    'coefficient': model.coef_.flatten()
+})
+
+# Summary row
+summary = pd.DataFrame([{
+    'predictor': 'AUC',
+    'coefficient': auc
+}])
+
+# Combine and write
+stats_df = pd.concat([summary, coef_df], ignore_index=True)
+stats_df.to_csv("outputs/model_stats.csv", index=False)
+print("📊 Model stats saved to outputs/model_stats.csv")
 
 # --- Predict over the full grid ---
 pred_flat = np.full(flat.shape[0], np.nan)
