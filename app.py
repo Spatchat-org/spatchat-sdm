@@ -127,8 +127,8 @@ def create_map():
         caption="Normalized (low → high)"
     ).to_step(2)
     ramp.position = 'bottomright'
-    ramp.width    = 150   # narrow
-    ramp.height   = 30  # shorter
+    ramp.width    = 600   # narrow
+    ramp.height   = 600  # shorter
     ramp.add_to(m)
 
     html = html_lib.escape(m.get_root().render())
