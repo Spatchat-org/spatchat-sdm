@@ -3,73 +3,70 @@ import os
 import json
 import time
 import math
-
+import shutil
 import ee
 import geemap
-import pandas as pd
-import numpy as np
 import rasterio
+from rasterio.merge import merge
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
+import numpy as np
+import pandas as pd
 
-# 1) Authenticate Earth Engine with your HF secret
+# ——— Earth Engine auth (Service Account) —————————————————————
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
 credentials = ee.ServiceAccountCredentials(
     email=service_account_info['client_email'],
     key_data=json.dumps(service_account_info)
 )
 ee.Initialize(credentials)
-print("✅ Earth Engine authenticated with Service Account!")
 
-# 2) Wait for the presence_points.csv to appear
+print("✅ EE initialized")
+
+# ——— Wait for presence CSV —————————————————————————————
 csv_path = "inputs/presence_points.csv"
 for i in range(5):
     if os.path.exists(csv_path):
         break
-    print(f"⏳ Waiting for presence_points.csv… ({i+1}s)")
+    print(f"⏳ Waiting for {csv_path}… ({i+1}/5)")
     time.sleep(1)
 if not os.path.exists(csv_path):
-    raise FileNotFoundError("❗ 'inputs/presence_points.csv' not found after 5s.")
+    raise FileNotFoundError(f"{csv_path} not found")
 
-# 3) Load your points & compute buffered bbox
+# ——— Load points & build study‐area bbox —————————————————————
 df = pd.read_csv(csv_path)
 if not {'latitude','longitude'}.issubset(df.columns):
-    raise ValueError("❗ CSV must contain 'latitude' and 'longitude' columns.")
-min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
-min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
-buffer = 0.25  # degrees
+    raise ValueError("CSV needs columns 'latitude' & 'longitude'")
+min_lat, max_lat = df.latitude.min(), df.latitude.max()
+min_lon, max_lon = df.longitude.min(), df.longitude.max()
+buffer = 0.25
 region = ee.Geometry.BBox(
-    min_lon - buffer, min_lat - buffer,
-    max_lon + buffer, max_lat + buffer
+    min_lon-buffer, min_lat-buffer,
+    max_lon+buffer, max_lat+buffer
 )
-print(f"📍 Loaded {len(df)} points; study area = "
-      f"{min_lat-buffer:.4f},{min_lon-buffer:.4f} → "
-      f"{max_lat+buffer:.4f},{max_lon+buffer:.4f}")
+print("📍 Points:", len(df),
+      "|  bbox:", (min_lat-buffer, min_lon-buffer),
+                "→", (max_lat+buffer, max_lon+buffer))
 
-# 4) Build a “master grid” in EPSG:4326 at 30 m resolution
-#    Approx degrees per meter at the equator: 1° ≈ 111 320 m
-deg_per_meter = 1.0 / 111_320.0
-res_deg = 30 * deg_per_meter
+# ——— Grid & reprojection specs —————————————————————————
+SCALE = 30  # meters
 crs = CRS.from_epsg(4326)
-x_pixels = math.ceil((max_lon + buffer - (min_lon - buffer)) / res_deg)
-y_pixels = math.ceil((max_lat + buffer - (min_lat - buffer)) / res_deg)
+# build our target transform from lat/lon bounds @30 m resolution
+# we compute approximate degrees per 30 m via the bbox width in degrees
+dx = max_lon+buffer - (min_lon-buffer)
+dy = max_lat+buffer - (min_lat-buffer)
+# number of pixels across/vert
+nx = math.ceil((dx * 111320) / SCALE)  # rough: 1° ≈ 111.32 km
+ny = math.ceil((dy * 110540) / SCALE)  # at mid‐lat, 1° ≈ 110.54 km
 transform = from_bounds(
-    min_lon - buffer, min_lat - buffer,
-    max_lon + buffer, max_lat + buffer,
-    x_pixels, y_pixels
+    min_lon-buffer, min_lat-buffer,
+    max_lon+buffer, max_lat+buffer,
+    nx, ny
 )
-print(f"🗺  Grid: {x_pixels}×{y_pixels} @ {res_deg:.6f}° (~30 m) in EPSG:4326")
+print(f"🗺  Grid: {nx}×{ny} @ {SCALE} m → EPSG:4326")
 
-# 5) Prepare output dirs
-os.makedirs("predictor_rasters/raw", exist_ok=True)
-os.makedirs("predictor_rasters/wgs84", exist_ok=True)
-
-# 6) Read your UI’s choices from env vars
-selected_layers  = os.environ.get('SELECTED_LAYERS','').split(',')
-selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
-
-# 7) Map of EE sources
+# ——— Layer sources & user selections ——————————————————————
 layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
@@ -79,81 +76,112 @@ layer_sources = {
 }
 for i in range(1,20):
     layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO")\
-                                  .select(f"bio{str(i).zfill(2)}")
+                                    .select(f"bio{str(i).zfill(2)}")
 
-# 8) Hard-coded MODIS landcover code→snake_case map
-modis_landcover_map = {
-    0:"water",1:"evergreen_needleleaf_forest",2:"evergreen_broadleaf_forest",
-    3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",5:"mixed_forest",
-    6:"closed_shrublands",7:"open_shrublands",8:"woody_savannas",9:"savannas",
-    10:"grasslands",11:"permanent_wetlands",12:"croplands",13:"urban_and_built_up",
-    14:"cropland_natural_vegetation_mosaic",15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
-}
+selected_layers = os.environ.get('SELECTED_LAYERS','').split(',')
+selected_classes= os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
 
-def export_and_reproject(img: ee.Image, name: str):
-    """Export at 30 m, then reproject into our master 4326 grid."""
-    raw_file = f"predictor_rasters/raw/{name}.tif"
-    aligned = f"predictor_rasters/wgs84/{name}.tif"
+# ——— Prepare output dirs ———————————————————————————————
+raw_dir   = "predictor_rasters/raw"
+aligned_dir = "predictor_rasters/wgs84"
+shutil.rmtree(raw_dir,    ignore_errors=True)
+shutil.rmtree(aligned_dir,ignore_errors=True)
+os.makedirs(raw_dir,    exist_ok=True)
+os.makedirs(aligned_dir,exist_ok=True)
 
-    # export from EE at 30 m
-    print(f"📥 Fetching '{name}' at 30 m…")
+# ——— Utility: single‐tile export —————————————————————————
+def _export_tile(img, name, out_path, region_ee):
     geemap.ee_export_image(
-        img.clip(region),
-        filename=raw_file,
-        scale=30,          # meters
-        region=region,
+        img.clip(region_ee),
+        filename=out_path,
+        scale=SCALE,
+        region=region_ee,
         file_per_band=False,
         timeout=600
     )
-    print(f"✅ Saved raw: {raw_file}")
 
-    # reproject + resample to our grid
-    with rasterio.open(raw_file) as src:
-        src_arr = src.read(1)
-        dst_arr = np.empty((y_pixels, x_pixels), dtype=src_arr.dtype)
+# ——— Export + mosaic + reproject ————————————————————————
+def fetch_and_align(img, name):
+    raw_single = os.path.join(raw_dir, f"{name}.tif")
+    try:
+        print(f"📥 Fetching '{name}' at {SCALE} m…")
+        _export_tile(img, name, raw_single, region)
+    except Exception as e:
+        # assume size‐limit; split bbox in two vertical tiles
+        print(f"⚠️ Single‐tile export failed ({e}). Splitting into 2 tiles…")
+        lon_c = (min_lon-buffer + max_lon+buffer) / 2
+        bboxes = [
+          ee.Geometry.BBox(min_lon-buffer, min_lat-buffer, lon_c, max_lat+buffer),
+          ee.Geometry.BBox(lon_c,             min_lat-buffer, max_lon+buffer, max_lat+buffer),
+        ]
+        tiles = []
+        for i, reg in enumerate(bboxes,1):
+            tile_path = os.path.join(raw_dir,f"{name}_tile{i}.tif")
+            _export_tile(img, name, tile_path, reg)
+            tiles.append(rasterio.open(tile_path))
+        # mosaic & write out_single
+        m, out_tf = merge(tiles)
+        meta = tiles[0].meta.copy()
+        meta.update({
+          "height": m.shape[1],
+          "width":  m.shape[2],
+          "transform": out_tf
+        })
+        with rasterio.open(raw_single,'w',**meta) as dst:
+            dst.write(m)
+        for t in tiles: t.close()
+        print("🔀 Mosaicked 2 tiles →", raw_single)
 
+    # — now reproject → aligned
+    aligned = os.path.join(aligned_dir, f"{name}.tif")
+    with rasterio.open(raw_single) as src:
+        src_data = src.read(1)
+        dst    = np.empty((ny,nx),dtype=src_data.dtype)
         reproject(
-            source=src_arr,
-            destination=dst_arr,
+            source=src_data,
+            destination=dst,
             src_transform=src.transform,
             src_crs=src.crs,
             dst_transform=transform,
             dst_crs=crs,
             resampling=Resampling.nearest
         )
-
-        meta = src.profile.copy()
-        meta.update({
-            'driver':   'GTiff',
-            'height':   y_pixels,
-            'width':    x_pixels,
-            'transform':transform,
-            'crs':      crs,
-            'count':    1
+        profile = src.profile.copy()
+        profile.update({
+            "height": ny,
+            "width":  nx,
+            "transform": transform,
+            "crs": crs,
+            "driver": "GTiff",
+            "count": 1
         })
+        with rasterio.open(aligned,'w',**profile) as out:
+            out.write(dst,1)
+    print(f"🌐 Aligned → {aligned}")
 
-        with rasterio.open(aligned, 'w', **meta) as dst:
-            dst.write(dst_arr, 1)
-
-    print(f"🌐 Reprojected → {aligned}")
-
-# 9) Loop through your selected layers
+# ——— Run all requested layers ———————————————————————————
+# first the continuous ones:
 for name in selected_layers:
-    if name == "landcover":
-        continue
+    if name=="landcover": continue
     if name not in layer_sources:
-        print(f"⚠️ Skipping unknown: {name}")
+        print("⚠️ Skipping unknown:",name)
         continue
-    export_and_reproject(layer_sources[name], name)
+    fetch_and_align(layer_sources[name],name)
 
-# 10) And one-hot encode any chosen landcover classes
+# ——— One-hot the landcover classes ——————————————————————
 if "landcover" in selected_layers and selected_classes:
-    lc = layer_sources["landcover"]
-    print("🌱 One-hot encoding landcover classes…")
+    land = layer_sources["landcover"]
+    # embedded map for naming
+    L = {
+      0:"water",1:"evergreen_needleleaf_forest",2:"evergreen_broadleaf_forest",
+      3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",
+      5:"mixed_forest",6:"closed_shrublands",7:"open_shrublands",
+      8:"woody_savannas",9:"savannas",10:"grasslands",11:"permanent_wetlands",
+      12:"croplands",13:"urban_and_built_up",14:"cropland_natural_vegetation_mosaic",
+      15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
+    }
+    print("🌱 One-hot encoding landcover…")
     for code in selected_classes:
-        if not code.isdigit():
-            continue
-        code_i = int(code)
-        label  = modis_landcover_map.get(code_i, f"class_{code_i}")
-        bin_img = lc.eq(code_i)
-        export_and_reproject(bin_img, f"{code}_{label}")
+        if not code.isdigit(): continue
+        img = land.eq(int(code))
+        fetch_and_align(img, f"{code}_{L[int(code)]}")
