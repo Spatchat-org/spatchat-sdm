@@ -1,5 +1,7 @@
 import os
+import io
 import json
+import base64
 import shutil
 import subprocess
 import zipfile
@@ -11,15 +13,15 @@ import html as html_lib
 import pandas as pd
 import numpy as np
 import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling
 import ee
 import joblib
 
-from matplotlib import colormaps
-from matplotlib.colors import to_hex
-import branca.colormap as bcm
+from matplotlib import pyplot as plt, colormaps
+from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
+from folium import Element
 
-# --- Earth Engine auth ---
+# --- Authenticate Earth Engine ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
 credentials = ee.ServiceAccountCredentials(
     email=service_account_info['client_email'],
@@ -28,12 +30,27 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 
 # --- Clean up last session ---
-shutil.rmtree("predictor_rasters", ignore_errors=True)
-shutil.rmtree("outputs", ignore_errors=True)
-shutil.rmtree("inputs", ignore_errors=True)
+for d in ("predictor_rasters","outputs","inputs"):
+    shutil.rmtree(d, ignore_errors=True)
 os.makedirs("inputs", exist_ok=True)
 
-# --- Landcover labels ---
+# --- Pre-render a small Viridis color bar as PNG → base64 ---
+fig, ax = plt.subplots(figsize=(4, 0.5))
+norm = Normalize(vmin=0, vmax=1)
+cbar = plt.colorbar(
+    ScalarMappable(norm=norm, cmap='viridis'),
+    cax=ax, orientation='horizontal'
+)
+cbar.set_ticks([])
+ax.set_xlabel("Low                                  High")
+fig.tight_layout(pad=0)
+buf = io.BytesIO()
+fig.savefig(buf, format="png", dpi=100)
+plt.close(fig)
+buf.seek(0)
+COLORBAR_BASE64 = base64.b64encode(buf.read()).decode()
+
+# --- Landcover labels (for one-hot) ---
 landcover_options = {
     0: "water",
     1: "evergreen needleleaf forest",
@@ -56,35 +73,36 @@ landcover_options = {
 landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
 
 def create_map():
-    # Base map
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
-    # 1) Presence points
+    # Presence points
     presence_csv = "inputs/presence_points.csv"
     if os.path.exists(presence_csv):
         df = pd.read_csv(presence_csv)
-        if {'latitude','longitude'}.issubset(df.columns):
+        if {'latitude', 'longitude'}.issubset(df.columns):
             pts = df[['latitude','longitude']].values.tolist()
             fg = folium.FeatureGroup(name="🟦 Presence Points")
             for lat, lon in pts:
-                folium.CircleMarker(
-                    [lat, lon], radius=4,
-                    color='blue', fill=True, fill_opacity=0.8
-                ).add_to(fg)
+                folium.CircleMarker([lat, lon],
+                                    radius=4,
+                                    color='blue',
+                                    fill=True,
+                                    fill_opacity=0.8
+                                   ).add_to(fg)
             fg.add_to(m)
             if pts:
                 m.fit_bounds(pts)
 
-    # 2) Predictor rasters
-    any_pred = False
+    # Predictor rasters
+    any_predictor = False
     rasters_dir = "predictor_rasters/wgs84"
     if os.path.isdir(rasters_dir):
-        for fn in sorted(os.listdir(rasters_dir)):
-            if not fn.endswith(".tif"):
+        for fname in sorted(os.listdir(rasters_dir)):
+            if not fname.endswith(".tif"):
                 continue
-            any_pred = True
-            path = os.path.join(rasters_dir, fn)
+            any_predictor = True
+            path = os.path.join(rasters_dir, fname)
             with rasterio.open(path) as src:
                 img = src.read(1)
                 bounds = src.bounds
@@ -102,73 +120,57 @@ def create_map():
                 bounds=[[bounds.bottom, bounds.left],
                         [bounds.top,    bounds.right]],
                 opacity=1.0,
-                name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
+                name=f"🟨 {fname} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
 
-    # 3) Viridis legend (low→high) if any predictor
-    if any_pred:
-        vir = colormaps['viridis']
-        vir_colors = [to_hex(c) for c in vir(np.linspace(0,1,256))]
-        vir_legend = bcm.LinearColormap(
-            colors=vir_colors,
-            vmin=0, vmax=1,
-            caption="Normalized (low → high)"
-        )
-        vir_legend.add_to(m)
-
-    # 4) Suitability map + Plasma legend
-    suit_tif = "outputs/suitability_map_wgs84.tif"
-    if os.path.exists(suit_tif):
-        with rasterio.open(suit_tif) as src:
+    # Suitability map (now using Viridis)
+    suit_path = "outputs/suitability_map_wgs84.tif"
+    if os.path.exists(suit_path):
+        with rasterio.open(suit_path) as src:
             img = src.read(1)
-            bounds = src.bounds
+            bnd = src.bounds
 
         vmin, vmax = np.nanmin(img), np.nanmax(img)
-        norm = (img - vmin) / (vmax - vmin)
-        cmap = colormaps['plasma']
+        norm = (img - vmin)/(vmax-vmin)
+        cmap = colormaps['viridis']      # ← changed from 'plasma'
         rgba = cmap(norm)
 
         folium.raster_layers.ImageOverlay(
             image=rgba,
-            bounds=[[bounds.bottom, bounds.left],
-                    [bounds.top,    bounds.right]],
+            bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
             opacity=0.7,
             name=f"🎯 Suitability ({vmin:.2f}–{vmax:.2f})"
         ).add_to(m)
 
-        plasma_colors = [to_hex(c) for c in cmap(np.linspace(0,1,256))]
-        suit_legend = bcm.LinearColormap(
-            colors=plasma_colors,
-            vmin=vmin, vmax=vmax,
-            caption="Suitability"
-        )
-        suit_legend.add_to(m)
-
     # 5) Layer control
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # 6) Render as iframe
-    html = html_lib.escape(m.get_root().render())
-    return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
+    # 6) Overlay our static colorbar PNG bottom-right
+    img_html = (
+        f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
+        'style="position:absolute; bottom:20px; right:10px; '
+        'width:200px; height:30px; z-index:1000;" />'
+    )
+    m.get_root().html.add_child(Element(img_html))
 
-# --- ZIP helper ---
+    # 7) Render and return iframe
+    html = html_lib.escape(m.get_root().render())
+    return f'<iframe srcdoc="{html}" style="width:100%; height:600px; border:none;"></iframe>'
+
 def zip_results():
-    """Bundle predictor_rasters + outputs into results.zip."""
+    """Bundle predictor_rasters + outputs into results.zip and return its path."""
     archive = "results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk("predictor_rasters"):
-            for fn in files:
-                path = os.path.join(root, fn)
-                zf.write(path, arcname=os.path.relpath(path, start="."))
-        for root, _, files in os.walk("outputs"):
-            for fn in files:
-                path = os.path.join(root, fn)
-                zf.write(path, arcname=os.path.relpath(path, start="."))
-    return archive, "✅ Archive ready!"
+        for folder in ("predictor_rasters", "outputs"):
+            for root, _, files in os.walk(folder):
+                for fn in files:
+                    path = os.path.join(root, fn)
+                    zf.write(path, arcname=os.path.relpath(path, start="."))
+    return archive
 
-# --- Build Gradio UI ---
+# --- Gradio UI ---
 with gr.Blocks() as demo:
     gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
 
@@ -177,7 +179,7 @@ with gr.Blocks() as demo:
             upload_input       = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
             layer_selector     = gr.CheckboxGroup(
                                      choices=[*[f"bio{i}" for i in range(1,20)],
-                                              "elevation","slope","aspect","ndvi","landcover"],
+                                              "elevation","slope","aspect","ndvi"],
                                      label="🧬 Environmental Layers"
                                  )
             landcover_selector = gr.CheckboxGroup(
@@ -189,9 +191,9 @@ with gr.Blocks() as demo:
             download_button    = gr.Button("📥 Download Results")
 
         with gr.Column(scale=3):
-            map_output       = gr.HTML(value=create_map(), label="🗺️ Map Preview")
-            status_output    = gr.Textbox(label="Status", interactive=False)
-            download_output  = gr.File(label="Download .zip")
+            map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
+            status_output = gr.Textbox(label="Status", interactive=False)
+            download_output = gr.File(label="Download .zip")
 
     def handle_upload(file):
         if not file or not hasattr(file, "name"):
@@ -204,11 +206,17 @@ with gr.Blocks() as demo:
         return create_map(), "✅ Presence points uploaded!"
 
     def run_fetch(selected_layers, selected_landcover):
-        if not selected_layers:
+        # require at least one env layer OR one landcover class
+        if not selected_layers and not selected_landcover:
             return create_map(), "⚠️ Select at least one predictor."
-        os.environ['SELECTED_LAYERS']            = ','.join(selected_layers)
-        codes = [c.split(" – ")[0] for c in selected_landcover]
-        os.environ['SELECTED_LANDCOVER_CLASSES'] = ','.join(codes)
+        # auto-add 'landcover' if any classes picked
+        layers = list(selected_layers)
+        if selected_landcover:
+            layers.append("landcover")
+        os.environ['SELECTED_LAYERS']            = ','.join(layers)
+        os.environ['SELECTED_LANDCOVER_CLASSES'] = ','.join(
+            c.split(" – ")[0] for c in selected_landcover
+        )
         res = subprocess.run(
             ["python", "scripts/fetch_predictors.py"],
             capture_output=True, text=True
@@ -226,10 +234,24 @@ with gr.Blocks() as demo:
         msg = "✅ Model completed." if res.returncode == 0 else "❌ Model run failed."
         return create_map(), msg
 
-    # hook up callbacks
-    upload_input.change(fn=handle_upload, inputs=[upload_input], outputs=[map_output, status_output])
-    fetch_button.click(fn=run_fetch,    inputs=[layer_selector, landcover_selector], outputs=[map_output, status_output])
-    run_button.click(  fn=run_model,    outputs=[map_output, status_output])
-    download_button.click(fn=zip_results, inputs=[], outputs=[download_output, status_output])
+    upload_input.change(
+        fn=handle_upload,
+        inputs=[upload_input],
+        outputs=[map_output, status_output]
+    )
+    fetch_button.click(
+        fn=run_fetch,
+        inputs=[layer_selector, landcover_selector],
+        outputs=[map_output, status_output]
+    )
+    run_button.click(
+        fn=run_model,
+        outputs=[map_output, status_output]
+    )
+    download_button.click(
+        fn=zip_results,
+        inputs=[],
+        outputs=[download_output]
+    )
 
     demo.launch()
