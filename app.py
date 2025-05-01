@@ -158,8 +158,8 @@ def create_map():
     return f'<iframe srcdoc="{html}" style="width:100%; height:600px; border:none;"></iframe>'
 
 def zip_results():
-    """Bundle predictor_rasters + outputs into results.zip and return its path."""
-    archive = "results.zip"
+    """Bundle predictor_rasters + outputs into spatchat_results.zip and return its path."""
+    archive = "spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -188,7 +188,11 @@ with gr.Blocks() as demo:
                                  )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
-            download_button    = gr.Button("📥 Download Results")
+            download_button    = gr.DownloadButton(
+                                label="📥 Download Results",
+                                callback=zip_results,
+                                file_name="spatchat_results.zip"
+                     )
 
         with gr.Column(scale=3):
             map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
@@ -198,9 +202,8 @@ with gr.Blocks() as demo:
     def handle_upload(file):
         if not file or not hasattr(file, "name"):
             return create_map(), "⚠️ No file uploaded."
-        shutil.rmtree("predictor_rasters", ignore_errors=True)
-        shutil.rmtree("outputs", ignore_errors=True)
-        shutil.rmtree("inputs", ignore_errors=True)
+        for d in ("predictor_rasters","outputs","inputs"):
+            shutil.rmtree(d, ignore_errors=True)
         os.makedirs("inputs", exist_ok=True)
         shutil.copy(file.name, "inputs/presence_points.csv")
         return create_map(), "✅ Presence points uploaded!"
@@ -247,11 +250,6 @@ with gr.Blocks() as demo:
     run_button.click(
         fn=run_model,
         outputs=[map_output, status_output]
-    )
-    download_button.click(
-        fn=zip_results,
-        inputs=[],
-        outputs=[download_output]
     )
 
     demo.launch()
