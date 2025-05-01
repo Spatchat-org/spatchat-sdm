@@ -15,6 +15,11 @@ credentials = ee.ServiceAccountCredentials(
     key_data=json.dumps(service_account_info)
 )
 ee.Initialize(credentials)
+# ─────────────────────────────────────────────────────────────────────────────
+# Prevent geemap.common.ee_to_xarray from dropping our creds by calling
+# ee.Initialize() again without them.
+ee.Initialize = lambda *args, **kwargs: None
+# ─────────────────────────────────────────────────────────────────────────────
 print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
 
 # --- Wait for the uploaded CSV to land on disk ---
