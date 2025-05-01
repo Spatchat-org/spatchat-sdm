@@ -128,13 +128,17 @@ def create_map():
     # 4) Layer control
     folium.LayerControl(collapsed=False, position='topright').add_to(m)
 
-    # 5) Two‐step viridis legend (short, top‐right)
-    #    Purple = low (0), yellow = high (1)
-    sample = colormaps['viridis'](np.linspace(0, 1, 3))
-    hexes  = [to_hex(c) for c in sample]
+    # 5) Legend (short, top‐right)
+    #    Purple = low (0), yellow = high (1), continuous viridis gradient
+    vir = colormaps['viridis']
+    colors = [ to_hex(c) for c in vir(np.linspace(0,1,256)) ]
     legend = bcm.LinearColormap(
-        hexes, vmin=0, vmax=1, caption="Normalized (low → high)"
-    ).to_step(2)
+        colors, 
+        vmin=0, vmax=1, 
+        caption="Normalized (low → high)",
+        width=100,
+        height=150
+    )
     legend.add_to(m)
 
     # 6) Render
