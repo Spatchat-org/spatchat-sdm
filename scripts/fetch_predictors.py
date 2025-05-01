@@ -1,68 +1,75 @@
 #!/usr/bin/env python3
-import os
-import json
-import time
-
+import os, time, json
 import ee
 import geemap
 import rasterio
 import numpy as np
-import pandas as pd
-from rasterio.merge import merge
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
+import pandas as pd
 
-# 1) Authenticate EE via Service Account
-svc = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
-creds = ee.ServiceAccountCredentials(svc['client_email'], key_data=json.dumps(svc))
-ee.Initialize(creds)
-print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
+# -----------------------------------------------------------------------------
+# Authenticate Earth Engine via Service Account
+# -----------------------------------------------------------------------------
+service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
+credentials = ee.ServiceAccountCredentials(
+    email=service_account_info['client_email'],
+    key_data=json.dumps(service_account_info)
+)
+ee.Initialize(credentials)
+print("✅ Earth Engine authenticated successfully!")
 
-# 2) Wait for the presence CSV
+# -----------------------------------------------------------------------------
+# Wait for presence_points.csv
+# -----------------------------------------------------------------------------
 csv_path = "inputs/presence_points.csv"
 for i in range(5):
     if os.path.exists(csv_path):
         break
-    print(f"⏳ Waiting for presence_points.csv... ({i+1}s)")
+    print(f"⏳ Waiting for presence_points.csv… ({i+1}/5)")
     time.sleep(1)
 if not os.path.exists(csv_path):
-    raise FileNotFoundError("❗ inputs/presence_points.csv not found after 5s wait.")
+    raise FileNotFoundError("❗ inputs/presence_points.csv not found.")
 
-# 3) Load presence points & compute bbox
+# -----------------------------------------------------------------------------
+# Load points & define study-area region + 30 m lat/lon grid
+# -----------------------------------------------------------------------------
 df = pd.read_csv(csv_path)
-if not {'latitude','longitude'}.issubset(df.columns):
-    raise ValueError("❗ CSV must contain 'latitude' and 'longitude' columns.")
+assert {'latitude','longitude'}.issubset(df.columns), "CSV needs latitude & longitude"
+
 min_lat, max_lat = df.latitude.min(), df.latitude.max()
 min_lon, max_lon = df.longitude.min(), df.longitude.max()
 buffer = 0.25
-west, south = min_lon - buffer, min_lat - buffer
-east, north = max_lon + buffer, max_lat + buffer
+region = ee.Geometry.BBox(
+    min_lon - buffer, min_lat - buffer,
+    max_lon + buffer, max_lat + buffer
+)
 
-# EarthEngine geometry (for clipping) and GeoJSON array (for export region)
-region_ee = ee.Geometry.BBox(west, south, east, north)
-geojson = region_ee.getInfo()['coordinates'][0]
+# target CRS/grid
+crs = CRS.from_epsg(4326)
+RES = 30  # 30 m target resolution
+x_size = int((max_lon + buffer - (min_lon - buffer)) * (111320/30))  # approximate
+y_size = int((max_lat + buffer - (min_lat - buffer)) * (110540/30))
+transform = from_bounds(
+    min_lon - buffer, min_lat - buffer,
+    max_lon + buffer, max_lat + buffer,
+    x_size, y_size
+)
 
-print(f"📍 Loaded {len(df)} points; study‐area = {south},{west} → {north},{east}")
+print(f"📍 Loaded {len(df)} points → region: {min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
+print(f"🗺  Grid: {x_size}×{y_size} @ {RES} m in EPSG:4326")
 
-# 4) Build uniform 30 m grid in EPSG:4326
-PIXEL_DEG = 30/111320.0
-width  = int((east - west)/PIXEL_DEG)
-height = int((north - south)/PIXEL_DEG)
-crs    = CRS.from_epsg(4326)
-transform = from_bounds(west, south, east, north, width, height)
-print(f"🗺  Grid: {width}×{height} @30 m → EPSG:4326")
+# -----------------------------------------------------------------------------
+# Which layers + one-hot codes the UI set (via os.environ)
+# -----------------------------------------------------------------------------
+layers = os.environ.get('SELECTED_LAYERS','').split(',')
+codes  = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
 
-# 5) Prepare output dirs
-os.makedirs("predictor_rasters/raw",  exist_ok=True)
-os.makedirs("predictor_rasters/wgs84", exist_ok=True)
-
-# 6) What user picked
-selected_layers  = os.environ.get('SELECTED_LAYERS','').split(',')
-selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
-
-# 7) EE sources
-layer_sources = {
+# -----------------------------------------------------------------------------
+# Earth Engine sources
+# -----------------------------------------------------------------------------
+sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
     "aspect":    ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
@@ -70,123 +77,108 @@ layer_sources = {
     "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first(),
 }
 for i in range(1,20):
-    layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO")\
-                                  .select(f"bio{str(i).zfill(2)}")
+    sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO").select(f"bio{str(i).zfill(2)}")
 
-# 8) Native export scales
-EXPORT_SCALES = {
-    **{f"bio{i}": 30 for i in range(1,20)},
-    "elevation": 30,
-    "slope":     30,
-    "aspect":    30,
-    "ndvi":      1000,
-    "landcover": 500,
-}
-
-# 9) Hard-coded MODIS landcover map
+# -----------------------------------------------------------------------------
+# Modis landcover code → snake_case label map
+# -----------------------------------------------------------------------------
 modis_landcover_map = {
-     0:"water",1:"evergreen_needleleaf_forest",2:"evergreen_broadleaf_forest",
-     3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",
-     5:"mixed_forest",6:"closed_shrublands",7:"open_shrublands",
-     8:"woody_savannas",9:"savannas",10:"grasslands",11:"permanent_wetlands",
+    0:"water",1:"evergreen_needleleaf_forest",2:"evergreen_broadleaf_forest",
+    3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",
+    5:"mixed_forest",6:"closed_shrublands",7:"open_shrublands",
+    8:"woody_savannas",9:"savannas",10:"grasslands",11:"permanent_wetlands",
     12:"croplands",13:"urban_and_built_up",14:"cropland_natural_vegetation_mosaic",
     15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
 }
 
-def export_and_reproject(ee_img, name):
-    raw_path     = f"predictor_rasters/raw/{name}.tif"
-    aligned_path = f"predictor_rasters/wgs84/{name}.tif"
-    scale        = EXPORT_SCALES.get(name, 30)
+# -----------------------------------------------------------------------------
+# Export scales (native) for each predictor
+# -----------------------------------------------------------------------------
+EXPORT_SCALES = {
+    **{f"bio{i}": 1000 for i in range(1,20)},  # BIOCLIM at 1 km
+    "elevation": 30,
+    "slope":     30,
+    "aspect":    30,
+    "ndvi":      1000,  # MODIS NDVI is 1 km
+    "landcover": 500    # MODIS landcover is 500 m
+}
 
-    # --- Try single‐tile export, now passing geojson bbox list! ---
-    print(f"\n📥 Exporting '{name}' at {scale} m native…")
-    try:
-        geemap.ee_export_image(
-            ee_img.clip(region_ee),
-            filename=raw_path,
-            scale=scale,
-            region=geojson,         # <<< use pure GeoJSON coords here!
-            file_per_band=False,
-            timeout=600
-        )
-    except Exception as e:
-        print(f"⚠️ Single‐tile export failed: {e}")
+# -----------------------------------------------------------------------------
+# Prepare folders
+# -----------------------------------------------------------------------------
+os.makedirs("predictor_rasters/raw",  exist_ok=True)
+os.makedirs("predictor_rasters/wgs84", exist_ok=True)
 
-    # --- If that RAW file doesn’t exist, split & mosaic ---
-    if not os.path.exists(raw_path):
-        print("⚠️ Raw tile missing → splitting bbox in two…")
-        midx = (west + east)/2.0
-        tiles = []
-        for idx,(w,e) in enumerate([(west,midx),(midx,east)], start=1):
-            tile_box = [[w, south], [e, south], [e, north], [w, north], [w, south]]
-            tile_path = f"predictor_rasters/raw/{name}_t{idx}.tif"
-            print(f"  ▸ Tile{idx}: {w,south}→{e,north}")
-            geemap.ee_export_image(
-                ee_img.clip(ee.Geometry.BBox(w, south, e, north)),
-                filename=tile_path,
-                scale=scale,
-                region=tile_box,    # <<< again pure list
-                file_per_band=False,
-                timeout=600
-            )
-            if not os.path.exists(tile_path):
-                raise RuntimeError(f"❗ Tile export failed: {tile_path}")
-            tiles.append(rasterio.open(tile_path))
+# -----------------------------------------------------------------------------
+# Function: export at native scale, then reproject onto 30 m lat/lon grid
+# -----------------------------------------------------------------------------
+def export_and_align(img: ee.Image, name: str):
+    raw = f"predictor_rasters/raw/{name}.tif"
+    out = f"predictor_rasters/wgs84/{name}.tif"
+    scale = EXPORT_SCALES.get(name, RES)
 
-        arrs, out_trans = merge(tiles)
-        arr = arrs[0]
-        prof = tiles[0].profile.copy()
-        prof.update({
-            "driver":    "GTiff",
-            "height":    arr.shape[0],
-            "width":     arr.shape[1],
-            "transform": out_trans
-        })
-        with rasterio.open(raw_path, "w", **prof) as dst:
-            dst.write(arr, 1)
-        for src in tiles: src.close()
-        print(f"🔀 Mosaicked → {raw_path}")
+    # 1) Force the source image into EPSG:4326 at its native scale:
+    ee_img = img.reproject(crs="EPSG:4326", scale=scale)
 
-    # --- Finally reproject into the EXACT 30 m grid above ---
-    with rasterio.open(raw_path) as src:
-        src_dat = src.read(1)
-        dst_dat = np.empty((height, width), dtype=src_dat.dtype)
+    # 2) Export from Earth Engine:
+    print(f"📥 Exporting '{name}' at {scale} m native…")
+    geemap.ee_export_image(
+        ee_img.clip(region),
+        filename=raw,
+        scale=scale,
+        region=region,
+        crs="EPSG:4326",
+        file_per_band=False,
+        timeout=600,
+    )
+
+    # 3) Reproject+resample to 30 m study-area grid
+    with rasterio.open(raw) as src:
+        src_arr = src.read(1)
+        dst_arr = np.empty((y_size, x_size), dtype=src_arr.dtype)
         reproject(
-            source=src_dat,
-            destination=dst_dat,
-            src_transform=src.transform, src_crs=src.crs,
-            dst_transform=transform,     dst_crs=crs,
-            resampling=Resampling.nearest
+            source=src_arr,
+            destination=dst_arr,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=transform,
+            dst_crs=crs,
+            resampling=Resampling.nearest,
         )
-        prof = src.profile.copy()
-        prof.update({
-            "driver":    "GTiff",
-            "crs":       crs,
-            "transform": transform,
-            "height":    height,
-            "width":     width
+        profile = src.profile.copy()
+        profile.update({
+            "crs":        crs,
+            "transform":  transform,
+            "height":     y_size,
+            "width":      x_size,
+            "count":      1,
         })
+        with rasterio.open(out, "w", **profile) as dst:
+            dst.write(dst_arr, 1)
 
-    with rasterio.open(aligned_path, "w", **prof) as dst:
-        dst.write(dst_dat, 1)
-    print(f"🌐 Aligned → {aligned_path}")
+    print(f"🌐 Aligned → {out}")
 
-# 10) Fetch all regular predictors
-for name in selected_layers:
-    if name=="landcover": continue
-    if name not in layer_sources:
-        print(f"⚠️ Skipping unknown '{name}'")
+# -----------------------------------------------------------------------------
+# 1) Export each regular predictor
+# -----------------------------------------------------------------------------
+for name in layers:
+    if name == "landcover": 
         continue
-    export_and_reproject(layer_sources[name], name)
+    if name not in sources:
+        print(f"⚠️ Skipping unknown layer '{name}'")
+        continue
+    export_and_align(sources[name], name)
 
-# 11) One-hot encode any landcover classes
-if "landcover" in selected_layers and selected_classes:
-    lc = layer_sources["landcover"]
-    print("\n🌱 One-hot encoding MODIS landcover…")
-    for code in selected_classes:
-        if not code.isdigit(): continue
-        c = int(code)
-        label = modis_landcover_map.get(c, f"class_{c}")
-        export_and_reproject(lc.eq(c), f"{c}_{label}")
-
-print("\n✅ All predictors fetched & aligned at 30 m.")
+# -----------------------------------------------------------------------------
+# 2) One-hot encode landcover
+# -----------------------------------------------------------------------------
+if "landcover" in layers and codes:
+    lc = sources["landcover"]
+    print("🌱 One-hot encoding MODIS landcover…")
+    for code in codes:
+        if not code.isdigit(): 
+            continue
+        ci    = int(code)
+        label = modis_landcover_map.get(ci, f"class_{ci}")
+        binary = lc.eq(ci)
+        export_and_align(binary, f"{ci}_{label}")
