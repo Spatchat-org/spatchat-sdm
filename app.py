@@ -14,11 +14,10 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 import ee
 import joblib
 
-# new imports for colormaps + legend
+# new imports for unified colormap + legend
 from matplotlib import colormaps
-import matplotlib.cm as mpl_cm
-import branca.colormap as bcm
 from matplotlib.colors import to_hex
+import branca.colormap as bcm
 
 # --- Authenticate Earth Engine using Service Account ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -61,13 +60,13 @@ def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
-    # Presence points
+    # --- Presence points ---
     presence_path = "inputs/presence_points.csv"
     if os.path.exists(presence_path):
         df = pd.read_csv(presence_path)
         if {'latitude','longitude'}.issubset(df.columns):
             latlons = df[['latitude','longitude']].values.tolist()
-            layer = folium.FeatureGroup(name="🟦 Presence Points")
+            pts = folium.FeatureGroup(name="🟦 Presence Points")
             for lat, lon in latlons:
                 folium.CircleMarker(
                     [lat, lon],
@@ -75,12 +74,12 @@ def create_map():
                     color='blue',
                     fill=True,
                     fill_opacity=0.8
-                ).add_to(layer)
-            layer.add_to(m)
+                ).add_to(pts)
+            pts.add_to(m)
             if latlons:
                 m.fit_bounds(latlons)
 
-    # Predictor rasters
+    # --- Predictor rasters ---
     rasters_dir = "predictor_rasters/wgs84"
     if os.path.isdir(rasters_dir):
         for fname in sorted(os.listdir(rasters_dir)):
@@ -95,10 +94,8 @@ def create_map():
             if vmin == vmax:
                 continue
             norm = (img - vmin) / (vmax - vmin)
-
-            # use new Matplotlib API
             cmap = colormaps['viridis']
-            rgba = cmap(norm)  # shape (h, w, 4)
+            rgba = cmap(norm)  # (h, w, 4)
 
             folium.raster_layers.ImageOverlay(
                 image=rgba,
@@ -108,7 +105,7 @@ def create_map():
                 name=f"🟨 {fname} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
 
-    # Suitability map
+    # --- Suitability map ---
     suit_path = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(suit_path):
         with rasterio.open(suit_path) as src:
@@ -117,9 +114,7 @@ def create_map():
 
         vmin, vmax = np.nanmin(img), np.nanmax(img)
         norm = (img - vmin) / (vmax - vmin)
-
-        # use new Matplotlib API
-        cmap = colormaps['plasma']
+        cmap = colormaps['viridis']
         rgba = cmap(norm)
 
         folium.raster_layers.ImageOverlay(
@@ -129,22 +124,21 @@ def create_map():
             opacity=0.7,
             name=f"🎯 Suitability ({vmin:.2f}–{vmax:.2f})"
         ).add_to(m)
-
-        # --- slim vertical legend: only low & high ticks ---
-        start_hex = to_hex(mpl_cm.plasma(0.0))
-        end_hex   = to_hex(mpl_cm.plasma(1.0))
-        legend = bcm.LinearColormap(
-            [start_hex, end_hex],
-            vmin=vmin, vmax=vmax,
-            caption="Normalized value (low → high)"
-        ).to_step(2)
-        # make it tall & skinny
-        legend.width  = 10
-        legend.height = 150
-        legend.add_to(m)
-
+        # zoom to suitability
         m.fit_bounds([[bounds.bottom, bounds.left],
                       [bounds.top,    bounds.right]])
+
+    # --- Universal low→high legend ---
+    low_hex  = to_hex(colormaps['viridis'](0.0))
+    high_hex = to_hex(colormaps['viridis'](1.0))
+    ramp = bcm.LinearColormap(
+        [low_hex, high_hex],
+        vmin=0, vmax=1,
+        caption="Normalized (low → high)"
+    ).to_step(2)
+    ramp.width  = 8    # thinner
+    ramp.height = 100  # shorter
+    ramp.add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
     html = html_lib.escape(m.get_root().render())
@@ -168,7 +162,6 @@ with gr.Blocks() as demo:
                                 )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
-
         with gr.Column(scale=3):
             map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
             status_output = gr.Textbox(label="Status", interactive=False)
@@ -211,13 +204,19 @@ with gr.Blocks() as demo:
         else:
             return create_map(), "❌ Model run failed."
 
-    upload_input.change(fn=handle_upload,
-                        inputs=[upload_input],
-                        outputs=[map_output, status_output])
-    fetch_button.click(fn=run_fetch,
-                       inputs=[layer_selector, landcover_selector],
-                       outputs=[map_output, status_output])
-    run_button.click(fn=run_model,
-                     outputs=[map_output, status_output])
+    upload_input.change(
+        fn=handle_upload,
+        inputs=[upload_input],
+        outputs=[map_output, status_output],
+    )
+    fetch_button.click(
+        fn=run_fetch,
+        inputs=[layer_selector, landcover_selector],
+        outputs=[map_output, status_output],
+    )
+    run_button.click(
+        fn=run_model,
+        outputs=[map_output, status_output],
+    )
 
     demo.launch()
