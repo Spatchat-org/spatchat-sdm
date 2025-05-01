@@ -190,14 +190,12 @@ with gr.Blocks() as demo:
             run_button         = gr.Button("🧠 Run Model")
             download_button    = gr.DownloadButton(
                                 label="📥 Download Results",
-                                callback=zip_results,
                                 file_name="spatchat_results.zip"
                      )
 
         with gr.Column(scale=3):
             map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
             status_output = gr.Textbox(label="Status", interactive=False)
-            download_output = gr.File(label="Download .zip")
 
     def handle_upload(file):
         if not file or not hasattr(file, "name"):
@@ -250,6 +248,11 @@ with gr.Blocks() as demo:
     run_button.click(
         fn=run_model,
         outputs=[map_output, status_output]
+    )
+    download_button.click(
+        fn=zip_results, 
+        inputs=[], 
+        outputs=[download_button]
     )
 
     demo.launch()
