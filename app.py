@@ -27,7 +27,7 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 
 
-# --- Clean up last run ---
+# --- Clean up last session ---
 shutil.rmtree("predictor_rasters", ignore_errors=True)
 shutil.rmtree("outputs", ignore_errors=True)
 shutil.rmtree("inputs", ignore_errors=True)
@@ -58,7 +58,6 @@ landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
 
 
 def create_map():
-    # Base map
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer('OpenStreetMap').add_to(m)
 
@@ -81,11 +80,13 @@ def create_map():
                 m.fit_bounds(pts)
 
     # Predictor rasters
+    any_predictor = False
     rasters_dir = "predictor_rasters/wgs84"
     if os.path.isdir(rasters_dir):
         for fname in sorted(os.listdir(rasters_dir)):
             if not fname.endswith(".tif"):
                 continue
+            any_predictor = True
             path = os.path.join(rasters_dir, fname)
             with rasterio.open(path) as src:
                 img = src.read(1)
@@ -97,7 +98,7 @@ def create_map():
 
             norm = (img - vmin) / (vmax - vmin)
             cmap = colormaps['viridis']
-            rgba = cmap(norm)  # (h, w, 4)
+            rgba = cmap(norm)
 
             folium.raster_layers.ImageOverlay(
                 image=rgba,
@@ -107,7 +108,24 @@ def create_map():
                 name=f"🟨 {fname} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
 
-    # Suitability map legend & overlay
+    # Always show Viridis legend when any predictor is present
+    if any_predictor:
+        vir = colormaps['viridis']
+        vir_colors = [ to_hex(c) for c in vir(np.linspace(0,1,256)) ]
+        vir_legend = bcm.LinearColormap(
+            colors=vir_colors,
+            vmin=0, vmax=1,
+            caption="Normalized (low → high)"
+        )
+        vir_legend.add_to(m)
+        # move to bottom-right
+        m.get_root().html.add_child(folium.Element("""
+            <style>
+              .linear-colormap { top: auto !important; bottom: 10px !important; right: 10px !important; }
+            </style>
+        """))
+
+    # Suitability map + legend
     suit_path = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(suit_path):
         with rasterio.open(suit_path) as src:
@@ -127,22 +145,17 @@ def create_map():
             name=f"🎯 Suitability ({vmin:.2f}–{vmax:.2f})"
         ).add_to(m)
 
-        # Continuous Plasma legend, bottom-right
-        legend = bcm.LinearColormap(
-            colors=[ to_hex(c) for c in cmap(np.linspace(0,1,256)) ],
+        plasma_colors = [ to_hex(c) for c in cmap(np.linspace(0,1,256)) ]
+        suit_legend = bcm.LinearColormap(
+            colors=plasma_colors,
             vmin=vmin, vmax=vmax,
-            caption="Suitability (low → high)"
+            caption="Suitability"
         )
-        legend.add_to(m)
-
-        # Override default top-right placement via CSS injection
+        suit_legend.add_to(m)
+        # same bottom-right override, so it doesn't jump
         m.get_root().html.add_child(folium.Element("""
             <style>
-              .linear-colormap {
-                top: auto !important;
-                bottom: 10px !important;
-                right: 10px !important;
-              }
+              .linear-colormap { top: auto !important; bottom: 10px !important; right: 10px !important; }
             </style>
         """))
 
@@ -150,12 +163,11 @@ def create_map():
                       [bounds.top,    bounds.right]])
 
     folium.LayerControl(collapsed=False).add_to(m)
-    # Wrap in an <iframe> for Gradio
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
 
-# --- Build Gradio UI ---
+# --- Gradio UI ---
 with gr.Blocks() as demo:
     gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
 
