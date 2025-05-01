@@ -130,7 +130,7 @@ def create_map():
     # embed static colorbar at bottom-right
     html_img = (
       f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
-      'style="position:absolute; bottom:15px; right:10px; '
+      'style="position:absolute; bottom:20px; right:10px; '
       'width:200px; height:30px; z-index:1000;" />'
     )
     m.get_root().html.add_child(Element(html_img))
@@ -139,7 +139,7 @@ def create_map():
     return f'<iframe srcdoc="{html}" style="width:100%;height:600px;border:none;"></iframe>'
 
 def zip_results():
-    """Bundle predictor_rasters + outputs into results.zip"""
+    """Bundle predictor_rasters + outputs into results.zip and return its path."""
     out = "results.zip"
     if os.path.exists(out): os.remove(out)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -148,7 +148,11 @@ def zip_results():
                 for fn in files:
                     p = os.path.join(root,fn)
                     zf.write(p, arcname=os.path.relpath(p,"."))
-    return out
+    # return HTML snippet that auto-clicks the hidden link
+    return (
+        '<a id="dl" href="results.zip" download style="display:none;"></a>'
+        '<script>document.getElementById("dl").click();</script>'
+    )
 
 # --- Gradio UI ---
 with gr.Blocks() as demo:
@@ -156,7 +160,7 @@ with gr.Blocks() as demo:
 
     with gr.Row():
         with gr.Column(scale=1):
-            up   = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
+            up  = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
             layers = gr.CheckboxGroup(
                 choices=[*[f"bio{i}" for i in range(1,20)],
                          "elevation","slope","aspect","ndvi"],
@@ -166,43 +170,50 @@ with gr.Blocks() as demo:
                 choices=landcover_choices,
                 label="🌿 MODIS Landcover Classes (One-hot)"
             )
-            fb    = gr.Button("🌐 Fetch Predictors")
-            rb    = gr.Button("🧠 Run Model")
-            db    = gr.DownloadButton(label="📥 Download Results")
+            fb  = gr.Button("🌐 Fetch Predictors")
+            rb  = gr.Button("🧠 Run Model")
+            db  = gr.Button("📥 Download Results")
 
         with gr.Column(scale=3):
             mp = gr.HTML(value=create_map(), label="🗺️ Map Preview")
             st = gr.Textbox(label="Status", interactive=False)
+            # hidden HTML to carry our download-trigger snippet
+            dl_html = gr.HTML(visible=False)
 
-    def handle_upload(file):
-        if not file or not hasattr(file,"name"):
+    def handle_upload(f):
+        if not f or not hasattr(f,"name"):
             return create_map(), "⚠️ No file uploaded."
         for d in ("predictor_rasters","outputs","inputs"):
             shutil.rmtree(d, ignore_errors=True)
         os.makedirs("inputs", exist_ok=True)
-        shutil.copy(file.name, "inputs/presence_points.csv")
+        shutil.copy(f.name, "inputs/presence_points.csv")
         return create_map(), "✅ Presence points uploaded!"
 
-    def run_fetch(layers_sel, lc_sel):
-        if not layers_sel and not lc_sel:
+    def run_fetch(sel, lc_sel):
+        if not sel and not lc_sel:
             return create_map(), "⚠️ Select at least one predictor."
-        sel = list(layers_sel)
+        layers_list = list(sel)
         if lc_sel:
-            sel.append("landcover")
-        os.environ['SELECTED_LAYERS']            = ",".join(sel)
-        os.environ['SELECTED_LANDCOVER_CLASSES'] = ",".join(c.split(" – ")[0] for c in lc_sel)
-        r = subprocess.run(["python","scripts/fetch_predictors.py"], capture_output=True, text=True)
-        msg = "✅ Predictors fetched." if r.returncode==0 else "❌ Fetch failed."
+            layers_list.append("landcover")
+        os.environ['SELECTED_LAYERS']            = ",".join(layers_list)
+        os.environ['SELECTED_LANDCOVER_CLASSES'] = ",".join(
+            c.split(" – ")[0] for c in lc_sel
+        )
+        res = subprocess.run(["python","scripts/fetch_predictors.py"],
+                              capture_output=True, text=True)
+        msg = "✅ Predictors fetched." if res.returncode==0 else "❌ Fetch failed."
         return create_map(), msg
 
     def run_model():
-        r = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
-        msg = "✅ Model completed." if r.returncode==0 else "❌ Model run failed."
+        res = subprocess.run(["python","scripts/run_logistic_sdm.py"],
+                              capture_output=True, text=True)
+        msg = "✅ Model completed." if res.returncode==0 else "❌ Model run failed."
         return create_map(), msg
 
     up.change(fn=handle_upload, inputs=[up], outputs=[mp,st])
-    fb.click(fn=run_fetch, inputs=[layers,lc], outputs=[mp,st])
-    rb.click(fn=run_model, outputs=[mp,st])
-    db.click(fn=zip_results, inputs=[], outputs=[db])
+    fb.click(fn=run_fetch,  inputs=[layers,lc], outputs=[mp,st])
+    rb.click(fn=run_model,  outputs=[mp,st])
+    # download button now triggers zip_results → HTML auto-download
+    db.click(fn=zip_results, inputs=[], outputs=[dl_html])
 
     demo.launch()
