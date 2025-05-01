@@ -145,7 +145,7 @@ def create_map():
     # 6) Overlay our static colorbar PNG bottom-right
     img_html = (
         f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
-        'style="position:absolute; bottom:20px; right:20px; '
+        'style="position:absolute; bottom:20px; right:10px; '
         'width:200px; height:30px; z-index:1000;" />'
     )
     m.get_root().html.add_child(Element(img_html))
