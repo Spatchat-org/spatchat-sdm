@@ -3,84 +3,85 @@ import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.enums import Resampling
-from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
 import joblib
 
 # --- Paths ---
-csv_path = "inputs/presence_points.csv"
-raster_dir = "predictor_rasters/wgs84"        # ← now reads the aligned rasters
-output_map = "outputs/suitability_map_wgs84.tif"  # ← matches app.py overlay
+csv_path    = "inputs/presence_points.csv"
+raster_dir  = "predictor_rasters/wgs84"
+output_map  = "outputs/suitability_map_wgs84.tif"
 os.makedirs("outputs", exist_ok=True)
 
 # --- Load presence points ---
-df = pd.read_csv(csv_path)
+df   = pd.read_csv(csv_path)
 lats = df['latitude'].values
 lons = df['longitude'].values
 print(f"📍 Loaded {len(df)} presence points.")
 
-# --- Compute study area bounds (for logging) ---
-buffer = 0.25
-min_lat, max_lat = lats.min() - buffer, lats.max() + buffer
-min_lon, max_lon = lons.min() - buffer, lons.max() + buffer
-print(f"🗺️ Study area bounds: ({min_lat}, {min_lon}) to ({max_lat}, {max_lon})")
+# --- Grab reference grid from the *first* .tif in raster_dir ---
+rasters = sorted([os.path.join(raster_dir, f)
+                  for f in os.listdir(raster_dir) if f.endswith(".tif")])
+if not rasters:
+    raise RuntimeError(f"No .tif found in {raster_dir}")
 
-# --- Define reference raster specs (must match fetch) ---
-res = 0.01  # approx 1km
-y_size = int((max_lat - min_lat) / res)
-x_size = int((max_lon - min_lon) / res)
-transform = from_bounds(min_lon, min_lat, max_lon, max_lat, x_size, y_size)
-crs = CRS.from_epsg(4326)
+with rasterio.open(rasters[0]) as ref:
+    ref_crs       = ref.crs
+    ref_transform= ref.transform
+    height, width= ref.height, ref.width
+    print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
 
-# --- Load and reproject (resample) predictors ---
-raster_paths = sorted(
-    os.path.join(raster_dir, f)
-    for f in os.listdir(raster_dir) if f.endswith(".tif")
-)
+# --- Load & resample all predictors to reference grid ---
 layers = []
-for path in raster_paths:
+names  = []
+for path in rasters:
+    name = os.path.basename(path)
     with rasterio.open(path) as src:
-        arr = src.read(1, out_shape=(y_size, x_size), resampling=Resampling.nearest)
-        if src.crs != crs or src.transform != transform:
-            print(f"📐 Resampling {os.path.basename(path)} to match reference grid.")
-        print(f"🧪 {os.path.basename(path)} → NaN %: {np.isnan(arr).mean()*100:.2f}%")
-        layers.append(arr)
-
-if not layers:
-    raise RuntimeError(f"No .tif files found in {raster_dir} to stack.")
+        if src.crs != ref_crs or src.transform != ref_transform:
+            print(f"📐 Resampling {name} to reference grid…")
+        arr = src.read(
+            1,
+            out_shape=(height, width),
+            resampling=Resampling.nearest
+        )
+    print(f"🧪 {name} → NaN%: {np.isnan(arr).mean()*100:.2f}")
+    layers.append(arr)
+    names.append(name)
 
 stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract values at presence points ---
-inv_transform = ~transform
+inv = ~ref_transform
 presence_samples = []
 for lat, lon in zip(lats, lons):
-    col, row = inv_transform * (lon, lat)
+    col, row = inv * (lon, lat)
     row, col = int(row), int(col)
-    if 0 <= row < stack.shape[0] and 0 <= col < stack.shape[1]:
+    if 0 <= row < height and 0 <= col < width:
         vals = stack[row, col, :]
         if not np.any(np.isnan(vals)):
             presence_samples.append(vals)
         else:
-            print(f"⚠️ Skipping point ({lat},{lon})—contains NaN")
+            print(f"⚠️ Skipping ({lat},{lon})—NaNs")
     else:
-        print(f"⚠️ Skipping point ({lat},{lon})—outside bounds")
+        print(f"⚠️ Skipping ({lat},{lon})—outside bounds")
+
 presence_samples = np.array(presence_samples)
 print(f"📍 Presence samples: {presence_samples.shape}")
 
 # --- Sample background ---
 np.random.seed(42)
-flat = stack.reshape(-1, stack.shape[-1])
-valid = ~np.any(np.isnan(flat), axis=1)
-pool = flat[valid]
-background_samples = pool[np.random.choice(len(pool), size=5*len(presence_samples), replace=False)]
+flat       = stack.reshape(-1, stack.shape[-1])
+valid_mask = ~np.any(np.isnan(flat), axis=1)
+pool       = flat[valid_mask]
+n_bg       = 5 * len(presence_samples)
+bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)
+background_samples = pool[bg_indices]
 print(f"🌎 Background samples: {background_samples.shape}")
 
 # --- Train logistic regression ---
 X = np.vstack([presence_samples, background_samples])
-y = np.array([1]*len(presence_samples) + [0]*len(background_samples))
+y = np.concatenate([np.ones(len(presence_samples)), np.zeros(len(background_samples))])
 mask = ~np.any(np.isnan(X), axis=1)
 Xc, yc = X[mask], y[mask]
 print(f"🔀 Training samples: {X.shape} → after NaN removal: {Xc.shape}")
@@ -90,21 +91,21 @@ model.fit(Xc, yc)
 joblib.dump(model, "outputs/logistic_model.pkl")
 print("🧠 Model trained.")
 
-# --- Predict across the grid ---
-pred = np.full(flat.shape[0], np.nan)
-pred[valid] = model.predict_proba(flat[valid])[:,1]
-raster_pred = pred.reshape(stack.shape[:2])
+# --- Predict over the full grid ---
+pred_flat = np.full(flat.shape[0], np.nan)
+pred_flat[valid_mask] = model.predict_proba(flat[valid_mask])[:, 1]
+pred_map = pred_flat.reshape((height, width))
 
-# --- Save suitability map in WGS84 grid ---
+# --- Save suitability map using the reference profile ---
 profile = {
     'driver': 'GTiff',
-    'height': raster_pred.shape[0],
-    'width': raster_pred.shape[1],
-    'count': 1,
-    'dtype': rasterio.float32,
-    'crs': crs,
-    'transform': transform
+    'height': height,
+    'width':  width,
+    'count':  1,
+    'dtype':  rasterio.float32,
+    'crs':    ref_crs,
+    'transform': ref_transform
 }
 with rasterio.open(output_map, 'w', **profile) as dst:
-    dst.write(raster_pred.astype(rasterio.float32), 1)
+    dst.write(pred_map.astype(rasterio.float32), 1)
 print(f"🎯 Suitability map saved to {output_map}")
