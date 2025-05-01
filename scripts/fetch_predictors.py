@@ -67,9 +67,11 @@ def fetch_with_xee(image: ee.Image, name: str):
     Pull `image` at `SCALE` m into an xarray, then write GeoTIFF.
     """
     print(f"📥 Fetching via xee → {name}")
+    # pass the clipped image as the first positional arg (dataset),
+    # then the region, then keyword args:
     da = ee_to_xarray(
-        image=image.clip(region_ee),
-        region=region_geojson,
+        image.clip(region_ee),
+        region_geojson,
         crs="EPSG:4326",
         scale=SCALE,
         return_info=False
