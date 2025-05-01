@@ -81,7 +81,7 @@ def fetch_with_xee(img: ee.Image, name: str):
     # clip & hand off to geemap
     ds = ee_to_xarray(
         img.clip(region_ee),
-        region=region_geojson,
+        region_geojson,
         crs="EPSG:4326",
         scale=SCALE,
         n_images=1,
