@@ -139,7 +139,7 @@ def create_map():
 
 def zip_results():
     """Zip predictor_rasters + outputs into spatchat_results.zip and return its path."""
-    archive = "results.zip"
+    archive = "spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
