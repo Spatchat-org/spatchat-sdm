@@ -73,7 +73,10 @@ sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
     "aspect":    ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
-    "ndvi":      ee.ImageCollection("MODIS/061/MOD13A2").select("NDVI").mean(),
+    "ndvi":      (ee.ImageCollection("MODIS/006/MOD13Q1")
+            .filterDate("2022-01-01", "2024-01-01")
+            .select("NDVI")
+            .mean()),
     "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first(),
 }
 for i in range(1,20):
@@ -99,7 +102,7 @@ EXPORT_SCALES = {
     "elevation": 30,
     "slope":     30,
     "aspect":    30,
-    "ndvi":      1000,  # MODIS NDVI is 1 km
+    "ndvi":      250,  # MODIS NDVI is 1 km
     "landcover": 500    # MODIS landcover is 500 m
 }
 
