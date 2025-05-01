@@ -113,6 +113,7 @@ def create_map():
         vir = colormaps['viridis']
         vir_colors = [ to_hex(c) for c in vir(np.linspace(0,1,256)) ]
         vir_legend = bcm.LinearColormap(
+            tick_labels = [],
             colors=vir_colors,
             vmin=0, vmax=1,
             caption="Normalized (low → high)"
@@ -121,7 +122,7 @@ def create_map():
         # move to bottom-right
         m.get_root().html.add_child(folium.Element("""
             <style>
-              .linear-colormap { top: auto !important; bottom: 10px !important; right: 10px !important; }
+              .linear-colormap { bottom: auto !important; bottom: 10px !important; right: 10px !important; }
             </style>
         """))
 
