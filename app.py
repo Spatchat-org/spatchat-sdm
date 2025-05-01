@@ -167,7 +167,7 @@ with gr.Blocks() as demo:
                                  )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
-            download_button    = gr.DownloadButton("📥 Download Results")
+            download_button    = gr.DownloadButton("📥 Download Results", zip_results)
 
         with gr.Column(scale=3):
             map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
