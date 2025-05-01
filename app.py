@@ -120,16 +120,16 @@ def create_map():
                 name=f"🟨 {fname} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
 
-    # 4) Suitability map
+    # 4) Suitability map (now using Viridis)
     suit_path = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(suit_path):
         with rasterio.open(suit_path) as src:
             img = src.read(1)
             bnd = src.bounds
 
-        vmin,vmax = np.nanmin(img), np.nanmax(img)
+        vmin, vmax = np.nanmin(img), np.nanmax(img)
         norm = (img - vmin)/(vmax-vmin)
-        cmap = colormaps['plasma']
+        cmap = colormaps['viridis']      # ← changed from 'plasma'
         rgba = cmap(norm)
 
         folium.raster_layers.ImageOverlay(
