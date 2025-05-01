@@ -5,11 +5,18 @@ import subprocess
 
 import gradio as gr
 import folium
+import geemap.foliumap as foliumap
+import html as html_lib
 import pandas as pd
 import numpy as np
 import rasterio
 import ee
+import joblib
+
+from matplotlib import colormaps
+from matplotlib.colors import to_hex
 import branca.colormap as bcm
+
 
 from matplotlib import colormaps
 from matplotlib.colors import to_hex
