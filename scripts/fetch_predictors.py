@@ -76,12 +76,13 @@ def fetch_with_xee(image: ee.Image, name: str):
     """
     print(f"📥 Fetching via xee → {name}")
     da = ee_to_xarray(
-        dataset=image.clip(region_ee),
-        region=region_geojson,
-        crs="EPSG:4326",
-        scale=SCALE,
-        return_info=False
+        image.clip(region_ee),   # 1st positional: the EE Image
+        region_geojson,          # 2nd positional: your region
+        "EPSG:4326",             # 3rd positional: target CRS
+        SCALE,                   # 4th positional: scale in meters
+        return_info=False        # still a kwarg, since ee_to_xarray accepts it
     )
+
     out_path = f"predictor_rasters/wgs84/{name}.tif"
     da.rio.to_raster(out_path)
     print(f"✅ Exported aligned {name} → {out_path}")
