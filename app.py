@@ -112,7 +112,8 @@ def create_map():
             tick_labels = [],
             colors=vir_colors,
             vmin=0, vmax=1,
-            caption="Normalized (low → high)"
+            caption="Normalized (low → high)",
+            position="bottomright"
         )
         vir_legend.add_to(m)
 
