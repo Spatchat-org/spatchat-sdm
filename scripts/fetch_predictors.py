@@ -1,23 +1,24 @@
 import os
-import json
 import time
+import json
 
 import ee
-import geemap
-from geemap.common import ee_to_xarray
+import xee
 import rioxarray  # for .rio.to_raster()
 import pandas as pd
 
-# --- Authenticate Earth Engine using Hugging Face Secret ---
+# --- Authenticate Earth Engine using Service Account ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
 credentials = ee.ServiceAccountCredentials(
     email=service_account_info['client_email'],
     key_data=json.dumps(service_account_info)
 )
 ee.Initialize(credentials)
-print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
+# initialize Xee so it reuses the same creds (no interactive flow)
+xee.initialize(credentials=credentials)
+print("✅ Authenticated Earth Engine & Xee with Service Account!")
 
-# --- Wait for the uploaded CSV to land on disk ---
+# --- Wait for the uploaded CSV to appear ---
 csv_path = "inputs/presence_points.csv"
 for i in range(5):
     if os.path.exists(csv_path):
@@ -27,28 +28,32 @@ for i in range(5):
 if not os.path.exists(csv_path):
     raise FileNotFoundError("❗ 'inputs/presence_points.csv' not found after 5s wait.")
 
-# --- Load presence points and build Earth Engine region geometry ---
+# --- Load points and build EE region ---
 df = pd.read_csv(csv_path)
-if not {'latitude', 'longitude'}.issubset(df.columns):
+if not {'latitude','longitude'}.issubset(df.columns):
     raise ValueError("❗ CSV must contain 'latitude' and 'longitude' columns.")
 min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
 min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
 buffer = 0.25
-region_ee = ee.Geometry.BBox(min_lon - buffer, min_lat - buffer,
-                             max_lon + buffer, max_lat + buffer)
-region_geojson = region_ee.getInfo()           # for ee_to_xarray
+region_ee = ee.Geometry.BBox(
+    min_lon - buffer, min_lat - buffer,
+    max_lon + buffer, max_lat + buffer
+)
+# For Xee we need GeoJSON
+region_geojson = region_ee.getInfo()
 
 print(f"📍 Loaded {len(df)} presence points.")
-print(f"🗺  Study area: {min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
+print(f"🗺  Study area: "
+      f"{min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
 
-# --- Output dirs ---
+# --- Prepare output dir ---
 os.makedirs("predictor_rasters/wgs84", exist_ok=True)
 
-# --- What you asked to fetch ---
+# --- What layers to fetch? ---
 selected_layers = os.environ.get('SELECTED_LAYERS','').split(',')
 selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
 
-# --- EE sources dictionary ---
+# --- Earth Engine source images ---
 layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope": ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
@@ -64,23 +69,21 @@ SCALE = 30
 
 def fetch_with_xee(image: ee.Image, name: str):
     """
-    Pull `image` at `SCALE` m into an xarray, then write GeoTIFF.
+    Use Xee to pull the EE image at SCALE m,
+    clip to region_ee, convert to xarray, then write GeoTIFF.
     """
-    print(f"📥 Fetching via xee → {name}")
-    # pass the clipped image as the first positional arg (dataset),
-    # then the region, then keyword args:
-    da = ee_to_xarray(
-        image.clip(region_ee),
-        region_geojson,
+    print(f"📥 Fetching via Xee → {name}")
+    da = xee.image_to_xarray(
+        image=image.clip(region_ee),
+        region=region_geojson,
         crs="EPSG:4326",
-        scale=SCALE,
-        return_info=False
+        scale=SCALE
     )
     out_path = f"predictor_rasters/wgs84/{name}.tif"
     da.rio.to_raster(out_path)
     print(f"✅ Exported aligned {name} → {out_path}")
 
-# --- Loop over regular layers ---
+# --- Export non‐landcover predictors ---
 for name in selected_layers:
     if name == "landcover":
         continue
@@ -89,21 +92,33 @@ for name in selected_layers:
         continue
     fetch_with_xee(layer_sources[name], name)
 
-# --- One-hot encode MODIS landcover classes ---
+# --- One‐hot encode selected MODIS landcover classes ---
 if "landcover" in selected_layers and selected_classes:
-    lc_img = layer_sources["landcover"]
     print("🌱 One-hot encoding MODIS landcover classes…")
-    # hard-code code→label map:
-    code_name = {
-      "0":"water","1":"evergreen_needleleaf_forest","2":"evergreen_broadleaf_forest",
-      "3":"deciduous_needleleaf_forest","4":"deciduous_broadleaf_forest","5":"mixed_forest",
-      "6":"closed_shrublands","7":"open_shrublands","8":"woody_savannas","9":"savannas",
-      "10":"grasslands","11":"permanent_wetlands","12":"croplands","13":"urban_and_built_up",
-      "14":"cropland_natural_vegetation_mosaic","15":"snow_and_ice","16":"barren_or_sparsely_vegetated"
+    lc_img = layer_sources["landcover"]
+    # Embedded mapping code→snake_case
+    modis_landcover_map = {
+        "0":  "water",
+        "1":  "evergreen_needleleaf_forest",
+        "2":  "evergreen_broadleaf_forest",
+        "3":  "deciduous_needleleaf_forest",
+        "4":  "deciduous_broadleaf_forest",
+        "5":  "mixed_forest",
+        "6":  "closed_shrublands",
+        "7":  "open_shrublands",
+        "8":  "woody_savannas",
+        "9":  "savannas",
+        "10": "grasslands",
+        "11": "permanent_wetlands",
+        "12": "croplands",
+        "13": "urban_and_built_up",
+        "14": "cropland_natural_vegetation_mosaic",
+        "15": "snow_and_ice",
+        "16": "barren_or_sparsely_vegetated"
     }
     for code in selected_classes:
-        if code not in code_name:
+        if code not in modis_landcover_map:
             continue
-        label = code_name[code]
+        label = modis_landcover_map[code]
         binary = lc_img.eq(int(code))
         fetch_with_xee(binary, f"{code}_{label}")
