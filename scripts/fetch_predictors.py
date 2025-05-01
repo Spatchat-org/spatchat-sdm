@@ -2,14 +2,18 @@
 import os
 import json
 import time
+import math
 
 import ee
 import geemap
-from geemap.common import ee_to_xarray
 import pandas as pd
-import rioxarray  # registers the `.rio` methods on xarray objects
+import numpy as np
+import rasterio
+from rasterio.warp import reproject, Resampling
+from rasterio.transform import from_bounds
+from rasterio.crs import CRS
 
-# --- Authenticate Earth Engine using Service Account from HF secret ---
+# 1) Authenticate Earth Engine with your HF secret
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
 credentials = ee.ServiceAccountCredentials(
     email=service_account_info['client_email'],
@@ -18,7 +22,7 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 print("✅ Earth Engine authenticated with Service Account!")
 
-# --- Wait for presence CSV to land on disk ---
+# 2) Wait for the presence_points.csv to appear
 csv_path = "inputs/presence_points.csv"
 for i in range(5):
     if os.path.exists(csv_path):
@@ -28,30 +32,44 @@ for i in range(5):
 if not os.path.exists(csv_path):
     raise FileNotFoundError("❗ 'inputs/presence_points.csv' not found after 5s.")
 
-# --- Load presence points & build study‐area bbox ---
+# 3) Load your points & compute buffered bbox
 df = pd.read_csv(csv_path)
 if not {'latitude','longitude'}.issubset(df.columns):
     raise ValueError("❗ CSV must contain 'latitude' and 'longitude' columns.")
 min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
 min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
-buffer = 0.25
-region_ee = ee.Geometry.BBox(
+buffer = 0.25  # degrees
+region = ee.Geometry.BBox(
     min_lon - buffer, min_lat - buffer,
     max_lon + buffer, max_lat + buffer
 )
-region_geojson = region_ee.getInfo()  # for ee_to_xarray
-
 print(f"📍 Loaded {len(df)} points; study area = "
-      f"{min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
+      f"{min_lat-buffer:.4f},{min_lon-buffer:.4f} → "
+      f"{max_lat+buffer:.4f},{max_lon+buffer:.4f}")
 
-# --- Prepare output dir ---
+# 4) Build a “master grid” in EPSG:4326 at 30 m resolution
+#    Approx degrees per meter at the equator: 1° ≈ 111 320 m
+deg_per_meter = 1.0 / 111_320.0
+res_deg = 30 * deg_per_meter
+crs = CRS.from_epsg(4326)
+x_pixels = math.ceil((max_lon + buffer - (min_lon - buffer)) / res_deg)
+y_pixels = math.ceil((max_lat + buffer - (min_lat - buffer)) / res_deg)
+transform = from_bounds(
+    min_lon - buffer, min_lat - buffer,
+    max_lon + buffer, max_lat + buffer,
+    x_pixels, y_pixels
+)
+print(f"🗺  Grid: {x_pixels}×{y_pixels} @ {res_deg:.6f}° (~30 m) in EPSG:4326")
+
+# 5) Prepare output dirs
+os.makedirs("predictor_rasters/raw", exist_ok=True)
 os.makedirs("predictor_rasters/wgs84", exist_ok=True)
 
-# --- What layers the UI set in env vars ---
+# 6) Read your UI’s choices from env vars
 selected_layers  = os.environ.get('SELECTED_LAYERS','').split(',')
 selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
 
-# --- Earth Engine source images ---
+# 7) Map of EE sources
 layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
@@ -63,7 +81,7 @@ for i in range(1,20):
     layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO")\
                                   .select(f"bio{str(i).zfill(2)}")
 
-# --- Hard-coded MODIS landcover code→snake_case label map ---
+# 8) Hard-coded MODIS landcover code→snake_case map
 modis_landcover_map = {
     0:"water",1:"evergreen_needleleaf_forest",2:"evergreen_broadleaf_forest",
     3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",5:"mixed_forest",
@@ -72,71 +90,70 @@ modis_landcover_map = {
     14:"cropland_natural_vegetation_mosaic",15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
 }
 
-# --- Desired output resolution in meters ---
-SCALE = 30
+def export_and_reproject(img: ee.Image, name: str):
+    """Export at 30 m, then reproject into our master 4326 grid."""
+    raw_file = f"predictor_rasters/raw/{name}.tif"
+    aligned = f"predictor_rasters/wgs84/{name}.tif"
 
-def fetch_with_xee(img: ee.Image, name: str):
-    """Clip to study region, pull into xarray, normalize dims, write GeoTIFF."""
-    print(f"📥 Fetching via xee → {name}")
-    ds = ee_to_xarray(
-        img.clip(region_ee),
-        region_geojson,
-        crs="EPSG:4326",
-        scale=SCALE,
-        n_images=1,
-        ee_initialize=False
+    # export from EE at 30 m
+    print(f"📥 Fetching '{name}' at 30 m…")
+    geemap.ee_export_image(
+        img.clip(region),
+        filename=raw_file,
+        scale=30,          # meters
+        region=region,
+        file_per_band=False,
+        timeout=600
     )
+    print(f"✅ Saved raw: {raw_file}")
 
-    # Pick out the single data variable
-    var = list(ds.data_vars)[0]
-    da = ds[var]
+    # reproject + resample to our grid
+    with rasterio.open(raw_file) as src:
+        src_arr = src.read(1)
+        dst_arr = np.empty((y_pixels, x_pixels), dtype=src_arr.dtype)
 
-    # Drop time if present
-    if 'time' in da.dims:
-        da = da.isel(time=0)
+        reproject(
+            source=src_arr,
+            destination=dst_arr,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=transform,
+            dst_crs=crs,
+            resampling=Resampling.nearest
+        )
 
-    # Auto-map whatever lon/lat dims you have to x/y
-    mapping = {}
-    for dim in da.dims:
-        l = dim.lower()
-        if l.startswith('lon'):
-            mapping[dim] = 'x'
-        elif l.startswith('lat'):
-            mapping[dim] = 'y'
-        elif dim == 'x':
-            mapping[dim] = 'x'
-        elif dim == 'y':
-            mapping[dim] = 'y'
-    if mapping:
-        da = da.rename(mapping)
+        meta = src.profile.copy()
+        meta.update({
+            'driver':   'GTiff',
+            'height':   y_pixels,
+            'width':    x_pixels,
+            'transform':transform,
+            'crs':      crs,
+            'count':    1
+        })
 
-    # Ensure correct 2D order
-    da = da.transpose('y','x')
+        with rasterio.open(aligned, 'w', **meta) as dst:
+            dst.write(dst_arr, 1)
 
-    # Attach spatial metadata and write out
-    da = da.rio.set_spatial_dims(x_dim='x', y_dim='y')
-    da = da.rio.write_crs("EPSG:4326")
-    out_path = f"predictor_rasters/wgs84/{name}.tif"
-    da.rio.to_raster(out_path)
-    print(f"✅  Aligned → {out_path}")
+    print(f"🌐 Reprojected → {aligned}")
 
-# --- Fetch all selected environmental layers ---
+# 9) Loop through your selected layers
 for name in selected_layers:
     if name == "landcover":
         continue
     if name not in layer_sources:
         print(f"⚠️ Skipping unknown: {name}")
         continue
-    fetch_with_xee(layer_sources[name], name)
+    export_and_reproject(layer_sources[name], name)
 
-# --- One-hot encode any selected MODIS landcover classes ---
+# 10) And one-hot encode any chosen landcover classes
 if "landcover" in selected_layers and selected_classes:
     lc = layer_sources["landcover"]
-    print("🌱 One-hot encoding landcover…")
+    print("🌱 One-hot encoding landcover classes…")
     for code in selected_classes:
         if not code.isdigit():
             continue
         code_i = int(code)
         label  = modis_landcover_map.get(code_i, f"class_{code_i}")
         bin_img = lc.eq(code_i)
-        fetch_with_xee(bin_img, f"{code}_{label}")
+        export_and_reproject(bin_img, f"{code}_{label}")
