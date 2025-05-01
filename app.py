@@ -137,10 +137,12 @@ def create_map():
         vmin=0, vmax=1, 
         caption="Normalized (low → high)",
     )
-    legend.colorbar_width=100
-    legend.colorbar_height=50
+
     legend.add_to(m)
 
+    legend._div.style.width= "100px"
+    legend._div.style.height= "50px"
+    
     # 6) Render
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
