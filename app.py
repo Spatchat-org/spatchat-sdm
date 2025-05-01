@@ -128,7 +128,7 @@ def create_map():
     ).to_step(2)
     ramp.position = 'bottomright'
     ramp.width    = 150   # narrow
-    ramp.height   = 150  # shorter
+    ramp.height   = 30  # shorter
     ramp.add_to(m)
 
     html = html_lib.escape(m.get_root().render())
