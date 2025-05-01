@@ -1,3 +1,8 @@
+import os
+import json
+import shutil
+import subprocess
+
 import gradio as gr
 import geemap.foliumap as foliumap
 import folium
@@ -6,15 +11,12 @@ import pandas as pd
 import numpy as np
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-import os
-import json
 import ee
 import joblib
-import shutil
-import subprocess
-from matplotlib import colormaps                    # ← new
-import matplotlib.cm as mpl_cm
-import branca.colormap as bcm                       # ← new for legends
+
+# new imports for colormaps + legend
+from matplotlib import colormaps
+import branca.colormap as bcm
 
 # --- Authenticate Earth Engine using Service Account ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -25,7 +27,7 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 print("✅ Earth Engine authenticated using Service Account!")
 
-# --- Clean up ---
+# --- Clean up previous session cache ---
 shutil.rmtree("predictor_rasters", ignore_errors=True)
 shutil.rmtree("outputs", ignore_errors=True)
 shutil.rmtree("inputs", ignore_errors=True)
@@ -52,6 +54,13 @@ landcover_options = {
     16: "barren or sparsely vegetated"
 }
 landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
+
+# --- Global continuous colormap for all rasters ---
+CONTINUOUS_COLORMAP = bcm.LinearColormap(
+    colors=colormaps['viridis'].resampled(4).colors,
+    vmin=0, vmax=1,
+    caption="Normalized value (low → high)"
+)
 
 def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
@@ -88,20 +97,20 @@ def create_map():
                 bounds = src.bounds
 
             vmin, vmax = np.nanmin(img), np.nanmax(img)
-            if vmin == vmax:
+            if vmin == vmax or np.isnan(vmin) or np.isnan(vmax):
                 continue
             norm = (img - vmin) / (vmax - vmin)
 
-            # ← use new Matplotlib API
+            # use the same viridis colormap
             cmap = colormaps['viridis']
-            rgba = cmap(norm)  # shape (h, w, 4)
+            rgba = cmap(norm)  # (h, w, 4)
 
             folium.raster_layers.ImageOverlay(
                 image=rgba,
                 bounds=[[bounds.bottom, bounds.left],
                         [bounds.top,    bounds.right]],
                 opacity=1.0,
-                name=f"🟨 {fname} ({vmin:.2f}–{vmax:.2f})"  # show min–max in layer name
+                name=f"🟨 {fname} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
 
     # Suitability map
@@ -114,8 +123,8 @@ def create_map():
         vmin, vmax = np.nanmin(img), np.nanmax(img)
         norm = (img - vmin) / (vmax - vmin)
 
-        # ← use new Matplotlib API
-        cmap = colormaps['plasma']
+        # use same colormap for consistency
+        cmap = colormaps['viridis']
         rgba = cmap(norm)
 
         folium.raster_layers.ImageOverlay(
@@ -126,19 +135,18 @@ def create_map():
             name=f"🎯 Suitability ({vmin:.2f}–{vmax:.2f})"
         ).add_to(m)
 
-        # ← add a continuous legend bar for Suitability
-        legend = bcm.linear.Plasma_09.scale(vmin, vmax)
-        legend.caption = "Suitability"
-        legend.add_to(m)
-
+        # zoom to study area
         m.fit_bounds([[bounds.bottom, bounds.left],
                       [bounds.top,    bounds.right]])
 
+    # bring in layer control + shared legend
     folium.LayerControl(collapsed=False).add_to(m)
+    CONTINUOUS_COLORMAP.add_to(m)
+
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
-# --- Gradio UI ---
+# --- Build and launch Gradio UI ---
 with gr.Blocks() as demo:
     gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
 
@@ -146,14 +154,14 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             upload_input       = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
             layer_selector     = gr.CheckboxGroup(
-                                    choices=[*[f"bio{i}" for i in range(1,20)],
-                                             "elevation","slope","aspect","ndvi","landcover"],
-                                    label="🧬 Environmental Layers"
-                                )
+                                      choices=[*[f"bio{i}" for i in range(1,20)],
+                                               "elevation","slope","aspect","ndvi","landcover"],
+                                      label="🧬 Environmental Layers"
+                                  )
             landcover_selector = gr.CheckboxGroup(
-                                    choices=landcover_choices,
-                                    label="🌿 MODIS Landcover Classes (One-hot)"
-                                )
+                                      choices=landcover_choices,
+                                      label="🌿 MODIS Landcover Classes (One-hot)"
+                                  )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
 
@@ -174,7 +182,7 @@ with gr.Blocks() as demo:
     def run_fetch(selected_layers, selected_landcover):
         if not selected_layers:
             return create_map(), "⚠️ Select at least one predictor."
-        os.environ['SELECTED_LAYERS']            = ','.join(selected_layers)
+        os.environ['SELECTED_LAYERS'] = ','.join(selected_layers)
         codes = [c.split(" – ")[0] for c in selected_landcover]
         os.environ['SELECTED_LANDCOVER_CLASSES'] = ','.join(codes)
 
