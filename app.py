@@ -16,9 +16,9 @@ import joblib
 
 # new imports for colormaps + legend
 from matplotlib import colormaps
-from matplotlib.colors import to_hex
 import matplotlib.cm as mpl_cm
 import branca.colormap as bcm
+from matplotlib.colors import to_hex
 
 # --- Authenticate Earth Engine using Service Account ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -56,16 +56,6 @@ landcover_options = {
     16: "barren or sparsely vegetated"
 }
 landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
-
-# --- Global continuous colormap for all rasters ---
-viridis = colormaps['viridis']
-hex_colors = [to_hex(viridis(v)) for v in np.linspace(0, 1, 256)]
-CONTINUOUS_COLORMAP = bcm.LinearColormap(
-    colors=hex_colors,
-    vmin=0,
-    vmax=1,
-    caption="Normalized value (low → high)"
-)
 
 def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
@@ -106,8 +96,8 @@ def create_map():
                 continue
             norm = (img - vmin) / (vmax - vmin)
 
-            # use Matplotlib API for viridis
-            cmap = viridis
+            # use new Matplotlib API
+            cmap = colormaps['viridis']
             rgba = cmap(norm)  # shape (h, w, 4)
 
             folium.raster_layers.ImageOverlay(
@@ -128,9 +118,9 @@ def create_map():
         vmin, vmax = np.nanmin(img), np.nanmax(img)
         norm = (img - vmin) / (vmax - vmin)
 
-        # use Matplotlib API for plasma
-        plasma = colormaps['plasma']
-        rgba = plasma(norm)
+        # use new Matplotlib API
+        cmap = colormaps['plasma']
+        rgba = cmap(norm)
 
         folium.raster_layers.ImageOverlay(
             image=rgba,
@@ -139,30 +129,43 @@ def create_map():
             opacity=0.7,
             name=f"🎯 Suitability ({vmin:.2f}–{vmax:.2f})"
         ).add_to(m)
+
+        # --- slim vertical legend: only low & high ticks ---
+        start_hex = to_hex(mpl_cm.plasma(0.0))
+        end_hex   = to_hex(mpl_cm.plasma(1.0))
+        legend = bcm.LinearColormap(
+            [start_hex, end_hex],
+            vmin=vmin, vmax=vmax,
+            caption="Normalized value (low → high)"
+        ).to_step(2)
+        # make it tall & skinny
+        legend.width  = 10
+        legend.height = 150
+        legend.add_to(m)
+
         m.fit_bounds([[bounds.bottom, bounds.left],
                       [bounds.top,    bounds.right]])
 
-    # Add layer control + unified legend
     folium.LayerControl(collapsed=False).add_to(m)
-    CONTINUOUS_COLORMAP.add_to(m)
-
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
 # --- Build and launch Gradio UI ---
 with gr.Blocks() as demo:
     gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
+
     with gr.Row():
         with gr.Column(scale=1):
             upload_input       = gr.File(label="📄 Upload Presence CSV", file_types=['.csv'])
             layer_selector     = gr.CheckboxGroup(
-                choices=[*[f"bio{i}" for i in range(1,20)], "elevation","slope","aspect","ndvi","landcover"],
-                label="🧬 Environmental Layers"
-            )
+                                    choices=[*[f"bio{i}" for i in range(1,20)],
+                                             "elevation","slope","aspect","ndvi","landcover"],
+                                    label="🧬 Environmental Layers"
+                                )
             landcover_selector = gr.CheckboxGroup(
-                choices=landcover_choices,
-                label="🌿 MODIS Landcover Classes (One-hot)"
-            )
+                                    choices=landcover_choices,
+                                    label="🌿 MODIS Landcover Classes (One-hot)"
+                                )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
 
