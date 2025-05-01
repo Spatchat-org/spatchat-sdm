@@ -114,6 +114,7 @@ def create_map():
         vir_colors = [ to_hex(c) for c in vir(np.linspace(0,1,256)) ]
         vir_legend = bcm.LinearColormap(
             tick_labels = [],
+            scale_width = 200,
             colors=vir_colors,
             vmin=0, vmax=1,
             caption="Normalized (low → high)"
@@ -122,8 +123,19 @@ def create_map():
         # move to bottom-right
         m.get_root().html.add_child(folium.Element("""
             <style>
-              .linear-colormap { bottom: auto !important; bottom: 10px !important; right: 10px !important; }
-            </style>
+            .linear-colormap {
+              position: absolute !important;
+              bottom: 10px !important;
+              right: 10px !important;
+              top: auto !important;
+              width: 140px !important;
+              height:  12px !important;
+              margin: 0; padding: 0;
+            }
+            .linear-colormap .caption {
+              margin-top: 2px; font-size: 0.8em;
+            }
+          </style>
         """))
 
     # Suitability map + legend
