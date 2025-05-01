@@ -10,11 +10,9 @@ import html as html_lib
 import pandas as pd
 import numpy as np
 import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling
 import ee
 import joblib
 
-# new imports for unified colormap + legend
 from matplotlib import colormaps
 from matplotlib.colors import to_hex
 import branca.colormap as bcm
@@ -112,27 +110,27 @@ def create_map():
             bounds=[[bounds.bottom, bounds.left],
                     [bounds.top,    bounds.right]],
             opacity=0.7,
-            name=f"Suitability ({vmin:.2f}–{vmax:.2f})"
+            name=f"🎯 Suitability ({vmin:.2f}–{vmax:.2f})"
         ).add_to(m)
         m.fit_bounds([[bounds.bottom, bounds.left],
                       [bounds.top,    bounds.right]])
 
-    # --- Universal low→high legend (vertical, top‐right) ---
-    low_color  = to_hex(colormaps['viridis'](0.0))
-    high_color = to_hex(colormaps['viridis'](1.0))
+    # --- Layer control top-right ---
+    folium.LayerControl(collapsed=False, position='topright').add_to(m)
+
+    # --- Unified low→high legend at bottom-right ---
+    low_hex  = to_hex(colormaps['viridis'](0.0))
+    high_hex = to_hex(colormaps['viridis'](1.0))
     ramp = bcm.LinearColormap(
-        [low_color, high_color],
+        [low_hex, high_hex],
         vmin=0, vmax=1,
         caption="Normalized (low → high)"
-    )
-    # make it discrete into two steps, but vertical
-    ramp = ramp.to_step(2)
-    ramp.position = 'topright'
-    ramp.width  = 10    # slim bar
-    ramp.height = 100   # shorter
+    ).to_step(2)
+    ramp.position = 'bottomright'
+    ramp.width    = 20   # narrow
+    ramp.height   = 150  # shorter
     ramp.add_to(m)
 
-    folium.LayerControl(collapsed=False).add_to(m)
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
