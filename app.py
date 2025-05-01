@@ -114,7 +114,6 @@ def create_map():
         vir_colors = [ to_hex(c) for c in vir(np.linspace(0,1,256)) ]
         vir_legend = bcm.LinearColormap(
             tick_labels = [],
-            scale_width = 200,
             colors=vir_colors,
             vmin=0, vmax=1,
             caption="Normalized (low → high)"
