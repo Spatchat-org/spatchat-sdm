@@ -137,6 +137,8 @@ def create_map():
         vmin=0, vmax=1, 
         caption="Normalized (low → high)",
     )
+    legend.colorbar_width=100
+    legend.colorbar_height=150
     legend.add_to(m)
 
     # 6) Render
