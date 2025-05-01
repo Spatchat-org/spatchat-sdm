@@ -176,7 +176,7 @@ with gr.Blocks() as demo:
         shutil.rmtree("predictor_rasters", ignore_errors=True)
         shutil.rmtree("outputs", ignore_errors=True)
         shutil.rmtree("inputs", ignore_errors=True)
-        os.makedirs("inputs", exist_errors=False)
+        os.makedirs("inputs", exist_ok=True)
         shutil.copy(file.name, "inputs/presence_points.csv")
         return create_map(), "✅ Presence points uploaded!"
 
