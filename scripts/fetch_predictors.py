@@ -1,72 +1,52 @@
-#!/usr/bin/env python3
 import os
 import time
-import json
-
 import ee
+import geemap
+from geemap.common import ee_to_xarray
+import rioxarray  # for .rio.to_raster()
 import pandas as pd
-import xarray as xr
-import xee
-import rioxarray  # gives us the .rio accessor
 
-# ————— USER SETTINGS —————
-SCALE = 30     # meters
-BUFFER = 0.25  # degrees
-
-# ————— AUTH EARTH ENGINE —————
-service_account_info = json.loads(os.environ["GEE_SERVICE_ACCOUNT"])
+# --- Authenticate Earth Engine using Service Account ---
+service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
 credentials = ee.ServiceAccountCredentials(
-    email=service_account_info["client_email"],
-    key_data=json.dumps(service_account_info),
+    email=service_account_info['client_email'],
+    key_data=json.dumps(service_account_info)
 )
 ee.Initialize(credentials)
-print("✅ Earth Engine authenticated successfully!")
+print("✅ Earth Engine authenticated successfully inside fetch_predictors.py!")
 
-# ————— WAIT FOR INPUT CSV —————
+# --- Wait for presence CSV ---
 csv_path = "inputs/presence_points.csv"
-for _ in range(5):
+for i in range(5):
     if os.path.exists(csv_path):
         break
-    print("⏳ Waiting for presence_points.csv…")
+    print(f"⏳ Waiting for presence_points.csv... ({i+1}s)")
     time.sleep(1)
 if not os.path.exists(csv_path):
-    raise FileNotFoundError("❗ inputs/presence_points.csv not found")
+    raise FileNotFoundError("❗ 'inputs/presence_points.csv' not found after 5s wait.")
 
-# ————— LOAD POINTS & DEFINE REGION —————
+# --- Load points & build region ---
 df = pd.read_csv(csv_path)
-if not {"latitude", "longitude"}.issubset(df.columns):
-    raise ValueError("❗ CSV must contain 'latitude' & 'longitude' columns")
+if not {'latitude','longitude'}.issubset(df.columns):
+    raise ValueError("❗ CSV must contain 'latitude' and 'longitude' columns.")
+min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
+min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
+buffer = 0.25
+region_ee = ee.Geometry.BBox(min_lon - buffer, min_lat - buffer,
+                             max_lon + buffer, max_lat + buffer)
+region_geojson = region_ee.getInfo()
 
-min_lat, max_lat = df["latitude"].min(), df["latitude"].max()
-min_lon, max_lon = df["longitude"].min(), df["longitude"].max()
-region_ee = ee.Geometry.BBox(
-    min_lon - BUFFER, min_lat - BUFFER,
-    max_lon + BUFFER, max_lat + BUFFER
-)
-print(f"📍 Loaded {len(df)} points → region: "
-      f"{min_lat-BUFFER},{min_lon-BUFFER} to {max_lat+BUFFER},{max_lon+BUFFER}")
+print(f"📍 Loaded {len(df)} presence points.")
+print(f"🗺  Study area: {min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
 
-# ————— OUTPUT DIRECTORY —————
-out_dir = "predictor_rasters/wgs84"
-os.makedirs(out_dir, exist_ok=True)
+# --- Output dir ---
+os.makedirs("predictor_rasters/wgs84", exist_ok=True)
 
-# ————— WHAT TO FETCH —————
-selected_layers = os.environ.get("SELECTED_LAYERS", "").split(",")
-selected_classes = os.environ.get("SELECTED_LANDCOVER_CLASSES", "").split(",")
+# --- What to fetch ---
+selected_layers  = os.environ.get('SELECTED_LAYERS','').split(',')
+selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
 
-# ————— EARTH ENGINE SOURCES —————
-layer_sources = {
-    "elevation":  ee.Image("USGS/SRTMGL1_003"),
-    "slope":      ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
-    "aspect":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
-    "ndvi":       ee.ImageCollection("MODIS/061/MOD13A2").select("NDVI").mean(),
-    "landcover":  ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first(),
-}
-for i in range(1, 20):
-    layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO")\
-                               .select(f"bio{str(i).zfill(2)}")
-
-# ————— LANDCOVER CODE→NAME MAP —————
+# --- Hard-coded MODIS landcover map ---
 modis_landcover_map = {
     0:  "water",
     1:  "evergreen_needleleaf_forest",
@@ -84,63 +64,62 @@ modis_landcover_map = {
     13: "urban_and_built_up",
     14: "cropland_natural_vegetation_mosaic",
     15: "snow_and_ice",
-    16: "barren_or_sparsely_vegetated",
+    16: "barren_or_sparsely_vegetated"
 }
 
-def fetch_layer(img: ee.Image, name: str):
-    print(f"📥 Fetching → {name}")
-    clipped = img.clip(region_ee)
+# --- EE Sources ---
+layer_sources = {
+    "elevation": ee.Image("USGS/SRTMGL1_003"),
+    "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
+    "aspect":    ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
+    "ndvi":      ee.ImageCollection("MODIS/061/MOD13A2").select("NDVI").mean(),
+    "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first()
+}
+for i in range(1,20):
+    layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO")\
+                               .select(f"bio{str(i).zfill(2)}")
 
-    # load into xarray via Xee
-    ds: xr.Dataset = xr.open_dataset(
-        clipped,
-        engine=xee.EarthEngineBackendEntrypoint,
+# --- Desired scale (meters) ---
+SCALE = 30
+
+def fetch_with_xee(image: ee.Image, name: str):
+    """
+    Pull `image` at `SCALE` m into an xarray, squeeze singleton dims,
+    then write GeoTIFF.
+    """
+    print(f"📥 Fetching via xee → {name}")
+    da = ee_to_xarray(
+        image=image.clip(region_ee),
+        region=region_geojson,
         crs="EPSG:4326",
         scale=SCALE,
+        return_info=False
     )
-
-    # extract the single band into a DataArray
-    var = list(ds.data_vars)[0]
-    da: xr.DataArray = ds[var]
-
-    # rename any lon/lat dims to x/y
-    rename_dims = {}
-    for d in da.dims:
-        dl = d.lower()
-        if "lon" in dl or d == "x":
-            rename_dims[d] = "x"
-        elif "lat" in dl or d == "y":
-            rename_dims[d] = "y"
-    da = da.rename(rename_dims)
-
-    # set spatial dims & CRS for rioxarray
-    da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
-    da = da.rio.write_crs("EPSG:4326", inplace=True)
-
-    # export GeoTIFF
-    out_path = os.path.join(out_dir, f"{name}.tif")
+    # drop any singleton dims (e.g., time or band) so it's purely 2D
+    da = da.squeeze()
+    out_path = f"predictor_rasters/wgs84/{name}.tif"
     da.rio.to_raster(out_path)
     print(f"✅ Exported aligned {name} → {out_path}")
 
-# ————— FETCH STANDARD LAYERS —————
-for layer in selected_layers:
-    if layer == "landcover":
+# --- Loop over regular layers ---
+for name in selected_layers:
+    if name == "landcover":
         continue
-    if layer not in layer_sources:
-        print(f"⚠️ Skipping unknown layer: {layer}")
+    if name not in layer_sources:
+        print(f"⚠️ Skipping unknown layer: {name}")
         continue
-    fetch_layer(layer_sources[layer], layer)
+    fetch_with_xee(layer_sources[name], name)
 
-# ————— FETCH ONE-HOT LANDCOVER —————
+# --- One-hot landcover ---
 if "landcover" in selected_layers and selected_classes:
-    print("🌱 One-hot encoding MODIS landcover…")
+    print("🌱 One-hot encoding MODIS landcover classes…")
     lc_img = layer_sources["landcover"]
-    for code_str in selected_classes:
-        if not code_str.isdigit():
+    for code in selected_classes:
+        if not code.isdigit():
             continue
-        code = int(code_str)
-        name = modis_landcover_map.get(code)
-        if not name:
-            print(f"⚠️ No mapping for code {code}")
+        ci = int(code)
+        if ci not in modis_landcover_map:
             continue
-        fetch_layer(lc_img.eq(code), f"{code}_{name}")
+        label = modis_landcover_map[ci]
+        binary = lc_img.eq(ci)
+        fetch_with_xee(binary, f"{ci}_{label}")
