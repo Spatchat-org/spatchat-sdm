@@ -7,7 +7,7 @@ import ee
 import geemap
 from geemap.common import ee_to_xarray
 import pandas as pd
-import rioxarray  # noqa: F401  Provides the .rio accessor
+import rioxarray  # noqa: F401
 
 # --- 1) Authenticate Earth Engine via Service Account ---
 service_account_info = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
@@ -48,11 +48,11 @@ print(f"📍 Loaded {len(df)} points; study area = "
 # --- 4) Prepare output folder ---
 os.makedirs("predictor_rasters/wgs84", exist_ok=True)
 
-# --- 5) What the user selected via UI (exported into envvars) ---
+# --- 5) What the user selected via UI (in envvars) ---
 selected_layers  = os.environ.get('SELECTED_LAYERS','').split(',')
 selected_classes = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
 
-# --- 6) EE sources dictionary ---
+# --- 6) Earth Engine source images ---
 layer_sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
@@ -64,7 +64,7 @@ for i in range(1,20):
     layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO")\
                                   .select(f"bio{str(i).zfill(2)}")
 
-# --- 7) Inlined MODIS code→snake_case map (no JSON file!) ---
+# --- 7) Inline MODIS landcover code→snake_case map ---
 modis_landcover_map = {
      0:"water",1:"evergreen_needleleaf_forest",2:"evergreen_broadleaf_forest",
      3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",
@@ -74,16 +74,17 @@ modis_landcover_map = {
     15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
 }
 
-# --- 8) Desired native resolution (meters) ---
+# --- 8) Desired output resolution (meters) ---
 SCALE = 30
 
 def fetch_with_xee(img: ee.Image, name: str):
     """
-    1) Clip
+    1) Clip to region
     2) ee_to_xarray → xarray.Dataset
-    3) pick the single var & drop time
-    4) rename dims, transpose to (y,x)
-    5) write CRS + raster
+    3) pick the lone var, drop time
+    4) detect & rename spatial dims to 'x','y'
+    5) transpose to (y,x)
+    6) write GeoTIFF
     """
     print(f"📥 Fetching via xee → {name}")
     ds = ee_to_xarray(
@@ -95,22 +96,30 @@ def fetch_with_xee(img: ee.Image, name: str):
         ee_initialize=False
     )
 
-    # pick the one data variable
+    # 3) pick the single data variable
     var = list(ds.data_vars)[0]
     da = ds[var]
 
-    # drop time if it exists
+    # drop time if present
     if "time" in da.dims:
         da = da.isel(time=0)
 
-    # rename the EE default coords → x,y
-    # (ee_to_xarray names them 'longitude' & 'latitude')
-    da = da.rename({"longitude":"x", "latitude":"y"})
+    # 4) detect & rename whatever dims geemap used → 'x','y'
+    mapping = {}
+    for d in da.dims:
+        dl = d.lower()
+        if dl in ("longitude","lon","long"):
+            mapping[d] = "x"
+        if dl in ("latitude","lat"):
+            mapping[d] = "y"
+    if mapping:
+        da = da.rename(mapping)
 
-    # ensure the dim order is exactly (y, x)
-    da = da.transpose("y", "x")
+    # 5) ensure exactly (y,x)
+    if "y" in da.dims and "x" in da.dims:
+        da = da.transpose("y", "x")
 
-    # tell rioxarray which dims are spatial & write CRS
+    # attach spatial dims & CRS
     da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
     da = da.rio.write_crs("EPSG:4326")
 
@@ -118,7 +127,7 @@ def fetch_with_xee(img: ee.Image, name: str):
     da.rio.to_raster(out)
     print(f"✅ Aligned → {out}")
 
-# --- 9) Fetch each regular predictor ---
+# --- 9) Fetch each non‐landcover predictor ---
 for name in selected_layers:
     if name == "landcover":
         continue
