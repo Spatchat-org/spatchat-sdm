@@ -26,9 +26,8 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 
 # --- Clean up last session ---
-shutil.rmtree("predictor_rasters", ignore_errors=True)
-shutil.rmtree("outputs", ignore_errors=True)
-shutil.rmtree("inputs", ignore_errors=True)
+for d in ("predictor_rasters","outputs","inputs"):
+    shutil.rmtree(d, ignore_errors=True)
 os.makedirs("inputs", exist_ok=True)
 
 # --- Landcover labels (for one-hot) ---
@@ -111,8 +110,6 @@ def create_map():
             vmin=0, vmax=1,
             caption="Normalized (low → high)"
         )
-        # pin it top-right
-        vir_legend.options['position'] = 'topright'
         vir_legend.add_to(m)
 
     # 5) Suitability map + legend
@@ -140,30 +137,31 @@ def create_map():
             vmin=vmin, vmax=vmax,
             caption="Suitability"
         )
-        suit_legend.options['position'] = 'topright'
         suit_legend.add_to(m)
 
-    # 6) Layer control & (optional) CSS fallback
+    # 6) Layer control
     folium.LayerControl(collapsed=False).add_to(m)
+
+    # 7) Inject CSS to force all branca colormaps into top-right
     css = """
     <style>
-    /* ensure any branca-colormap in bottom-left moves top-right */
+    /* Move any branca legend from bottom-left into top-right */
     .leaflet-bottom.leaflet-left .branca-colormap {
       position: absolute !important;
       top: 10px !important;
       right: 10px !important;
-      bottom: auto !important;
       left: auto !important;
+      bottom: auto !important;
     }
     </style>
     """
     m.get_root().header.add_child(folium.Element(css))
 
-    # 7) Render
+    # 8) Render & return
     html = html_lib.escape(m.get_root().render())
     return f"<iframe srcdoc=\"{html}\" style=\"width:100%; height:600px; border:none;\"></iframe>"
 
-# --- Gradio UI ---
+# --- Gradio UI setup ---
 with gr.Blocks() as demo:
     gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
 
@@ -189,7 +187,7 @@ with gr.Blocks() as demo:
     def handle_upload(file):
         if not file or not hasattr(file, "name"):
             return create_map(), "⚠️ No file uploaded."
-        for d in ["predictor_rasters","outputs","inputs"]:
+        for d in ("predictor_rasters","outputs","inputs"):
             shutil.rmtree(d, ignore_errors=True)
         os.makedirs("inputs", exist_ok=True)
         shutil.copy(file.name, "inputs/presence_points.csv")
@@ -210,7 +208,7 @@ with gr.Blocks() as demo:
             capture_output=True, text=True
         )
         print(res.stdout, res.stderr)
-        msg = "✅ Predictors fetched." if res.returncode==0 else "❌ Fetch failed; check logs."
+        msg = "✅ Predictors fetched." if res.returncode==0 else "❌ Fetch failed; see logs."
         return create_map(), msg
 
     def run_model():
