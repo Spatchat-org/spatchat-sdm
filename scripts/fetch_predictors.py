@@ -6,8 +6,8 @@ import json
 import ee
 import pandas as pd
 import xarray as xr
-import xee                              # the Xee backend
-import rioxarray                        # enables the .rio accessor
+import xee                              # Xee backend for xarray
+import rioxarray                        # for the .rio accessor
 
 # ————— USER CONFIGURATION —————
 SCALE = 30       # output resolution in meters
@@ -91,11 +91,12 @@ modis_landcover_map = {
 def fetch_layer(img: ee.Image, name: str):
     """
     Clip to region_ee, pull down at SCALE via Xee→xarray, 
-    and write out an aligned GeoTIFF.
+    rename dims for rioxarray, and write an aligned GeoTIFF.
     """
     print(f"📥 Fetching → {name}")
     clipped = img.clip(region_ee)
 
+    # Open with Xee backend
     ds = xr.open_dataset(
         clipped,
         engine=xee.EarthEngineBackendEntrypoint,
@@ -103,9 +104,24 @@ def fetch_layer(img: ee.Image, name: str):
         scale=SCALE,
     )
 
+    # Rename EE dims ('longitude','latitude') → ('x','y') for rioxarray
+    rename_dims = {}
+    if "longitude" in ds.dims:
+        rename_dims["longitude"] = "x"
+    if "latitude" in ds.dims:
+        rename_dims["latitude"] = "y"
+    if rename_dims:
+        ds = ds.rename(rename_dims)
+
+    # Tell rioxarray which dims are spatial, then set the CRS
+    ds = ds.rio.set_spatial_dims(x_dim="x", y_dim="y")
+    ds.rio.write_crs("EPSG:4326", inplace=True)
+
+    # Write out GeoTIFF
     out_path = os.path.join(out_dir, f"{name}.tif")
     ds.rio.to_raster(out_path)
     print(f"✅ Exported aligned {name} → {out_path}")
+
 
 # ————— FETCH STANDARD PREDICTORS —————
 for layer in selected_layers:
