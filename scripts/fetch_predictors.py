@@ -6,14 +6,14 @@ import json
 import ee
 import pandas as pd
 import xarray as xr
-import xee                              # Xee backend for xarray
-import rioxarray                        # for the .rio accessor
+import xee                               # Xee backend for xarray
+import rioxarray                         # adds the .rio accessor
 
-# ————— USER CONFIGURATION —————
-SCALE = 30       # output resolution in meters
-BUFFER = 0.25    # degrees around your presence points
+# ————— USER SETTINGS —————
+SCALE = 30     # in meters
+BUFFER = 0.25  # degrees buffer around points
 
-# ————— EARTH ENGINE AUTH —————
+# ————— AUTH EARTH ENGINE —————
 service_account_info = json.loads(os.environ["GEE_SERVICE_ACCOUNT"])
 credentials = ee.ServiceAccountCredentials(
     email=service_account_info["client_email"],
@@ -22,7 +22,7 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 print("✅ Earth Engine authenticated successfully!")
 
-# ————— WAIT FOR CSV —————
+# ————— WAIT FOR UPLOADED CSV —————
 csv_path = "inputs/presence_points.csv"
 for _ in range(5):
     if os.path.exists(csv_path):
@@ -32,7 +32,7 @@ for _ in range(5):
 if not os.path.exists(csv_path):
     raise FileNotFoundError("❗ inputs/presence_points.csv not found")
 
-# ————— LOAD POINTS & DEFINE REGION —————
+# ————— LOAD PRESENCE POINTS & DEFINE REGION —————
 df = pd.read_csv(csv_path)
 if not {"latitude", "longitude"}.issubset(df.columns):
     raise ValueError("❗ CSV must contain 'latitude' & 'longitude' columns")
@@ -47,7 +47,7 @@ region_ee = ee.Geometry.BBox(
 print(f"📍 Loaded {len(df)} points → region: "
       f"{min_lat-BUFFER},{min_lon-BUFFER} to {max_lat+BUFFER},{max_lon+BUFFER}")
 
-# ————— PREP OUTPUT DIR —————
+# ————— OUTPUT DIR —————
 out_dir = "predictor_rasters/wgs84"
 os.makedirs(out_dir, exist_ok=True)
 
@@ -55,19 +55,19 @@ os.makedirs(out_dir, exist_ok=True)
 selected_layers = os.environ.get("SELECTED_LAYERS", "").split(",")
 selected_classes = os.environ.get("SELECTED_LANDCOVER_CLASSES", "").split(",")
 
-# ————— EE IMAGES —————
+# ————— EARTH-ENGINE SOURCES —————
 layer_sources = {
-    "elevation": ee.Image("USGS/SRTMGL1_003"),
-    "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
-    "aspect":    ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
-    "ndvi":      ee.ImageCollection("MODIS/061/MOD13A2").select("NDVI").mean(),
-    "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first(),
+    "elevation":  ee.Image("USGS/SRTMGL1_003"),
+    "slope":      ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
+    "aspect":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
+    "ndvi":       ee.ImageCollection("MODIS/061/MOD13A2").select("NDVI").mean(),
+    "landcover":  ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first(),
 }
 for i in range(1, 20):
     layer_sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO")\
                                .select(f"bio{str(i).zfill(2)}")
 
-# ————— HARDCODED LANDCOVER MAP —————
+# ————— HARD-CODED LANDCOVER MAP —————
 modis_landcover_map = {
     0:  "water",
     1:  "evergreen_needleleaf_forest",
@@ -90,13 +90,13 @@ modis_landcover_map = {
 
 def fetch_layer(img: ee.Image, name: str):
     """
-    Clip to region_ee, pull down at SCALE via Xee→xarray, 
-    rename dims for rioxarray, and write an aligned GeoTIFF.
+    Clip → pull via Xee into xarray → rename dims to x/y → set CRS →
+    write aligned GeoTIFF.
     """
     print(f"📥 Fetching → {name}")
     clipped = img.clip(region_ee)
 
-    # Open with Xee backend
+    # open with Xee backend
     ds = xr.open_dataset(
         clipped,
         engine=xee.EarthEngineBackendEntrypoint,
@@ -104,26 +104,30 @@ def fetch_layer(img: ee.Image, name: str):
         scale=SCALE,
     )
 
-    # Rename EE dims ('longitude','latitude') → ('x','y') for rioxarray
+    # --- Rename any lon/lat dims to x/y for rioxarray
     rename_dims = {}
-    if "longitude" in ds.dims:
-        rename_dims["longitude"] = "x"
-    if "latitude" in ds.dims:
-        rename_dims["latitude"] = "y"
-    if rename_dims:
-        ds = ds.rename(rename_dims)
+    for d in ds.dims:
+        dl = d.lower()
+        if "lon" in dl or d == "x":
+            rename_dims[d] = "x"
+        elif "lat" in dl or d == "y":
+            rename_dims[d] = "y"
+    if not rename_dims:
+        raise RuntimeError(f"❗ Could not detect spatial dims in {ds.dims}")
+    ds = ds.rename(rename_dims)
 
-    # Tell rioxarray which dims are spatial, then set the CRS
+    # --- Tell rioxarray which are spatial dims &
+    #     write the CRS so .rio.to_raster() works
     ds = ds.rio.set_spatial_dims(x_dim="x", y_dim="y")
     ds.rio.write_crs("EPSG:4326", inplace=True)
 
-    # Write out GeoTIFF
+    # --- Export GeoTIFF
     out_path = os.path.join(out_dir, f"{name}.tif")
     ds.rio.to_raster(out_path)
     print(f"✅ Exported aligned {name} → {out_path}")
 
 
-# ————— FETCH STANDARD PREDICTORS —————
+# ————— STANDARD PREDICTORS —————
 for layer in selected_layers:
     if layer == "landcover":
         continue
