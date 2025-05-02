@@ -254,12 +254,17 @@ def on_upload(f, history):
     shutil.copy(f.name, "inputs/presence_points.csv")
 
     # now tell them what layers are available
-    layers_list = ", ".join(LAYERS)
+    extras = LAYERS[19:-1]  # ['elevation','slope','aspect','ndvi']
+    last   = LAYERS[-1]     # 'landcover'
+    layers_str = (
+        f"bio1–bio19, {', '.join(extras)}, and {last} "
+        "(e.g., water, urban, forest, cropland, etc.)"
+    )
     new_history.append({
         "role": "assistant",
         "content": (
             "✅ Uploaded! Available layers are:\n\n"
-            f"{layers_list}\n\n"
+            f"{layers_str}\n\n"
             "Now say something like “fetch elevation, ndvi, bio1” to grab those layers."
         )
     })
