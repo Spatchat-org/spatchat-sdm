@@ -204,7 +204,7 @@ with gr.Blocks() as demo:
                                  )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
-            download_button    = gr.DownloadButton("📥 Download Results")
+            download_button    = gr.DownloadButton("📥 Download Results", zip_results)
             
             stats_table        = gr.Dataframe(
                                     headers=["predictor","coefficient"],
