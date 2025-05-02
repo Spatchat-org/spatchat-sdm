@@ -234,8 +234,7 @@ with gr.Blocks() as demo:
             send_btn     = gr.Button("Send")
             download_btn = gr.DownloadButton(
                                 "📥 Download Results",
-                                zip_results,
-                                disabled=True
+                                zip_results
                             )
 
     file_input.change(
@@ -256,5 +255,9 @@ with gr.Blocks() as demo:
         outputs=[chat, map_out, download_btn, state]
     )
     user_in.submit(lambda: "", None, user_in)
+    download_btn.click(
+        zip_results,
+        outputs=download_btn
+    )
 
     demo.launch()
