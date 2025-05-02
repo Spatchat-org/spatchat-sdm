@@ -37,8 +37,11 @@ client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 for d in ("predictor_rasters", "outputs", "inputs"):
     shutil.rmtree(d, ignore_errors=True)
 os.makedirs("inputs", exist_ok=True)
+# also clear any old results bundle
+if os.path.exists("spatchat_results.zip"):
+    os.remove("spatchat_results.zip")
 
-# --- Layers & Tools (unchanged) ---
+# --- Layers & Tools ---
 LAYERS = [f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"]
 TOOLS = {
     "fetch": lambda args: run_fetch(args.get("layers", []), args.get("landcover", [])),
@@ -46,7 +49,7 @@ TOOLS = {
     "download": lambda args: (create_map(), zip_results())
 }
 
-# --- Pre-render colorbar (unchanged) ---
+# --- Pre-render colorbar ---
 fig, ax = plt.subplots(figsize=(4, 0.5))
 norm = Normalize(vmin=0, vmax=1)
 plt.colorbar(ScalarMappable(norm=norm, cmap="viridis"),
@@ -57,7 +60,7 @@ buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=100); plt.close(fig)
 buf.seek(0)
 COLORBAR_BASE64 = base64.b64encode(buf.read()).decode()
 
-# --- Landcover choices (unchanged) ---
+# --- Landcover choices ---
 landcover_options = {
     0:"water",1:"evergreen needleleaf forest",2:"evergreen broadleaf forest",
     3:"deciduous needleleaf forest",4:"deciduous broadleaf forest",5:"mixed forest",
@@ -68,7 +71,7 @@ landcover_options = {
 }
 landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
 
-# --- LLM prompts (unchanged) ---
+# --- LLM prompts ---
 SYSTEM_PROMPT = """
 You are SpatChat, a friendly assistant orchestrating SDM.
 Your job is to explain to the user what options they have in each step, 
@@ -170,39 +173,33 @@ def run_model():
     if proc.returncode != 0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
     stats_df = pd.read_csv("outputs/model_stats.csv")
-    zip_results()  # pre-generate zip
+    # pre-generate zip
+    zip_results()
     return create_map(), "✅ Model ran successfully! Results are ready for download using the Download Button!", stats_df, "outputs/model_stats.csv"
 
 def chat_step(file, user_msg, history, state):
-    # --- new: start with the Download button hidden ---
-    download_update = gr.update(visible=False)
-
     # 2) build the LLM prompt to pick a tool
     messages = [{"role":"system","content":SYSTEM_PROMPT}]
     messages += history
     messages.append({"role":"user","content":user_msg})
-    # ask LLM
     response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
         messages=messages,
         temperature=0.0,
     ).choices[0].message.content
 
-    # 3) parse JSON tool call
     try:
         call = json.loads(response)
         tool_name = call["tool"]
         func      = TOOLS[tool_name]
-    except Exception as e:
-        # fallback if JSON failed
+    except Exception:
         assistant_txt = (
             "Sorry, I couldn't understand that.  Please say 'fetch ...', "
             "'run model', or 'download'."
         )
         history.append({"role":"assistant","content":assistant_txt})
-        return history, create_map(), download_update, state
+        return history, create_map(), state
 
-    # 4) actually invoke the tool
     result = func(call)
     if tool_name=="fetch":
         m_out, status = result
@@ -211,7 +208,7 @@ def chat_step(file, user_msg, history, state):
             "Great! Now you can train your SDM or fetch other layers.  "
             "When you’re ready, just say “run model”."
         )
-        # download_update stays hidden
+        download_path = None
 
     elif tool_name=="run_model":
         m_out, status = result
@@ -219,46 +216,32 @@ def chat_step(file, user_msg, history, state):
             f"{status}\n\n"
             "Nice work!  Feel free to grab the results in .ZIP via the Download Button below!"
         )
-        # --- new: show the Download button on model completion ---
-        download_update = gr.update(visible=True)
+        download_path = None
+
+    elif tool_name=="download":
+        m_out, _ = result
+        assistant_txt = (
+            "✅ Here’s your ZIP bundle!<br>"
+            f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
+            "<script>document.getElementById('dl').click();</script>"
+        )
+        download_path = None
 
     else:
-        # should never happen, but catch
         m_out = create_map()
         assistant_txt = "Sorry, I don’t know that command."
-        # download_update stays hidden
+        download_path = None
 
-    # 5) record in history
-    history.append({"role":"user",   "content": user_msg})
-    history.append({"role":"assistant","content": assistant_txt})
-
-    return history, m_out, download_update, state
+    history.append({"role":"user","content":user_msg})
+    history.append({"role":"assistant","content":assistant_txt})
+    return history, m_out, state
 
 def on_upload(f, history):
     new_history = history.copy()
-    if not f or not hasattr(f, "name"):
-        return new_history, create_map(), None, {"stage":"await_upload"}
-
-    # copy csv in
-    shutil.copy(f.name, "inputs/presence_points.csv")
-
-    # now tell them what layers are available
-    extras = LAYERS[19:-1]  # ['elevation','slope','aspect','ndvi']
-    last   = LAYERS[-1]     # 'landcover'
-    layers_str = (
-        f"bio1–bio19, {', '.join(extras)}, and {last} "
-        "(e.g., water, urban, forest, cropland, etc.)"
-    )
-    new_history.append({
-        "role": "assistant",
-        "content": (
-            "✅ Uploaded! Available layers are:\n\n"
-            f"{layers_str}\n\n"
-            "Now say something like “fetch elevation, ndvi, bio1” to grab those layers."
-        )
-    })
-
-    return new_history, create_map(), None, {"stage": "await_fetch"}
+    if f and hasattr(f, "name"):
+        shutil.copy(f.name, "inputs/presence_points.csv")
+        new_history.append({"role":"assistant","content":"✅ Uploaded! Now say “fetch …”"})
+    return new_history, create_map(), state
 
 # --- Build & launch UI ---
 with gr.Blocks() as demo:
@@ -273,37 +256,30 @@ with gr.Blocks() as demo:
             map_out      = gr.HTML(create_map(), label="🗺️ Map Preview")
             chat         = gr.Chatbot(
                                 value=[{"role":"assistant",
-                                        "content":"👋 Hello! I am SpatChat, a friendly assistant to help you build SDM. Upload your presence‑points CSV to begin."}],
+                                        "content":"👋 Hello! I am SpatChat. Upload your presence‑points CSV to begin."}],
                                 type="messages"
                             )
             user_in      = gr.Textbox(placeholder="Type commands…")
             send_btn     = gr.Button("Send")
-            download_btn = gr.DownloadButton(
-                                "📥 Download Results",
-                                zip_results
-                            )
+            download_btn = gr.DownloadButton("📥 Download Results", file=zip_results)
 
     file_input.change(
         on_upload,
         inputs=[file_input, chat],
-        outputs=[chat, map_out, download_btn, state]
+        outputs=[chat, map_out, state]
     )
 
     send_btn.click(
         chat_step,
         inputs=[file_input, user_in, chat, state],
-        outputs=[chat, map_out, download_btn, state]
+        outputs=[chat, map_out, state]
     )
     send_btn.click(lambda: "", None, user_in)
     user_in.submit(
         chat_step,
         inputs=[file_input, user_in, chat, state],
-        outputs=[chat, map_out, download_btn, state]
+        outputs=[chat, map_out, state]
     )
     user_in.submit(lambda: "", None, user_in)
-    download_btn.click(
-        zip_results,
-        outputs=download_btn
-    )
 
     demo.launch()
