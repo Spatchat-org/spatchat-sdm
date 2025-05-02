@@ -117,4 +117,153 @@ def create_map():
     # Predictor rasters (Viridis)
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
-        for fn in sorted(os.listdir(r
+        for fn in sorted(os.listdir(rasdir)):
+            if not fn.endswith(".tif"):
+                continue
+            path = os.path.join(rasdir, fn)
+            with rasterio.open(path) as src:
+                img = src.read(1)
+                b = src.bounds
+            vmin, vmax = np.nanmin(img), np.nanmax(img)
+            if np.isnan(vmin) or vmin == vmax:
+                continue
+            rgba = colormaps["viridis"]((img - vmin) / (vmax - vmin))
+            folium.raster_layers.ImageOverlay(
+                rgba, [[b.bottom, b.left], [b.top, b.right]],
+                opacity=1.0, name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
+            ).add_to(m)
+
+    # Suitability map (Viridis)
+    sf = "outputs/suitability_map_wgs84.tif"
+    if os.path.exists(sf):
+        with rasterio.open(sf) as src:
+            img = src.read(1)
+            b = src.bounds
+        rgba = colormaps["viridis"]((img - np.nanmin(img)) / (np.nanmax(img) - np.nanmin(img)))
+        folium.raster_layers.ImageOverlay(
+            rgba, [[b.bottom, b.left], [b.top, b.right]],
+            opacity=0.7, name="🎯 Suitability"
+        ).add_to(m)
+
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    # Static colorbar at bottom-right
+    img_html = (
+        f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
+        'style="position:absolute; bottom:20px; right:10px; '
+        'width:200px; height:30px; z-index:1000;" />'
+    )
+    m.get_root().html.add_child(Element(img_html))
+
+    rendered = m.get_root().render()
+    return f'<iframe srcdoc="{html_lib.escape(rendered)}" style="width:100%; height:600px; border:none;"></iframe>'
+
+def run_fetch(sl, lc):
+    if not sl and not lc:
+        return create_map(), "⚠️ Select at least one predictor."
+    layers = list(sl)
+    if lc:
+        layers.append("landcover")
+    os.environ["SELECTED_LAYERS"] = ",".join(layers)
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(c.split(" – ")[0] for c in lc)
+    proc = subprocess.run(["python", "scripts/fetch_predictors.py"], capture_output=True, text=True)
+    ok = proc.returncode == 0
+    msg = "✅ Predictors fetched." if ok else f"❌ Fetch failed:\n{proc.stderr}"
+    return create_map(), msg
+
+def run_model():
+    proc = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
+    stats_df = pd.read_csv("outputs/model_stats.csv")
+    return create_map(), "✅ Model ran successfully!", stats_df, "outputs/model_stats.csv"
+
+def zip_results():
+    zipf = "spatchat_results.zip"
+    if os.path.exists(zipf):
+        os.remove(zipf)
+    with zipfile.ZipFile(zipf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fld in ("predictor_rasters", "outputs"):
+            for root, _, files in os.walk(fld):
+                for f in files:
+                    full = os.path.join(root, f)
+                    zf.write(full, arcname=os.path.relpath(full, "."))
+    return zipf
+
+def chat_step(file, user_msg, history, state):
+    # ... (unchanged) ...
+    # your existing logic here, including the broken download path handling
+    # ...
+
+def on_upload(f, history):
+    # ... (unchanged) ...
+    # your existing on_upload logic
+    # ...
+
+# --- NEW: download‑button handler ---
+def on_download_click(chat_history, state):
+    new_history = chat_history.copy()
+    zip_path = "spatchat_results.zip"
+    if os.path.exists(zip_path):
+        zip_results()
+        new_history.append({"role":"assistant","content":"✅ Results are ready!"})
+        # Show the File block with the fresh zip
+        return new_history, gr.update(value=zip_path, visible=True), state
+    else:
+        new_history.append({"role":"assistant","content":"⚠️ Results not ready yet. Please run the model first."})
+        # Keep the File block hidden
+        return new_history, gr.update(visible=False), state
+
+# --- Build & launch UI ---
+with gr.Blocks() as demo:
+    gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven Species Distribution Modeling")
+
+    # Shared state
+    state = gr.State({"stage": "await_upload"})
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
+        with gr.Column(scale=3):
+            map_out     = gr.HTML(value=create_map(), label="🗺️ Map Preview")
+            chat        = gr.Chatbot(
+                             label="SpatChat Dialog",
+                             type="messages",
+                             value=[{"role":"assistant",
+                                     "content":"👋 Hello! Welcome to SpatChat. Please upload your presence‑points CSV to begin."}]
+                         )
+            user_in     = gr.Textbox(placeholder="Type commands…", label="")
+            send_btn    = gr.Button("Send")
+            # <-- download button + file block -->
+            download_btn = gr.Button("Download Results")
+            download_blk = gr.File(label="Download Results", visible=False)
+
+    # Wire up upload → on_upload
+    file_input.change(
+        on_upload,
+        inputs=[file_input, chat],
+        outputs=[chat, map_out, download_blk, state]
+    )
+
+    # Chat commands (fetch, run_model, download via chat_step)
+    send_btn.click(
+        chat_step,
+        inputs=[file_input, user_in, chat, state],
+        outputs=[chat, map_out, download_blk, state]
+    )
+    send_btn.click(lambda: "", None, user_in)
+    user_in.submit(
+        chat_step,
+        inputs=[file_input, user_in, chat, state],
+        outputs=[chat, map_out, download_blk, state]
+    )
+    user_in.submit(lambda: "", None, user_in)
+
+    # --- Hook up the new Download Results button ---
+    download_btn.click(
+        on_download_click,
+        inputs=[chat, state],
+        outputs=[chat, download_blk, state]
+    )
+
+    demo.launch()
