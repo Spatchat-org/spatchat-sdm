@@ -19,6 +19,7 @@ from matplotlib import pyplot as plt, colormaps
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from folium import Element
+from together import Together 
 from dotenv import load_dotenv
 load_dotenv()
 
