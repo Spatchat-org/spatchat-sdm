@@ -239,7 +239,7 @@ with gr.Blocks() as demo:
     state      = gr.State()  # we’re not doing staged fallbacks any more
     file_input = gr.File(label="Upload presence CSV", type="filepath")
     map_out    = gr.HTML(create_map, label="Map Preview")
-    chatbot    = gr.Chatbot(label="SpatChat Dialog", type="messages", sanitize=False,
+    chatbot    = gr.Chatbot(label="SpatChat Dialog", type="messages",
                             value=[{"role":"assistant",
                                     "content":"👋 Hi! Please upload your presence‑points CSV to begin."}])
     user_in    = gr.Textbox(placeholder="Type a command…")
