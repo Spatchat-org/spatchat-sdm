@@ -40,6 +40,13 @@ for d in ("predictor_rasters", "outputs", "inputs"):
     shutil.rmtree(d, ignore_errors=True)
 os.makedirs("inputs", exist_ok=True)
 
+# --- tool registry ---
+TOOLS = {
+    "fetch": lambda args: run_fetch(args.get("layers",[]), args.get("landcover",[])),
+    "run_model": lambda args: run_model()[:2],    # returns (map, status)
+    "download": lambda args: (create_map(), zip_results())
+}
+
 LAYERS = [f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"]
 
 # --- Pre-render colorbar ---
@@ -69,12 +76,16 @@ landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
 
 # --- System prompt for the LLM ---
 SYSTEM_PROMPT = """
-You are SpatChat, a friendly assistant that orchestrates species distribution modeling:
-1) After the user uploads points. Explain what can be done next and show available layers. 
-After they indicate which layers they want to use, run run_fetch() and fetch those layers, and report back.
-2) After layers are fetched, if they say "run model", run run_model() and display its stats.
-3) After the model, if they say "download" or "yes", run zip_results() and give them the ZIP link.
-Guide them through each step conversationally.
+You are SpatChat, a friendly assistant orchestrating SDM.  Whenever the user
+wants to perform an action, reply _only_ with a JSON object selecting one of
+your tools:
+
+- To fetch layers:     {"tool":"fetch",     "layers":["bio1","ndvi",...]}
+- To run the model:    {"tool":"run_model"}
+- To download results: {"tool":"download"}
+
+Do not write anything else.  After we run that function in Python, we'll show
+its output back to the user and then continue the conversation.
 """.strip()
 
 def create_map():
@@ -174,67 +185,51 @@ def zip_results():
                     zf.write(full, arcname=os.path.relpath(full, "."))
     return zipf
 
-def chat_step(f, msg, history, state):
-    stage = state.get("stage","await_upload")
-    cmd   = msg.strip().lower()
-
-    # --- decide which op to run (same as before) ---
-    if stage=="await_fetch" and cmd.startswith(("fetch","get","use")):
-        m_out, status = run_fetch([], [])
-        op_out = status
-        next_stage = "await_run"
-
-    elif stage=="await_run" and "run model" in cmd:
-        m_out, status, stats_df, _ = run_model()
-        extra = "\n\n" + stats_df.to_markdown(index=False) if stats_df is not None else ""
-        op_out = status + extra
-        next_stage = "await_download"
-
-    elif stage=="await_download" and cmd.startswith(("download","yes","y")):
-        zipf = zip_results()
-        m_out = create_map()
-        op_out = f"✅ Here is your ZIP: {zipf}"
-        next_stage = "done"
-        # return immediately so LLM doesn’t rewrite this final step
-        new_history = history.copy()
-        new_history.append({"role":"user","content": msg})
-        new_history.append({"role":"assistant","content": op_out})
-        return new_history, m_out, zipf, {"stage": next_stage}
-
-    else:
-        # fallback hints
-        if stage=="await_upload":
-            op_out = "Please upload your presence‑points CSV to begin."
-            next_stage="await_upload"
-        elif stage=="await_fetch":
-            op_out = 'Say “fetch …” to download your chosen layers.'
-            next_stage="await_fetch"
-        elif stage=="await_run":
-            op_out = 'Say “run model” to train the SDM.'
-            next_stage="await_run"
-        else:
-            op_out = "Session complete. Upload a new CSV to restart."
-            next_stage="await_upload"
-
-    # --- Build LLM prompt ---
-    messages = [{"role":"system","content": SYSTEM_PROMPT}]
-    # history is already a list of {role,content}
-    messages.extend(history)
-    messages.append({"role":"user","content": msg})
-    messages.append({"role":"system","content": op_out})
-
-    resp = client.chat.completions.create(
+def chat_step(file, user_msg, history, state):
+    # 2) build the LLM prompt to pick a tool
+    messages = [{"role":"system","content":SYSTEM_PROMPT}]
+    messages += history
+    messages.append({"role":"user","content":user_msg})
+    # ask LLM
+    response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=messages, temperature=0.3
+        messages=messages,
+        temperature=0.0,
     ).choices[0].message.content
 
-    # --- Append both user + assistant messages to history ---
-    new_history = history.copy()
-    new_history.append({"role":"user","content": msg})
-    new_history.append({"role":"assistant","content": resp})
+    # 3) parse JSON tool call
+    try:
+        call = json.loads(response)
+        tool_name = call["tool"]
+        func      = TOOLS[tool_name]
+    except Exception as e:
+        # fallback if JSON failed
+        assistant_txt = (
+            "Sorry, I couldn't understand that.  Please say 'fetch ...', "
+            "'run model', or 'download'."
+        )
+        history.append({"role":"assistant","content":assistant_txt})
+        return history, create_map(), None, state
 
-    # no download yet
-    return new_history, m_out, None, {"stage": next_stage}
+    # 4) actually invoke the tool
+    result = func(call)
+    if tool_name=="fetch":
+        m_out, status = result
+        assistant_txt = status
+        download_path = None
+    elif tool_name=="run_model":
+        m_out, status = result
+        assistant_txt = status
+        download_path = None
+    else:  # download
+        m_out, download_path = result
+        assistant_txt = f"✅ Here's your ZIP: {download_path}"
+
+    # 5) record in history
+    history.append({"role":"user",   "content": user_msg})
+    history.append({"role":"assistant","content": assistant_txt})
+
+    return history, m_out, download_path, state
 
 def on_upload(f, history):
     new_history = history.copy()
