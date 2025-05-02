@@ -314,7 +314,8 @@ with gr.Blocks() as demo:
                                       "content":"👋 Hello, I’m SpatChat! I'm here to help you build your SDM! \n"
                                       "To begin, please upload your presence‑points CSV using the upload box directly below this chat."}],
                               type="messages",
-                              label="💬 Chat"
+                              label="💬 Chat",
+                              height=400
                           )
             user_in      = gr.Textbox(label="Ask Spatchat", placeholder="Type commands…")
             file_input   = gr.File(label="📄 Upload Presence CSV", type="filepath")
