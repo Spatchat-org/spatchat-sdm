@@ -193,14 +193,32 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, "outputs/model_stats.csv"
 
 def chat_step(file, user_msg, history, state):
+    # 0) If we haven’t uploaded presence_points.csv yet, always fallback to conversational LLM
+    if not os.path.exists("inputs/presence_points.csv"):
+        fb_msgs = [
+            {"role":"system","content":FALLBACK_PROMPT},
+            {"role":"user","content":user_msg}
+        ]
+        assistant_txt = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb_msgs,
+            temperature=0.7,
+        ).choices[0].message.content
+
+        history.append({"role":"user","content":user_msg})
+        history.append({"role":"assistant","content":assistant_txt})
+        return history, create_map(), state
+
     # 1) Handle “start over” reset
     if re.search(r"\b(start over|restart|clear everything)\b", user_msg, re.I):
         clear_all()
-        new_hist = [{"role":"assistant",
-                     "content":"👋 All cleared! Please upload your presence‑points CSV to begin."}]
+        new_hist = [{
+            "role":"assistant",
+            "content":"👋 All cleared! Please upload your presence‑points CSV to begin."
+        }]
         return new_hist, create_map(), state
 
-    # 2) Ask the tool‑picker LLM
+    # 2) Ask tool‑picker LLM
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
@@ -223,6 +241,7 @@ def chat_step(file, user_msg, history, state):
             messages=fb_msgs,
             temperature=0.7,
         ).choices[0].message.content
+        history.append({"role":"user","content":user_msg})
         history.append({"role":"assistant","content":assistant_txt})
         return history, create_map(), state
 
@@ -248,7 +267,7 @@ def chat_step(file, user_msg, history, state):
         assistant_txt = "✅ ZIP is downloading…"
 
     else:
-        # FALLBACK for unrecognized tool names
+        # FALLBACK for any other unrecognized tool name
         fb_msgs = [
             {"role":"system","content":FALLBACK_PROMPT},
             {"role":"user","content":user_msg}
