@@ -248,7 +248,7 @@ with gr.Blocks() as demo:
         # LEFT COLUMN: Map + Download
         with gr.Column(scale=2):
             map_out      = gr.HTML(create_map(), label="🗺️ Map Preview")
-            download_btn = gr.DownloadButton("📥 Download Results", file=zip_results)
+            download_btn = gr.DownloadButton("📥 Download Results", zip_results)
         # RIGHT COLUMN: Chat + Input + Upload
         with gr.Column(scale=1):
             chat       = gr.Chatbot(
