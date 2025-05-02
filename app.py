@@ -76,7 +76,11 @@ landcover_choices = [f"{k} – {v}" for k, v in landcover_options.items()]
 
 # --- System prompt for the LLM ---
 SYSTEM_PROMPT = """
-You are SpatChat, a friendly assistant orchestrating SDM.  Whenever the user
+You are SpatChat, a friendly assistant orchestrating SDM.
+Your job is to explain to the user what options they have in each step, 
+guiding them through the whole process to build the SDM.
+
+Whenever the user
 wants to perform an action, reply _only_ with a JSON object selecting one of
 your tools:
 
@@ -84,8 +88,13 @@ your tools:
 - To run the model:    {"tool":"run_model"}
 - To download results: {"tool":"download"}
 
-Do not write anything else.  After we run that function in Python, we'll show
-its output back to the user and then continue the conversation.
+After we run that function in Python, we'll show its output back to the user,
+and then continue the conversation, 
+and provide a prompt to the user after each action to guide them on what they should do next.
+If the use ask for statistical results (e.g., show stats), then show them the results from stats_df.
+Be conversational and helpful, but keep the conversation brief.
+If the question is vague, ask the user to clarify.
+
 """.strip()
 
 def create_map():
@@ -221,9 +230,14 @@ def chat_step(file, user_msg, history, state):
         m_out, status = result
         assistant_txt = status
         download_path = None
-    else:  # download
-        m_out, download_path = result
-        assistant_txt = f"✅ Here's your ZIP: {download_path}"
+    elif: tool_name=="download":
+        m_out, _ = result
+        assistant_txt = (
+            "✅ Here’s your ZIP bundle!<br>"
+            f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
+            "<script>document.getElementById('dl').click();</script>"
+        )
+        download_path = None
 
     # 5) record in history
     history.append({"role":"user",   "content": user_msg})
@@ -268,6 +282,7 @@ with gr.Blocks() as demo:
             chat        = gr.Chatbot(
                              label="SpatChat Dialog",
                              type="messages",
+                             sanitize = False,
                              value=[{"role":"assistant",
                                      "content":"👋 Hello! Welcome to SpatChat. Please upload your presence‑points CSV to begin."}]
                          )
