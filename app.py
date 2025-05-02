@@ -39,6 +39,8 @@ for d in ("predictor_rasters","outputs","inputs"):
     shutil.rmtree(d, ignore_errors=True)
 os.makedirs("inputs", exist_ok=True)
 
+LAYERS = [f"bio{i}" for i in range(1,20)] + ["elevation","slope","aspect","ndvi","landcover"]
+
 # --- Pre-render colorbar ---
 fig, ax = plt.subplots(figsize=(4,0.5))
 norm = Normalize(vmin=0, vmax=1)
@@ -64,8 +66,14 @@ landcover_options = {
 }
 landcover_choices = [f"{k} – {v}" for k,v in landcover_options.items()]
 
-# --- Core functions unchanged: create_map(), run_fetch(), run_model(), zip_results() ---
-# (copy them verbatim from your working script)
+# --- System prompt for LLM ---
+SYSTEM_PROMPT = """
+You are SpatChat, a friendly assistant that orchestrates species distribution modeling:
+1) After the user has uploaded presence points, if the user says "fetch …”, trigger our run_fetch() and report the output. Then, prompt the user to run model.
+2) After the user has fetched the layers, if the user says “run model”, trigger run_model() and display its stats.
+3) After the user has run the model, ask if the user wants to download the results. if the user says “download” or “yes”, trigger zip_results() and offer the ZIP.
+Be conversational and guide the user at each step.
+""".strip()
 
 def create_map():
     m = folium.Map(location=[0,0], zoom_start=2, control_scale=True)
@@ -153,14 +161,65 @@ def zip_results():
                     zf.write(full, arcname=os.path.relpath(full,"."))
     return z
 
-# --- System prompt for LLM ---
-SYSTEM_PROMPT = """
-You are SpatChat, a friendly assistant that orchestrates species distribution modeling:
-1) After the user has uploaded presence points, if the user says "fetch …”, trigger our run_fetch() and report the output. Then, prompt the user to run model.
-2) After the user has fetched the layers, if the user says “run model”, trigger run_model() and display its stats.
-3) After the user has run the model, ask if the user wants to download the results. if the user says “download” or “yes”, trigger zip_results() and offer the ZIP.
-Be conversational and guide the user at each step.
-""".strip()
+# unified chat handler
+def chat_step(f, msg, history, state):
+    stage = state.get("stage","await_upload")
+    cmd   = msg.strip().lower()
+
+    # decide which op to run
+    if stage=="await_fetch" and cmd.startswith(("fetch","get","use")):
+        m_out, status = run_fetch([],[])  # we ignore sl, lc: LLM will not pass them
+        op_out = status
+        next_stage="await_run"
+
+    elif stage=="await_run" and "run model" in cmd:
+        m_out, status, stats_df, _ = run_model()
+        op_out = status + ("\n\n" + stats_df.to_markdown(index=False) if stats_df is not None else "")
+        next_stage="await_download"
+
+    elif stage=="await_download" and cmd.startswith(("download","yes","y")):
+        zipf = zip_results()
+        op_out = f"✅ Here is your ZIP: {zipf}"
+        next_stage="done"
+
+    else:
+        # fallback prompt
+        if stage=="await_upload":
+            op_out = "Please upload your presence-points CSV to begin."
+            next_stage="await_upload"
+        elif stage=="await_fetch":
+            op_out = "Say “fetch …” to download your chosen layers."
+            next_stage="await_fetch"
+        elif stage=="await_run":
+            op_out = "Say “run model” to train the SDM."
+            next_stage="await_run"
+        else:
+            op_out = "Session complete. Upload a new CSV to restart."
+            next_stage="await_upload"
+
+    # hand off to LLM to craft a friendly reply
+    messages = [{"role":"system","content":SYSTEM_PROMPT}]
+    for u,a in history:
+        messages.append({"role":"user","content":u})
+        messages.append({"role":"assistant","content":a})
+    messages.append({"role":"user","content":msg})
+    messages.append({"role":"system","content":op_out})
+
+    resp = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=messages, temperature=0.3
+    ).choices[0].message.content
+
+    history.append((msg, resp))
+    return history, m_out, zipf if next_stage=="done" else None, {"stage":next_stage}
+
+# Integrate upload → greeting continues
+def on_upload(f, history):
+    if not f or not hasattr(f,"name"):
+        return history, create_map(), None, {"stage":"await_upload"}
+    shutil.copy(f.name,"inputs/presence_points.csv")
+    history += [("", "✅ Uploaded! You can now say “fetch elevation, ndvi, bio1”, etc.")]
+    return history, create_map(), None, {"stage":"await_fetch"}
 
 # --- GRADIO UI ---
 with gr.Blocks() as demo:
@@ -171,83 +230,25 @@ with gr.Blocks() as demo:
             file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
         with gr.Column(scale=3):
             map_out = gr.HTML(value=create_map(), label="🗺️ Map Preview")
-            chat    = gr.Chatbot(
-                        label="SpatChat Dialog",
-                        type="tuples",
-                        value=[("", "👋 Hello! Welcome to SpatChat. Please upload your presence-points CSV to begin.")]
-                      )
+            chat = gr.Chatbot(
+                label = "SpatChat Dialog",
+                type = "messages",
+                value = [{"role":"assistant","content":"👋 Hello! Welcome to SpatChat. Please upload your presence-points CSV to begin."}]
+            )
+
             user_in = gr.Textbox(placeholder="Type commands…", label="")
-            send_btn= gr.Button("Send")
+            send_btn = gr.Button("Send")
             download_blk = gr.File(label="Download Results", visible=False)
+            state = gr.State()
 
-    # Integrate upload → greeting continues
-    def on_upload(f, history):
-        if not f or not hasattr(f,"name"):
-            return history, create_map(), None, {"stage":"await_upload"}
-        shutil.copy(f.name,"inputs/presence_points.csv")
-        history += [("", "✅ Uploaded! You can now say “fetch elevation, ndvi, bio1”, etc.")]
-        return history, create_map(), None, {"stage":"await_fetch"}
-
-    file_input.change(on_upload,
+            file_input.change(on_upload,
                       inputs=[file_input, chat],
                       outputs=[chat, map_out, download_blk, gr.State()])
 
-    # unified chat handler
-    def chat_step(f, msg, history, state):
-        stage = state.get("stage","await_upload")
-        cmd   = msg.strip().lower()
-
-        # decide which op to run
-        if stage=="await_fetch" and cmd.startswith(("fetch","get","use")):
-            m_out, status = run_fetch([],[])  # we ignore sl, lc: LLM will not pass them
-            op_out = status
-            next_stage="await_run"
-
-        elif stage=="await_run" and "run model" in cmd:
-            m_out, status, stats_df, _ = run_model()
-            op_out = status + ("\n\n" + stats_df.to_markdown(index=False) if stats_df is not None else "")
-            next_stage="await_download"
-
-        elif stage=="await_download" and cmd.startswith(("download","yes","y")):
-            zipf = zip_results()
-            op_out = f"✅ Here is your ZIP: {zipf}"
-            next_stage="done"
-
-        else:
-            # fallback prompt
-            if stage=="await_upload":
-                op_out = "Please upload your presence-points CSV to begin."
-                next_stage="await_upload"
-            elif stage=="await_fetch":
-                op_out = "Say “fetch …” to download your chosen layers."
-                next_stage="await_fetch"
-            elif stage=="await_run":
-                op_out = "Say “run model” to train the SDM."
-                next_stage="await_run"
-            else:
-                op_out = "Session complete. Upload a new CSV to restart."
-                next_stage="await_upload"
-
-        # hand off to LLM to craft a friendly reply
-        messages = [{"role":"system","content":SYSTEM_PROMPT}]
-        for u,a in history:
-            messages.append({"role":"user","content":u})
-            messages.append({"role":"assistant","content":a})
-        messages.append({"role":"user","content":msg})
-        messages.append({"role":"system","content":op_out})
-
-        resp = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=messages, temperature=0.3
-        ).choices[0].message.content
-
-        history.append((msg, resp))
-        return history, m_out, zipf if next_stage=="done" else None, {"stage":next_stage}
-
-    for btn in (send_btn, user_in.submit):
-        btn.click(chat_step,
-                  inputs=[file_input, user_in, chat, gr.State()],
-                  outputs=[chat, map_out, download_blk, gr.State()])
-        btn.click(lambda: "", None, user_in)
+    for trigger in (send_btn, user_in.submit()):
+        trigger.click(chat_step,
+                  inputs=[file_input, user_in, chat, state],
+                  outputs=[chat, map_out, download_blk, state])
+        trigger.click(lambda: "", None, user_in)
 
     demo.launch()
