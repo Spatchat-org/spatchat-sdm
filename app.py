@@ -174,37 +174,75 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready for download using the Download Button!", stats_df, "outputs/model_stats.csv"
 
 def chat_step(file, user_msg, history, state):
-    download_update = gr.update()  # default: no change
+    # --- new: start with the Download button hidden ---
+    download_update = gr.update(visible=False)
 
-    # tool-picking
-    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
-    resp = client.chat.completions.create(
+    # 2) build the LLM prompt to pick a tool
+    messages = [{"role":"system","content":SYSTEM_PROMPT}]
+    messages += history
+    messages.append({"role":"user","content":user_msg})
+    # ask LLM
+    response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=msgs, temperature=0.0
+        messages=messages,
+        temperature=0.0,
     ).choices[0].message.content
 
+    # 3) parse JSON tool call
     try:
-        call = json.loads(resp)
-        tool = call["tool"]
-        if tool == "run_model":
-            m_out, status, stats_df, stats_csv = run_model()
-            assistant_txt = status
-            download_update = gr.update()
-        else:
-            m_out, status = TOOLS[tool](call)
-            assistant_txt = status
+        call = json.loads(response)
+        tool_name = call["tool"]
+        func      = TOOLS[tool_name]
+    except Exception as e:
+        # fallback if JSON failed
+        assistant_txt = (
+            "Sorry, I couldn't understand that.  Please say 'fetch ...', "
+            "'run model', or 'download'."
+        )
+        history.append({"role":"assistant","content":assistant_txt})
+        return history, create_map(), download_update, state
 
-    except Exception:
-        fb = [{"role":"system","content":FALLBACK_PROMPT},
-              {"role":"user","content":user_msg}]
-        assistant_txt = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=fb, temperature=0.7
-        ).choices[0].message.content
+    # 4) actually invoke the tool
+    result = func(call)
+    if tool_name=="fetch":
+        m_out, status = result
+        assistant_txt = (
+            f"{status}\n\n"
+            "Great! Now you can train your SDM or fetch other layers.  "
+            "When you’re ready, just say “run model”."
+        )
+        # download_update stays hidden
+
+    elif tool_name=="run_model":
+        m_out, status = result
+        assistant_txt = (
+            f"{status}\n\n"
+            "Nice work!  Would you like to download your results now?  "
+            "Just say “download” to grab the ZIP."
+        )
+        # --- new: show the Download button on model completion ---
+        download_update = gr.update(visible=True)
+
+    elif tool_name=="download":
+        m_out, _ = result
+        assistant_txt = (
+            "✅ Here’s your ZIP bundle!<br>"
+            f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
+            "<script>document.getElementById('dl').click();</script>"
+        )
+        # if they manually invoke download in chat, you can also show the button again
+        download_update = gr.update(visible=True)
+
+    else:
+        # should never happen, but catch
         m_out = create_map()
+        assistant_txt = "Sorry, I don’t know that command."
+        # download_update stays hidden
 
-    history.append({"role":"user","content":user_msg})
-    history.append({"role":"assistant","content":assistant_txt})
+    # 5) record in history
+    history.append({"role":"user",   "content": user_msg})
+    history.append({"role":"assistant","content": assistant_txt})
+
     return history, m_out, download_update, state
 
 def on_upload(f, history):
