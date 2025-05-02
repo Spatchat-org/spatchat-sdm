@@ -156,9 +156,9 @@ def zip_results():
 # --- System prompt for LLM ---
 SYSTEM_PROMPT = """
 You are SpatChat, a friendly assistant that orchestrates species distribution modeling:
-1) If the user says “fetch …”, trigger our run_fetch() and report the output.
-2) If the user says “run model”, trigger run_model() and display its stats.
-3) If the user says “download” or “yes”, trigger zip_results() and offer the ZIP.
+1) After the user has uploaded presence points, if the user says "fetch …”, trigger our run_fetch() and report the output. Then, prompt the user to run model.
+2) After the user has fetched the layers, if the user says “run model”, trigger run_model() and display its stats.
+3) After the user has run the model, ask if the user wants to download the results. if the user says “download” or “yes”, trigger zip_results() and offer the ZIP.
 Be conversational and guide the user at each step.
 """.strip()
 
@@ -173,7 +173,7 @@ with gr.Blocks() as demo:
             map_out = gr.HTML(value=create_map(), label="🗺️ Map Preview")
             chat    = gr.Chatbot(
                         label="SpatChat Dialog",
-                        type="messages",
+                        type="pairs",
                         value=[("", "👋 Hello! Welcome to SpatChat. Please upload your presence-points CSV to begin.")]
                       )
             user_in = gr.Textbox(placeholder="Type commands…", label="")
