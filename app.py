@@ -170,10 +170,16 @@ def run_model():
         capture_output=True, text=True
     )
     if res.returncode != 0:
-        return create_map(), "❌ Model run failed.", None, None
+        return create_map(), f"❌ Model run failed:\n{res.stderr}", None, None
 
-    # 2) load stats and return them
+    # 2) load stats
     stats_df = pd.read_csv("outputs/model_stats.csv")
+    
+    # 3) did the SDM script actually produce our tif?
+    suitf = "outputs/suitability_map_wgs84.tif"
+    if not os.path.exists(suitf):
+        return create_map(), "⚠️ Model finished but no suitability_map_wgs84.tif found!", stats_df, None
+
     return (
         create_map(),
         "✅ Model ran successfully!",
