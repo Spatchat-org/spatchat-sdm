@@ -285,7 +285,7 @@ def on_upload(f, history):
 
 with gr.Blocks() as demo:
     gr.Image(
-        value="logo/logo_long1.png",
+        value="logo_long1.png",
         show_label=False,
         show_download_button=False,
         show_share_button=False,
