@@ -130,6 +130,6 @@ profile = {
     'crs':    ref_crs,
     'transform': ref_transform
 }
-with rasterio.open(output_map, 'w', **profile) as dst:
+with rasterio.open(output_map, "w", **profile) as dst:
     dst.write(pred_map.astype(rasterio.float32), 1)
 print(f"🎯 Suitability map saved to {output_map}")
