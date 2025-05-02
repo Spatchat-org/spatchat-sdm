@@ -8,14 +8,12 @@ import subprocess
 import zipfile
 
 import gradio as gr
-import geemap.foliumap as foliumap
 import folium
 import html as html_lib
 import pandas as pd
 import numpy as np
 import rasterio
 import ee
-import joblib
 
 from matplotlib import pyplot as plt, colormaps
 from matplotlib.colors import Normalize
@@ -29,14 +27,14 @@ from together import Together
 load_dotenv()
 
 # Earth Engine via Service Account
-svc = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
+svc   = json.loads(os.environ['GEE_SERVICE_ACCOUNT'])
 creds = ee.ServiceAccountCredentials(svc['client_email'], key_data=json.dumps(svc))
 ee.Initialize(creds)
 
 # Together LLM
 client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
-# workspace cleanup
+# Clean workspace
 for d in ("predictor_rasters","outputs","inputs"):
     shutil.rmtree(d, ignore_errors=True)
 os.makedirs("inputs", exist_ok=True)
@@ -55,7 +53,6 @@ fig.savefig(buf, format="png", dpi=100)
 plt.close(fig)
 buf.seek(0)
 COLORBAR_BASE64 = base64.b64encode(buf.read()).decode()
-
 
 def create_map():
     m = folium.Map(location=[0,0], zoom_start=2, control_scale=True)
@@ -82,18 +79,16 @@ def create_map():
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
         for fn in sorted(os.listdir(rasdir)):
-            if not fn.endswith(".tif"):
-                continue
+            if not fn.endswith(".tif"): continue
             path = os.path.join(rasdir, fn)
             with rasterio.open(path) as src:
                 img = src.read(1); b = src.bounds
             vmin, vmax = np.nanmin(img), np.nanmax(img)
-            if np.isnan(vmin) or vmin == vmax:
-                continue
+            if np.isnan(vmin) or vmin == vmax: continue
             rgba = colormaps["viridis"]((img - vmin)/(vmax - vmin))
             folium.raster_layers.ImageOverlay(
                 image=rgba,
-                bounds=[[b.bottom, b.left], [b.top, b.right]],
+                bounds=[[b.bottom, b.left],[b.top, b.right]],
                 opacity=1.0,
                 name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
@@ -106,14 +101,14 @@ def create_map():
         rgba = colormaps["viridis"]((img - np.nanmin(img))/(np.nanmax(img) - np.nanmin(img)))
         folium.raster_layers.ImageOverlay(
             image=rgba,
-            bounds=[[b.bottom, b.left], [b.top, b.right]],
+            bounds=[[b.bottom, b.left],[b.top, b.right]],
             opacity=0.7,
             name="🎯 Suitability"
         ).add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # embed the static colorbar
+    # embed static colorbar
     img_html = (
         f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
         'style="position:absolute; bottom:20px; right:10px; '
@@ -124,31 +119,40 @@ def create_map():
     return f'<iframe srcdoc="{html_lib.escape(rendered)}" '\
            'style="width:100%; height:600px; border:none;"></iframe>'
 
-
+# --- HANDLERS ---
 def preview_upload(file):
-    if not file or not hasattr(file, "name"):
-        # initial greeting
-        return [{"role":"assistant","content":"👋 Please upload a presence CSV to begin."}], create_map(), None, {"stage":"await_upload"}
+    if not file or not hasattr(file,"name"):
+        return (
+            [{"role":"assistant","content":"👋 Please upload a presence CSV to begin."}],
+            create_map(),
+            gr.update(visible=False),
+            {"stage":"await_upload"}
+        )
     shutil.copy(file.name, "inputs/presence_points.csv")
     intro = (
         "✅ Got your points! Which predictors shall I fetch?\n"
-        f"Available: {', '.join(LAYERS)}\n"
+        "Available: **bio1–bio19** ([bioclim docs]"
+        "(https://www.worldclim.org/data/bioclim.html)), elevation, slope, aspect, ndvi, "
+        "and landcover (e.g., water, urban, forest, cropland, etc.)\n"
         "e.g. “fetch elevation, ndvi, bio1”"
     )
-    return [{"role":"assistant","content":intro}], create_map(), None, {"stage":"await_layers"}
-
+    return (
+        [{"role":"assistant","content":intro}],
+        create_map(),
+        gr.update(visible=False),
+        {"stage":"await_layers"}
+    )
 
 def zip_results():
     z = "spatchat_results.zip"
     if os.path.exists(z): os.remove(z)
-    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(z,"w",zipfile.ZIP_DEFLATED) as zf:
         for fld in ("predictor_rasters","outputs"):
             for r,_,fs in os.walk(fld):
                 for f in fs:
-                    full = os.path.join(r, f)
-                    zf.write(full, arcname=os.path.relpath(full, "."))
+                    full = os.path.join(r,f)
+                    zf.write(full, arcname=os.path.relpath(full,"."))
     return z
-
 
 SYSTEM_PROMPT = """
 You are SpatChat, a friendly assistant that orchestrates SDM:
@@ -158,23 +162,28 @@ You are SpatChat, a friendly assistant that orchestrates SDM:
 Guide the user conversationally.
 """.strip()
 
-
 def analyze_sdm(file, user_msg, history, state):
-    stage = state.get("stage", "await_layers")
-    hist = history[:]  # copy
-    cmd = user_msg.strip().lower()
-    info = ""
+    stage = state.get("stage","await_layers")
+    hist  = history[:]    # copy
+    cmd   = user_msg.strip().lower()
+    info  = ""
     download_link = None
 
     # FETCH
-    if stage=="await_layers" and re.search(r"\b(fetch|get|use)\b", cmd):
-        proc = subprocess.run(["python","scripts/fetch_predictors.py"], capture_output=True, text=True)
+    if stage=="await_layers" and re.search(r"\b(fetch|get|use)\b",cmd):
+        proc = subprocess.run(
+            ["python","scripts/fetch_predictors.py"],
+            capture_output=True, text=True
+        )
         info = f"```bash\n{proc.stdout}{proc.stderr}```"
         stage = "await_run"
 
     # RUN MODEL
-    elif stage=="await_run" and re.search(r"\b(run|train|create)\b.*model", cmd):
-        proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+    elif stage=="await_run" and re.search(r"\b(run|train|create)\b.*model",cmd):
+        proc = subprocess.run(
+            ["python","scripts/run_logistic_sdm.py"],
+            capture_output=True, text=True
+        )
         logs = proc.stdout + proc.stderr
         stats_md = ""
         if os.path.exists("outputs/model_stats.csv"):
@@ -184,7 +193,7 @@ def analyze_sdm(file, user_msg, history, state):
         stage = "await_download"
 
     # DOWNLOAD
-    elif stage=="await_download" and re.search(r"\b(download|yes|y)\b", cmd):
+    elif stage=="await_download" and re.search(r"\b(download|yes|y)\b",cmd):
         download_link = zip_results()
         info = "📦 Here is your ZIP!"
         stage = "done"
@@ -207,16 +216,22 @@ def analyze_sdm(file, user_msg, history, state):
     messages.append({"role":"user","content":user_msg})
     messages.append({"role":"system","content":info})
 
-    # get LLM reply
+    # ask LLM
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
         messages=messages,
         temperature=0.3
     ).choices[0].message.content
 
-    # append
     hist.append({"role":"assistant","content":resp})
-    return hist, create_map(), download_link, {"stage":stage}
+
+    # prepare download_file update
+    if download_link:
+        dl_update = gr.update(value=download_link, visible=True)
+    else:
+        dl_update = gr.update(visible=False)
+
+    return hist, create_map(), dl_update, {"stage":stage}
 
 
 # --- GRADIO UI ---
@@ -229,25 +244,33 @@ with gr.Blocks() as demo:
 
         with gr.Column(scale=3):
             map_out       = gr.HTML(create_map, label="🗺️ Map Preview")
-            chat          = gr.Chatbot(label="SpatChat Dialog", type="messages",
-                               value=[{"role":"assistant","content":"👋 Hello! Upload your CSV to begin."}])
+            chat          = gr.Chatbot(label="SpatChat Dialog",
+                                      type="messages",
+                                      value=[{"role":"assistant","content":"👋 Hello! Upload your CSV to begin."}])
             user_in       = gr.Textbox(placeholder="Type here…", label="")
             send_btn      = gr.Button("Send")
             download_file = gr.File(label="Download Results", visible=False)
             state         = gr.State({"stage":"await_upload"})
 
     # events
-    file_input.change(preview_upload, inputs=file_input,
-                      outputs=[chat, map_out, download_file, state])
+    file_input.change(
+        preview_upload,
+        inputs=[file_input],
+        outputs=[chat, map_out, download_file, state]
+    )
 
-    send_btn.click(analyze_sdm,
-                   inputs=[file_input, user_in, chat, state],
-                   outputs=[chat, map_out, download_file, state])
+    send_btn.click(
+        analyze_sdm,
+        inputs=[file_input, user_in, chat, state],
+        outputs=[chat, map_out, download_file, state]
+    )
     send_btn.click(lambda: "", None, user_in)
 
-    user_in.submit(analyze_sdm,
-                   inputs=[file_input, user_in, chat, state],
-                   outputs=[chat, map_out, download_file, state])
+    user_in.submit(
+        analyze_sdm,
+        inputs=[file_input, user_in, chat, state],
+        outputs=[chat, map_out, download_file, state]
+    )
     user_in.submit(lambda: "", None, user_in)
 
     demo.launch()
