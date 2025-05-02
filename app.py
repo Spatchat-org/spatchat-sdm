@@ -91,7 +91,8 @@ If the question is vague, ask for clarification.
 
 FALLBACK_PROMPT = """
 You are SpatChat, a friendly assistant for species distribution modeling.
-Answer the user's question conversationally.
+Keep your answers short—no more than two sentences—while still being helpful.
+Guide the user to do next steps, such as uploading presence points, or fetching layers, or running the model.
 """.strip()
 
 def create_map():
@@ -319,7 +320,7 @@ with gr.Blocks() as demo:
         border-radius: 6px;
     }
     """)
-    gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven Layout")
+    gr.Markdown("## 🌱 Spatchat: Species Distribution Model {sdm}")
 
     state = gr.State({"stage":"await_upload"})
 
