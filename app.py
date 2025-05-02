@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import base64
 import shutil
 import subprocess
 import zipfile
