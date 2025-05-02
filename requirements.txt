@@ -9,3 +9,4 @@ joblib
 matplotlib
 gradio
 python-dotenv
+together
