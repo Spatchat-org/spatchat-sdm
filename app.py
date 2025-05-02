@@ -161,7 +161,7 @@ def create_map():
     )
     m.get_root().html.add_child(Element(img_html))
 
-    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; max-width:450px; height:450px; border:none;"></iframe>'
+    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:450px; border:none;"></iframe>'
 
 def zip_results():
     archive = "spatchat_results.zip"
@@ -305,10 +305,10 @@ with gr.Blocks() as demo:
     state = gr.State({"stage":"await_upload"})
 
     with gr.Row():
-        with gr.Column(scale=2):
+        with gr.Column(scale=6):
             map_out      = gr.HTML(create_map(), label="🗺️ Map Preview")
             download_btn = gr.DownloadButton("📥 Download Results", zip_results)
-        with gr.Column(scale=1):
+        with gr.Column(scale=4):
             chat         = gr.Chatbot(
                               value=[{"role":"assistant",
                                       "content":"👋 Hello, I’m SpatChat! I'm here to help you build your SDM! \n"
