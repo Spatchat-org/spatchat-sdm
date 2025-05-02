@@ -201,16 +201,13 @@ def chat_step(file, user_msg, history, state):
             f"{status}\n\n"
             "Feel free to download the ZIP using the button below."
         )
-    elif tool_name=="download":
+    else:
         m_out, _ = result
         assistant_txt = (
             "✅ Here’s your ZIP bundle!<br>"
             f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
             "<script>document.getElementById('dl').click();</script>"
         )
-    else:
-        m_out = create_map()
-        assistant_txt = "Sorry, I don’t know that command."
 
     history.append({"role":"user","content":user_msg})
     history.append({"role":"assistant","content":assistant_txt})
@@ -218,9 +215,28 @@ def chat_step(file, user_msg, history, state):
 
 def on_upload(f, history):
     new_history = history.copy()
-    if f and hasattr(f,"name"):
-        shutil.copy(f.name, "inputs/presence_points.csv")
-        new_history.append({"role":"assistant","content":"✅ Uploaded! Now say “fetch …”"})
+    if not f or not hasattr(f, "name"):
+        return new_history, create_map(), state
+
+    # copy csv in
+    shutil.copy(f.name, "inputs/presence_points.csv")
+
+    # now tell them what layers are available
+    extras = LAYERS[19:-1]  # ['elevation','slope','aspect','ndvi']
+    last   = LAYERS[-1]     # 'landcover'
+    layers_str = (
+        f"bio1–bio19, {', '.join(extras)}, and {last} "
+        "(e.g., water, urban, forest, cropland, etc.)"
+    )
+    new_history.append({
+        "role": "assistant",
+        "content": (
+            "✅ Uploaded! Available layers are:\n\n"
+            f"{layers_str}\n\n"
+            "Now say something like “fetch elevation, ndvi, bio1” to grab those layers."
+        )
+    })
+
     return new_history, create_map(), state
 
 with gr.Blocks() as demo:
@@ -232,12 +248,12 @@ with gr.Blocks() as demo:
         # LEFT COLUMN: Map + Download
         with gr.Column(scale=2):
             map_out      = gr.HTML(create_map(), label="🗺️ Map Preview")
-            download_btn = gr.DownloadButton("📥 Download Results", zip_results)
+            download_btn = gr.DownloadButton("📥 Download Results", file=zip_results)
         # RIGHT COLUMN: Chat + Input + Upload
         with gr.Column(scale=1):
             chat       = gr.Chatbot(
                              value=[{"role":"assistant","content":
-                                     "👋 Hello! Upload your presence‑points CSV to begin."}],
+                                     "👋 Hello! I am SpatChat, upload your presence‑points CSV to begin."}],
                              type="messages",
                              label="💬 Chat"
                          )
