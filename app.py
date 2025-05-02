@@ -234,7 +234,7 @@ with gr.Blocks() as demo:
             send_btn     = gr.Button("Send")
             download_btn = gr.DownloadButton(
                                 "📥 Download Results",
-                                file=zip_results,
+                                zip_results,
                                 disabled=True
                             )
 
