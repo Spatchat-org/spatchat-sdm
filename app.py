@@ -44,7 +44,7 @@ os.makedirs("inputs", exist_ok=True)
 TOOLS = {
     "fetch": lambda args: run_fetch(args.get("layers",[]), args.get("landcover",[])),
     "run_model": lambda args: run_model()[:2],    # returns (map, status)
-    "download": lambda args: (None, "download_trigger")
+    "download": lambda args: (create_map(), zip_results())
 }
 
 LAYERS = [f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"]
@@ -93,63 +93,28 @@ Be conversational and helpful, but keep the conversation brief.
 If the question is vague, ask the user to clarify.
 """.strip()
 
-# --- Auxiliary download click handler ---
-def on_download_click(history, state):
-    zip_path = "spatchat_results.zip"
-    if os.path.exists(zip_path):
-        # Trigger actual ZIP creation
-        zip_results()
-        msg = "✅ Results are ready! Use the download button below."
-        # Append assistant message and return path for file block
-        return history + [{"role":"assistant","content":msg}], zip_path
-    else:
-        msg = "⚠️ Results not ready yet. Please run the model first."
-        return history + [{"role":"assistant","content":msg}], None
+def create_map():
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
+    folium.TileLayer("OpenStreetMap").add_to(m)
 
-# --- Build & launch UI ---
-with gr.Blocks() as demo:
-    gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven Species Distribution Modeling")
+    # Presence points (auto-detect lat/lon columns)
+    ppath = "inputs/presence_points.csv"
+    if os.path.exists(ppath):
+        df = pd.read_csv(ppath)
+        lat_col = next((c for c in df.columns if c.lower() in ("latitude", "decimallatitude", "y")), None)
+        lon_col = next((c for c in df.columns if c.lower() in ("longitude", "decimallongitude", "x")), None)
+        if lat_col and lon_col:
+            pts = df[[lat_col, lon_col]].values.tolist()
+            fg = folium.FeatureGroup(name="🟦 Presence Points")
+            for lat, lon in pts:
+                folium.CircleMarker([lat, lon], radius=4,
+                                    color="blue", fill=True, fill_opacity=0.8
+                                    ).add_to(fg)
+            fg.add_to(m)
+            if pts:
+                m.fit_bounds(pts)
 
-    state = gr.State({"built": False})
-    with gr.Row():
-        with gr.Column(scale=1):
-            file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
-        with gr.Column(scale=3):
-            map_out     = gr.HTML(value=create_map(), label="🗺️ Map Preview")
-            chat        = gr.Chatbot(
-                             label="SpatChat Dialog",
-                             type="messages",
-                             value=[{"role":"assistant","content":"👋 Hello! Welcome to SpatChat. Please upload your presence‑points CSV to begin."}]
-                         )
-            user_in     = gr.Textbox(placeholder="Type commands…", label="")
-            send_btn    = gr.Button("Send")
-            download_btn= gr.Button("Download Results")
-            download_blk= gr.File(label="ZIP Bundle")
-
-    # Upload and chat
-    file_input.change(
-        on_upload,
-        inputs=[file_input, chat],
-        outputs=[chat, map_out, download_blk, state]
-    )
-    send_btn.click(
-        chat_step,
-        inputs=[file_input, user_in, chat, state],
-        outputs=[chat, map_out, download_blk, state]
-    )
-    send_btn.click(lambda: "", None, user_in)
-    user_in.submit(
-        chat_step,
-        inputs=[file_input, user_in, chat, state],
-        outputs=[chat, map_out, download_blk, state]
-    )
-    user_in.submit(lambda: "", None, user_in)
-
-    # Download button logic
-    download_btn.click(
-        on_download_click,
-        inputs=[chat, state],
-        outputs=[chat, download_blk]
-    )
-
-    demo.launch()
+    # Predictor rasters (Viridis)
+    rasdir = "predictor_rasters/wgs84"
+    if os.path.isdir(rasdir):
+        for fn in sorted(os.listdir(r
