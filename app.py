@@ -217,20 +217,9 @@ def chat_step(file, user_msg, history, state):
         m_out, status = result
         assistant_txt = (
             f"{status}\n\n"
-            "Nice work!  Would you like to download your results now?  "
-            "Just say “download” to grab the ZIP."
+            "Nice work!  Feel free to grab the results in .ZIP via the Download Button below!"
         )
         # --- new: show the Download button on model completion ---
-        download_update = gr.update(visible=True)
-
-    elif tool_name=="download":
-        m_out, _ = result
-        assistant_txt = (
-            "✅ Here’s your ZIP bundle!<br>"
-            f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
-            "<script>document.getElementById('dl').click();</script>"
-        )
-        # if they manually invoke download in chat, you can also show the button again
         download_update = gr.update(visible=True)
 
     else:
@@ -247,10 +236,29 @@ def chat_step(file, user_msg, history, state):
 
 def on_upload(f, history):
     new_history = history.copy()
-    if f and hasattr(f,"name"):
-        shutil.copy(f.name, "inputs/presence_points.csv")
-        new_history.append({"role":"assistant","content":"✅ Uploaded! Now “fetch …”"})
-    return new_history, create_map(), gr.update(), {"stage":"await_fetch"}
+    if not f or not hasattr(f, "name"):
+        return new_history, create_map(), None, {"stage":"await_upload"}
+
+    # copy csv in
+    shutil.copy(f.name, "inputs/presence_points.csv")
+
+    # now tell them what layers are available
+    extras = LAYERS[19:-1]  # ['elevation','slope','aspect','ndvi']
+    last   = LAYERS[-1]     # 'landcover'
+    layers_str = (
+        f"bio1–bio19, {', '.join(extras)}, and {last} "
+        "(e.g., water, urban, forest, cropland, etc.)"
+    )
+    new_history.append({
+        "role": "assistant",
+        "content": (
+            "✅ Uploaded! Available layers are:\n\n"
+            f"{layers_str}\n\n"
+            "Now say something like “fetch elevation, ndvi, bio1” to grab those layers."
+        )
+    })
+
+    return new_history, create_map(), None, {"stage": "await_fetch"}
 
 # --- Build & launch UI ---
 with gr.Blocks() as demo:
