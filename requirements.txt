@@ -4,7 +4,7 @@ folium
 rasterio
 numpy
 pandas
-scikit‑learn
+scikit-learn
 joblib
 matplotlib
 gradio
