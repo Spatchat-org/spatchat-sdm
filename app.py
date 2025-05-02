@@ -42,7 +42,7 @@ os.makedirs("inputs", exist_ok=True)
 
 # --- tool registry ---
 TOOLS = {
-    "fetch": lambda args: run_fetch(args.get("layers",[]), args.get("landcover",[])),
+    "fetch": lambda args: run_fetch(args.get("layers", []), args.get("landcover", [])),
     "run_model": lambda args: run_model()[:2],    # returns (map, status)
     "download": lambda args: (create_map(), zip_results())
 }
@@ -97,7 +97,7 @@ def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
 
-    # Presence points (auto-detect lat/lon columns)
+    # Presence points
     ppath = "inputs/presence_points.csv"
     if os.path.exists(ppath):
         df = pd.read_csv(ppath)
@@ -109,12 +109,12 @@ def create_map():
             for lat, lon in pts:
                 folium.CircleMarker([lat, lon], radius=4,
                                     color="blue", fill=True, fill_opacity=0.8
-                                    ).add_to(fg)
+                                   ).add_to(fg)
             fg.add_to(m)
             if pts:
                 m.fit_bounds(pts)
 
-    # Predictor rasters (Viridis)
+    # Predictor rasters
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
         for fn in sorted(os.listdir(rasdir)):
@@ -133,7 +133,7 @@ def create_map():
                 opacity=1.0, name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
             ).add_to(m)
 
-    # Suitability map (Viridis)
+    # Suitability map
     sf = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(sf):
         with rasterio.open(sf) as src:
@@ -147,7 +147,7 @@ def create_map():
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Static colorbar at bottom-right
+    # Static colorbar
     img_html = (
         f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
         'style="position:absolute; bottom:20px; right:10px; '
@@ -155,8 +155,7 @@ def create_map():
     )
     m.get_root().html.add_child(Element(img_html))
 
-    rendered = m.get_root().render()
-    return f'<iframe srcdoc="{html_lib.escape(rendered)}" style="width:100%; height:600px; border:none;"></iframe>'
+    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:600px; border:none;"></iframe>'
 
 def run_fetch(sl, lc):
     if not sl and not lc:
@@ -191,34 +190,111 @@ def zip_results():
     return zipf
 
 def chat_step(file, user_msg, history, state):
-    # ... (unchanged) ...
-    # your existing logic here, including the broken download path handling
-    # ...
+    # 1) Build prompt
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages += history
+    messages.append({"role": "user", "content": user_msg})
+
+    # 2) Ask LLM
+    response = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=messages,
+        temperature=0.0,
+    ).choices[0].message.content
+
+    # 3) Parse JSON tool call
+    try:
+        call = json.loads(response)
+        tool_name = call["tool"]
+        func = TOOLS[tool_name]
+    except Exception:
+        assistant_txt = (
+            "Sorry, I couldn't understand that. Please say 'fetch ...', "
+            "'run model', or 'download'."
+        )
+        history.append({"role": "assistant", "content": assistant_txt})
+        return history, create_map(), None, state
+
+    # 4) Invoke
+    result = func(call)
+    if tool_name == "fetch":
+        m_out, status = result
+        assistant_txt = (
+            f"{status}\n\n"
+            "Great! Now you can train your SDM or fetch other layers. "
+            "When you’re ready, just say “run model”."
+        )
+        download_path = None
+
+    elif tool_name == "run_model":
+        m_out, status = result
+        assistant_txt = (
+            f"{status}\n\n"
+            "Nice work! Would you like to download your results now? "
+            "Just say “download” to grab the ZIP."
+        )
+        download_path = None
+
+    elif tool_name == "download":
+        m_out, _ = result
+        assistant_txt = (
+            "✅ Here’s your ZIP bundle!<br>"
+            f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
+            "<script>document.getElementById('dl').click();</script>"
+        )
+        download_path = None
+
+    else:
+        m_out = create_map()
+        assistant_txt = "Sorry, I don’t know that command."
+        download_path = None
+
+    # 5) Record
+    history.append({"role": "user", "content": user_msg})
+    history.append({"role": "assistant", "content": assistant_txt})
+
+    return history, m_out, download_path, state
 
 def on_upload(f, history):
-    # ... (unchanged) ...
-    # your existing on_upload logic
-    # ...
+    new_history = history.copy()
+    if not f or not hasattr(f, "name"):
+        return new_history, create_map(), None, {"stage": "await_upload"}
 
-# --- NEW: download‑button handler ---
+    shutil.copy(f.name, "inputs/presence_points.csv")
+
+    extras = LAYERS[19:-1]  # ['elevation','slope','aspect','ndvi']
+    last = LAYERS[-1]       # 'landcover'
+    layers_str = (
+        f"bio1–bio19, {', '.join(extras)}, and {last} "
+        "(e.g., water, urban, forest, cropland, etc.)"
+    )
+    new_history.append({
+        "role": "assistant",
+        "content": (
+            "✅ Uploaded! Available layers are:\n\n"
+            f"{layers_str}\n\n"
+            "Now say something like “fetch elevation, ndvi, bio1” to grab those layers."
+        )
+    })
+
+    return new_history, create_map(), None, {"stage": "await_fetch"}
+
+# --- NEW: Download‑button handler ---
 def on_download_click(chat_history, state):
     new_history = chat_history.copy()
     zip_path = "spatchat_results.zip"
     if os.path.exists(zip_path):
         zip_results()
-        new_history.append({"role":"assistant","content":"✅ Results are ready!"})
-        # Show the File block with the fresh zip
+        new_history.append({"role": "assistant", "content": "✅ Results are ready!"})
         return new_history, gr.update(value=zip_path, visible=True), state
     else:
-        new_history.append({"role":"assistant","content":"⚠️ Results not ready yet. Please run the model first."})
-        # Keep the File block hidden
+        new_history.append({"role": "assistant", "content": "⚠️ Results not ready yet. Please run the model first."})
         return new_history, gr.update(visible=False), state
 
 # --- Build & launch UI ---
 with gr.Blocks() as demo:
     gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven Species Distribution Modeling")
 
-    # Shared state
     state = gr.State({"stage": "await_upload"})
 
     with gr.Row():
@@ -234,18 +310,15 @@ with gr.Blocks() as demo:
                          )
             user_in     = gr.Textbox(placeholder="Type commands…", label="")
             send_btn    = gr.Button("Send")
-            # <-- download button + file block -->
             download_btn = gr.Button("Download Results")
-            download_blk = gr.File(label="Download Results", visible=False)
+            download_blk= gr.File(label="Download Results", visible=False)
 
-    # Wire up upload → on_upload
     file_input.change(
         on_upload,
         inputs=[file_input, chat],
         outputs=[chat, map_out, download_blk, state]
     )
 
-    # Chat commands (fetch, run_model, download via chat_step)
     send_btn.click(
         chat_step,
         inputs=[file_input, user_in, chat, state],
@@ -259,7 +332,6 @@ with gr.Blocks() as demo:
     )
     user_in.submit(lambda: "", None, user_in)
 
-    # --- Hook up the new Download Results button ---
     download_btn.click(
         on_download_click,
         inputs=[chat, state],
