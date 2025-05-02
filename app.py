@@ -161,7 +161,7 @@ def create_map():
     )
     m.get_root().html.add_child(Element(img_html))
 
-    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:80%; height:450px; border:none;"></iframe>'
+    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; max-width:450px; height:450px; border:none;"></iframe>'
 
 def zip_results():
     archive = "spatchat_results.zip"
