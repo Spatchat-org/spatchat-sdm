@@ -211,7 +211,7 @@ def chat_step(file, user_msg, history, state):
         return history, create_map(), state
 
     # 1) Handle “start over” reset
-    if re.search(r"\b(start over|restart|clear everything)\b", user_msg, re.I):
+    if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
         new_hist = [{
             "role":"assistant",
