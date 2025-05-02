@@ -282,7 +282,6 @@ with gr.Blocks() as demo:
             chat        = gr.Chatbot(
                              label="SpatChat Dialog",
                              type="messages",
-                             sanitize = False,
                              value=[{"role":"assistant",
                                      "content":"👋 Hello! Welcome to SpatChat. Please upload your presence‑points CSV to begin."}]
                          )
