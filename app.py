@@ -5,7 +5,7 @@ import base64
 import shutil
 import subprocess
 import zipfile
-import pandas as pd
+
 import gradio as gr
 import geemap.foliumap as foliumap
 import folium
@@ -132,13 +132,11 @@ def create_map():
     )
     m.get_root().html.add_child(Element(img_html))
 
-    # Return the iframe HTML
     rendered = m.get_root().render()
     return f'<iframe srcdoc="{html_lib.escape(rendered)}" ' \
            'style="width:100%; height:600px; border:none;"></iframe>'
 
 def zip_results():
-    """Zip predictor_rasters + outputs into spatchat_results.zip and return its path."""
     archive = "spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
@@ -149,6 +147,39 @@ def zip_results():
                     path = os.path.join(root, fn)
                     zf.write(path, arcname=os.path.relpath(path, start="."))
     return archive
+
+def run_fetch(sl, lc):
+    if not sl and not lc:
+        return create_map(), "⚠️ Select at least one predictor."
+    layers = list(sl)
+    if lc:
+        layers.append("landcover")
+    os.environ['SELECTED_LAYERS']            = ",".join(layers)
+    os.environ['SELECTED_LANDCOVER_CLASSES'] = ",".join(c.split(" – ")[0] for c in lc)
+    res = subprocess.run(
+        ["python","scripts/fetch_predictors.py"],
+        capture_output=True, text=True
+    )
+    msg = "✅ Predictors fetched." if res.returncode == 0 else "❌ Fetch failed."
+    return create_map(), msg
+
+def run_model():
+    # 1) call your SDM script
+    res = subprocess.run(
+        ["python","scripts/run_logistic_sdm.py"],
+        capture_output=True, text=True
+    )
+    if res.returncode != 0:
+        return create_map(), "❌ Model run failed.", None, None
+
+    # 2) load stats and return them
+    stats_df = pd.read_csv("outputs/model_stats.csv")
+    return (
+        create_map(),
+        "✅ Model ran successfully!",
+        stats_df,
+        "outputs/model_stats.csv"
+    )
 
 with gr.Blocks() as demo:
     gr.Markdown("# SpatChat SDM – Species Distribution Modeling App")
@@ -167,66 +198,48 @@ with gr.Blocks() as demo:
                                  )
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
-            download_button    = gr.DownloadButton("📥 Download Results", zip_results)
+            download_button    = gr.DownloadButton("📥 Download Results")
             
             stats_table        = gr.Dataframe(
                                     headers=["predictor","coefficient"],
                                     label="📊 Model Statistics",
                                     interactive=False
                                 )
-            
-            stats_download     = gr.DownloadButton("📥 Download Stats", lambda: "outputs/model_stats.csv"
-                                )
+            stats_download     = gr.DownloadButton("📥 Download Stats")
 
         with gr.Column(scale=3):
             map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
             status_output = gr.Textbox(label="Status", interactive=False)
 
-    def handle_upload(f):
-        # reset on new upload
-        if not f or not hasattr(f, "name"):
-            return create_map(), "⚠️ No file uploaded."
-        for d in ("predictor_rasters","outputs","inputs"):
-            shutil.rmtree(d, ignore_errors=True)
-        os.makedirs("inputs", exist_ok=True)
-        shutil.copy(f.name, "inputs/presence_points.csv")
-        return create_map(), "✅ Presence points uploaded!"
+    upload_input.change(
+        fn=lambda f: (create_map(), "⚠️ No file uploaded.") if not (f and hasattr(f,"name"))
+                      else (   
+                          # reset on new upload  
+                          shutil.rmtree("predictor_rasters", ignore_errors=True),
+                          shutil.rmtree("outputs", ignore_errors=True),
+                          shutil.rmtree("inputs", ignore_errors=True),
+                          os.makedirs("inputs", exist_ok=True),
+                          shutil.copy(f.name, "inputs/presence_points.csv"),
+                          create_map(), "✅ Presence points uploaded!"
+                      )[-2:], 
+        inputs=[upload_input],
+        outputs=[map_output, status_output]
+    )
 
-    def run_fetch(sl, lc):
-        if not sl and not lc:
-            return create_map(), "⚠️ Select at least one predictor."
-        layers = list(sl)
-        if lc: layers.append("landcover")
-        os.environ['SELECTED_LAYERS']            = ",".join(layers)
-        os.environ['SELECTED_LANDCOVER_CLASSES'] = ",".join(c.split(" – ")[0] for c in lc)
-        res = subprocess.run(
-            ["python","scripts/fetch_predictors.py"],
-            capture_output=True, text=True
-        )
-        msg = "✅ Predictors fetched." if res.returncode == 0 else "❌ Fetch failed."
-        return create_map(), msg
+    fetch_button.click(
+        fn=run_fetch,
+        inputs=[layer_selector, landcover_selector],
+        outputs=[map_output, status_output]
+    )
 
-    def run_model():
-        res = subprocess.run(
-            ["python","scripts/run_logistic_sdm.py"],
-            capture_output=True, text=True
-        )
-        msg = "✅ Model completed." if res.returncode == 0 else "❌ Model run failed."
-        return create_map(), msg
+    run_button.click(
+        fn=run_model,
+        outputs=[map_output, status_output, stats_table, stats_download]
+    )
 
-        stats_df = pd.read_csv("outputs/model_stats.csv")
-        return (
-            create_map(),
-            "✅ Model ran successfully!",
-            stats_df,
-            # DownloadButton will call its `file` lambda to grab this path
-            None
-        )
-
-    upload_input.change(handle_upload, inputs=[upload_input], outputs=[map_output, status_output])
-    fetch_button.click(run_fetch,   inputs=[layer_selector, landcover_selector],
-                                         outputs=[map_output, status_output])
-    run_button.click  (run_model,   outputs=[map_output, status_output, stats_table, stats_download])
-    download_button.click(zip_results, None, download_button)
+    download_button.click(
+        fn=zip_results,
+        outputs=download_button
+    )
 
     demo.launch()
