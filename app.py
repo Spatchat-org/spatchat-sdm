@@ -169,48 +169,62 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, "outputs/model_stats.csv"
 
 def chat_step(file, user_msg, history, state):
-    messages = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
+    # 1) Build the LLM prompt to pick a tool
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages += history
+    messages.append({"role": "user", "content": user_msg})
     response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=messages, temperature=0.0
+        messages=messages,
+        temperature=0.0,
     ).choices[0].message.content
 
+    # 2) Try to parse a JSON tool call
     try:
         call = json.loads(response)
         tool_name = call["tool"]
-        func      = TOOLS[tool_name]
     except Exception:
+        # Fallback if JSON parse failed
         assistant_txt = (
             "Sorry, I couldn't understand that.  Please say 'fetch ...', "
-            "'run model', or 'download'."
+            "'run model', or use the Download Button below."
         )
-        history.append({"role":"assistant","content":assistant_txt})
+        history.append({"role": "assistant", "content": assistant_txt})
         return history, create_map(), state
 
-    result = func(call)
-    if tool_name=="fetch":
-        m_out, status = result
+    # 3) Handle each tool explicitly
+    if tool_name == "fetch":
+        m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         assistant_txt = (
             f"{status}\n\n"
             "Great! Now you can train your SDM or fetch other layers.  "
             "When you’re ready, just say “run model”."
         )
-    elif tool_name=="run_model":
-        m_out, status = result
+
+    elif tool_name == "run_model":
+        m_out, status, stats_df, stats_csv = run_model()
+        # Convert stats to markdown table
+        stats_md = stats_df.to_markdown(index=False)
         assistant_txt = (
             f"{status}\n\n"
-            "Feel free to download the ZIP using the button below."
-        )
-    else:
-        m_out, _ = result
-        assistant_txt = (
-            "✅ Here’s your ZIP bundle!<br>"
-            f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
-            "<script>document.getElementById('dl').click();</script>"
+            "**Model Statistics:**\n\n"
+            f"{stats_md}\n\n"
+            "You can download the results ZIP using the button on the left."
         )
 
-    history.append({"role":"user","content":user_msg})
-    history.append({"role":"assistant","content":assistant_txt})
+    elif tool_name == "download":
+        # If user types “download” in chat (optional)
+        m_out, _ = (create_map(), zip_results())
+        assistant_txt = "✅ ZIP is downloading…"
+
+    else:
+        # Unknown tool
+        m_out = create_map()
+        assistant_txt = "Sorry, I don’t know that command."
+
+    # 4) Record to history and return
+    history.append({"role": "user", "content": user_msg})
+    history.append({"role": "assistant", "content": assistant_txt})
     return history, m_out, state
 
 def on_upload(f, history):
