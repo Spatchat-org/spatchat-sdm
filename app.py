@@ -228,16 +228,18 @@ def chat_step(file, user_msg, history, state):
         f"{status}\n\n"
         "Great! Now you can train your SDM or fetch other layers.  "
         "When you’re ready, just say “run model”."
-    )
-    download_path = None
+        )
+        download_path = None
+    
     elif tool_name=="run_model":
         m_out, status = result
         assistant_txt = (
         f"{status}\n\n"
         "Nice work!  Would you like to download your results now?  "
         "Just say “download” to grab the ZIP."
-    )
+        )
         download_path = None
+
     elif tool_name=="download":
         m_out, _ = result
         assistant_txt = (
@@ -245,6 +247,12 @@ def chat_step(file, user_msg, history, state):
             f"<a id='dl' href='{zip_results()}' download style='display:none;'></a>"
             "<script>document.getElementById('dl').click();</script>"
         )
+        download_path = None
+        
+    else:
+        # should never happen, but catch
+        m_out = create_map()
+        assistant_txt = "Sorry, I don’t know that command."
         download_path = None
 
     # 5) record in history
