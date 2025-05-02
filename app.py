@@ -261,7 +261,7 @@ with gr.Blocks() as demo:
                             )
             user_in      = gr.Textbox(placeholder="Type commands…")
             send_btn     = gr.Button("Send")
-            download_btn = gr.DownloadButton("📥 Download Results", file=zip_results)
+            download_btn = gr.DownloadButton("📥 Download Results", zip_results)
 
     file_input.change(
         on_upload,
