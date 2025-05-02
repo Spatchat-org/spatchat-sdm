@@ -224,11 +224,19 @@ def chat_step(file, user_msg, history, state):
     result = func(call)
     if tool_name=="fetch":
         m_out, status = result
-        assistant_txt = status
-        download_path = None
+        assistant_txt = (
+        f"{status}\n\n"
+        "Great! Now you can train your SDM or fetch other layers.  "
+        "When you’re ready, just say “run model”."
+    )
+    download_path = None
     elif tool_name=="run_model":
         m_out, status = result
-        assistant_txt = status
+        assistant_txt = (
+        f"{status}\n\n"
+        "Nice work!  Would you like to download your results now?  "
+        "Just say “download” to grab the ZIP."
+    )
         download_path = None
     elif tool_name=="download":
         m_out, _ = result
