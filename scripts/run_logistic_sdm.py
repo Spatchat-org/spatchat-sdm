@@ -95,7 +95,7 @@ joblib.dump(model, "outputs/logistic_model.pkl")
 print("🧠 Model trained.")
 
 # Compute AUC on your cleaned training data
-y_prob = model.predict_proba(X_clean)[:,1]
+y_prob = model.predict_proba(Xc)[:,1]
 auc = roc_auc_score(y_clean, y_prob)
 
 # Get feature names from your raster filenames
