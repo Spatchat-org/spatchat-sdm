@@ -5,7 +5,6 @@ import base64
 import shutil
 import subprocess
 import zipfile
-
 import gradio as gr
 import geemap.foliumap as foliumap
 import folium
@@ -20,6 +19,9 @@ from matplotlib import pyplot as plt, colormaps
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from folium import Element
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # --- 0) SETUP: Earth Engine + LLM client ---
 # Earth Engine via Service Account
