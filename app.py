@@ -223,7 +223,7 @@ with gr.Blocks() as demo:
             file_input  = gr.File(label="📄 Upload Presence CSV", type="filepath")
         with gr.Column(scale=3):
             map_out     = gr.HTML(value=create_map(), label="🗺️ Map Preview")
-            chat        = gr.Chatbot(label="SpatChat Dialog",
+            chat        = gr.Chatbot(label="SpatChat Dialog", type="messages",
                                      value=[("", "👋 Hello! Please upload your presence CSV to begin.")])
             user_in     = gr.Textbox(placeholder="Type commands…", label="")
             send_btn    = gr.Button("Send")
