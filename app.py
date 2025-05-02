@@ -193,33 +193,49 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, "outputs/model_stats.csv"
 
 def chat_step(file, user_msg, history, state):
-    # reset logic
+    # 1) Handle “start over” reset
     if re.search(r"\b(start over|restart|clear everything)\b", user_msg, re.I):
         clear_all()
         new_hist = [{"role":"assistant",
                      "content":"👋 All cleared! Please upload your presence‑points CSV to begin."}]
         return new_hist, create_map(), state
 
-    # tool-picking
+    # 2) Ask the tool‑picker LLM
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=msgs, temperature=0.0
+        messages=msgs,
+        temperature=0.0,
     ).choices[0].message.content
 
+    # 3) Try to parse JSON tool call
     try:
         call = json.loads(response)
         tool = call["tool"]
-    except:
-        assistant_txt = ("Sorry, I couldn't understand that. Please say 'fetch ...', 'run model', or use the download button.")
+    except Exception:
+        # FALLBACK: conversational LLM
+        fb_msgs = [
+            {"role":"system","content":FALLBACK_PROMPT},
+            {"role":"user","content":user_msg}
+        ]
+        assistant_txt = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb_msgs,
+            temperature=0.7,
+        ).choices[0].message.content
         history.append({"role":"assistant","content":assistant_txt})
         return history, create_map(), state
 
-    if tool=="fetch":
-        m_out, status = run_fetch(call.get("layers",[]), call.get("landcover",[]))
-        assistant_txt = f"{status}\n\nWhen ready, say “run model.”"
+    # 4) Execute recognized tools
+    if tool == "fetch":
+        m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
+        assistant_txt = (
+            f"{status}\n\n"
+            "Great! Now you can train your SDM or fetch other layers.  "
+            "When you’re ready, just say “run model”."
+        )
 
-    elif tool=="run_model":
+    elif tool == "run_model":
         m_out, status, stats_df, stats_csv = run_model()
         stats_md = stats_df.to_markdown(index=False)
         assistant_txt = (
@@ -227,14 +243,24 @@ def chat_step(file, user_msg, history, state):
             "Download your ZIP using the button on the left."
         )
 
-    elif tool=="download":
+    elif tool == "download":
         m_out, _ = (create_map(), zip_results())
         assistant_txt = "✅ ZIP is downloading…"
 
     else:
+        # FALLBACK for unrecognized tool names
+        fb_msgs = [
+            {"role":"system","content":FALLBACK_PROMPT},
+            {"role":"user","content":user_msg}
+        ]
+        assistant_txt = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb_msgs,
+            temperature=0.7,
+        ).choices[0].message.content
         m_out = create_map()
-        assistant_txt = "Sorry, I don’t know that command."
 
+    # 5) Record and return
     history.append({"role":"user","content":user_msg})
     history.append({"role":"assistant","content":assistant_txt})
     return history, m_out, state
@@ -258,6 +284,22 @@ def on_upload(f, history):
     return new_history, create_map(), state
 
 with gr.Blocks() as demo:
+    gr.Image(
+        value="logo/logo_long1.png",
+        show_label=False,
+        show_download_button=False,
+        show_share_button=False,
+        type="filepath",
+        elem_id="logo-img"
+    )
+    gr.HTML("""
+    <style>
+    #logo-img img {
+        height: 90px;
+        margin: 10px 50px 10px 10px;  /* top, right, bottom, left */
+        border-radius: 6px;
+    }
+    """)
     gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven Layout")
 
     state = gr.State({"stage":"await_upload"})
