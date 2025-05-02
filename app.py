@@ -233,21 +233,26 @@ def chat_step(f, msg, history, state):
         temperature=0.3
     ).choices[0].message.content
 
-    history.append((msg, resp))
-    # return chat history, updated map, optional ZIP, and new state
-    return history, m_out, zipf, {"stage": next_stage}
+    # after you’ve computed `resp`…
+    new_history = history.copy()
+    new_history.append({ "role":"assistant", "content": resp })
+    return new_history, m_out, download_path_if_any, {"stage": next_stage}
 
-
-def on_upload(f, history, state):
+def on_upload(f, history):
+    # history is a list of {role,content} dicts
     if not f or not hasattr(f, "name"):
-        return history, create_map(), None, {"stage": "await_upload"}
-    # copy CSV in, reset folders
-    for d in ("predictor_rasters", "outputs"):
-        shutil.rmtree(d, ignore_errors=True)
-    shutil.copy(f.name, "inputs/presence_points.csv")
-    history.append(("", "✅ Uploaded! You can now say “fetch elevation, ndvi, bio1”, etc."))
-    return history, create_map(), None, {"stage": "await_fetch"}
+        return history, create_map(), None, {"stage":"await_upload"}
 
+    # copy in the CSV
+    shutil.copy(f.name, "inputs/presence_points.csv")
+
+    # make a brand‑new history list and append an assistant message
+    new_history = history.copy()
+    new_history.append({
+        "role": "assistant",
+        "content": "✅ Uploaded! You can now say “fetch elevation, ndvi, bio1”, etc."
+    })
+    return new_history, create_map(), None, {"stage":"await_fetch"}
 
 # --- Build & launch UI ---
 with gr.Blocks() as demo:
@@ -273,7 +278,7 @@ with gr.Blocks() as demo:
     # Wire up upload → on_upload
     file_input.change(
         on_upload,
-        inputs=[file_input, chat, state],
+        inputs=[file_input, chat],
         outputs=[chat, map_out, download_blk, state]
     )
 
