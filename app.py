@@ -207,6 +207,23 @@ def on_upload(f, history):
     return new_history, create_map(), state
 
 with gr.Blocks() as demo:
+    gr.Image(
+    value="logo_long1.png",
+    show_label=False,
+    show_download_button=False,
+    show_share_button=False,
+    type="filepath",
+    elem_id="logo-img"
+    )
+    gr.HTML("""
+    <style>
+    #logo-img img {
+        height: 90px;
+        margin: 10px 50px 10px 10px;  /* top, right, bottom, left */
+        border-radius: 6px;
+    }
+    </style>
+    """)
     gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven SDM Layout")
 
     state = gr.State({"stage":"await_upload"})
