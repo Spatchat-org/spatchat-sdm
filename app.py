@@ -273,7 +273,7 @@ with gr.Blocks() as demo:
             map_out      = gr.HTML(create_map(), label="🗺️ Map Preview")
             chat         = gr.Chatbot(
                                 value=[{"role":"assistant",
-                                        "content":"👋 Hello! Upload your presence‑points CSV to begin."}],
+                                        "content":"👋 Hello! I am SpatChat, a friendly assistant to help you build SDM. Upload your presence‑points CSV to begin."}],
                                 type="messages"
                             )
             user_in      = gr.Textbox(placeholder="Type commands…")
