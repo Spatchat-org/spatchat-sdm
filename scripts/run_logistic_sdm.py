@@ -1,9 +1,9 @@
+#!/usr/bin/env python3
 import os
 import numpy as np
 import pandas as pd
 import rasterio
 import joblib
-import pandas as pd
 
 from rasterio.enums import Resampling
 from rasterio.crs import CRS
@@ -23,22 +23,25 @@ lons = df['longitude'].values
 print(f"📍 Loaded {len(df)} presence points.")
 
 # --- Grab reference grid from the *first* .tif in raster_dir ---
-rasters = sorted([os.path.join(raster_dir, f)
-                  for f in os.listdir(raster_dir) if f.endswith(".tif")])
+rasters = sorted([
+    os.path.join(raster_dir, f)
+    for f in os.listdir(raster_dir)
+    if f.endswith(".tif")
+])
 if not rasters:
     raise RuntimeError(f"No .tif found in {raster_dir}")
 
 with rasterio.open(rasters[0]) as ref:
-    ref_crs       = ref.crs
-    ref_transform= ref.transform
-    height, width= ref.height, ref.width
+    ref_crs        = ref.crs
+    ref_transform = ref.transform
+    height, width = ref.height, ref.width
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
 
 # --- Load & resample all predictors to reference grid ---
 layers = []
 names  = []
 for path in rasters:
-    name = os.path.basename(path)
+    name = os.path.splitext(os.path.basename(path))[0]
     with rasterio.open(path) as src:
         if src.crs != ref_crs or src.transform != ref_transform:
             print(f"📐 Resampling {name} to reference grid…")
@@ -47,9 +50,12 @@ for path in rasters:
             out_shape=(height, width),
             resampling=Resampling.nearest
         )
-    print(f"🧪 {name} → NaN%: {np.isnan(arr).mean()*100:.2f}")
+    print(f"🧪 {name}.tif → NaN%: {np.isnan(arr).mean()*100:.2f}")
     layers.append(arr)
     names.append(name)
+
+# Now names == your layer_names
+layer_names = names
 
 stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
@@ -94,23 +100,23 @@ model.fit(Xc, yc)
 joblib.dump(model, "outputs/logistic_model.pkl")
 print("🧠 Model trained.")
 
-# Compute AUC on your cleaned training data
-y_prob = model.predict_proba(Xc)[:,1]
-auc = roc_auc_score(yc, y_prob)
+# --- Compute AUC on training data ---
+y_prob = model.predict_proba(Xc)[:, 1]
+auc    = roc_auc_score(yc, y_prob)
 
-# Get feature names from your raster filenames
-coef_df = pd.DataFrame({
-    'predictor': layer_names,
-    'coefficient': model.coef_.flatten()
-})
-
-# Summary row
+# --- Build stats table including AUC and coefficients ---
+# summary row for AUC
 summary = pd.DataFrame([{
     'predictor': 'AUC',
     'coefficient': auc
 }])
 
-# Combine and write
+# coefficient rows
+coef_df = pd.DataFrame({
+    'predictor': layer_names,
+    'coefficient': model.coef_.flatten()
+})
+
 stats_df = pd.concat([summary, coef_df], ignore_index=True)
 stats_df.to_csv("outputs/model_stats.csv", index=False)
 print("📊 Model stats saved to outputs/model_stats.csv")
@@ -122,12 +128,12 @@ pred_map = pred_flat.reshape((height, width))
 
 # --- Save suitability map using the reference profile ---
 profile = {
-    'driver': 'GTiff',
-    'height': height,
-    'width':  width,
-    'count':  1,
-    'dtype':  rasterio.float32,
-    'crs':    ref_crs,
+    'driver':    'GTiff',
+    'height':    height,
+    'width':     width,
+    'count':     1,
+    'dtype':     rasterio.float32,
+    'crs':       ref_crs,
     'transform': ref_transform
 }
 with rasterio.open(output_map, "w", **profile) as dst:
