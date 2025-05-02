@@ -1,12 +1,10 @@
-gradio
 earthengine-api
 geemap
+folium
 rasterio
 numpy
 pandas
-scikit-learn
-matplotlib
-folium
+scikit‑learn
 joblib
-rioxarray
-xee
+matplotlib
+gradio
