@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os, time, json
 import ee
 import geemap
