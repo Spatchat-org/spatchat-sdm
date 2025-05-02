@@ -315,8 +315,7 @@ with gr.Blocks() as demo:
                               type="messages",
                               label="💬 Chat"
                           )
-            gr.Markdown("**Ask SpatChat**")
-            user_in      = gr.Textbox(placeholder="Type commands…", label="")
+            user_in      = gr.Textbox(label="Ask Spatchat", placeholder="Type commands…")
             file_input   = gr.File(label="📄 Upload Presence CSV", type="filepath")
 
     file_input.change(on_upload, inputs=[file_input, chat], outputs=[chat, map_out, state])
