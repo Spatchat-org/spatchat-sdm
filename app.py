@@ -311,7 +311,8 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             chat         = gr.Chatbot(
                               value=[{"role":"assistant",
-                                      "content":"👋 Hello, I'm Spatchat! I am here to assist you in building your SDM. Upload your presence‑points CSV to begin."}],
+                                      "content":"👋 Hello, I’m SpatChat! I'm here to help you build your SDM!"
+                                      "To begin, please upload your presence‑points CSV using the upload box directly below this chat."}],
                               type="messages",
                               label="💬 Chat"
                           )
