@@ -277,14 +277,22 @@ with gr.Blocks() as demo:
         outputs=[chat, map_out, download_blk, state]
     )
 
-    # Wire up both “Send” button and pressing Enter in the textbox
-    for trigger in (send_btn, user_in.submit):
-        trigger.click(
-            chat_step,
-            inputs=[file_input, user_in, chat, state],
-            outputs=[chat, map_out, download_blk, state]
-        )
-        # clear the textbox after sending
-        trigger.click(lambda: "", None, user_in)
+    # When the user clicks “Send” …
+    send_btn.click(
+        chat_step,
+        inputs=[file_input, user_in, chat, state],
+        outputs=[chat, map_out, download_blk, state]
+    )
+    # … and clear the textbox
+    send_btn.click(lambda: "", None, user_in)
+    
+    # When the user presses Enter in the textbox …
+    user_in.submit(
+        chat_step,
+        inputs=[file_input, user_in, chat, state],
+        outputs=[chat, map_out, download_blk, state]
+    )
+    # … and clear the textbox
+    user_in.submit(lambda: "", None, user_in)
 
     demo.launch()
