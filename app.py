@@ -230,7 +230,7 @@ def chat_step(file, user_msg, history, state):
         m_out, status = result
         assistant_txt = status
         download_path = None
-    else tool_name=="download":
+    elif tool_name=="download":
         m_out, _ = result
         assistant_txt = (
             "✅ Here’s your ZIP bundle!<br>"
