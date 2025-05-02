@@ -1,13 +1,25 @@
-#!/usr/bin/env python3
-import os, io, json, shutil, subprocess, zipfile, re
-import pandas as pd, numpy as np, gradio as gr, folium, rasterio, ee, joblib
-from dotenv import load_dotenv
-from together import Together
+import os
+import io
+import json
+import base64
+import shutil
+import subprocess
+import zipfile
+
+import gradio as gr
+import geemap.foliumap as foliumap
+import folium
+import html as html_lib
+import pandas as pd
+import numpy as np
+import rasterio
+import ee
+import joblib
+
 from matplotlib import pyplot as plt, colormaps
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from folium import Element
-import html as html_lib
 
 # --- 0) SETUP: Earth Engine + LLM client ---
 # Earth Engine via Service Account
