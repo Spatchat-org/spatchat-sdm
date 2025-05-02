@@ -189,7 +189,7 @@ def chat_step(file, user_msg, history, state):
         if tool == "run_model":
             m_out, status, stats_df, stats_csv = run_model()
             assistant_txt = status
-            download_update = gr.update(disabled=False)
+            download_update = gr.update()
         else:
             m_out, status = TOOLS[tool](call)
             assistant_txt = status
@@ -212,7 +212,7 @@ def on_upload(f, history):
     if f and hasattr(f,"name"):
         shutil.copy(f.name, "inputs/presence_points.csv")
         new_history.append({"role":"assistant","content":"✅ Uploaded! Now “fetch …”"})
-    return new_history, create_map(), gr.update(disabled=True), {"stage":"await_fetch"}
+    return new_history, create_map(), gr.update(), {"stage":"await_fetch"}
 
 # --- Build & launch UI ---
 with gr.Blocks() as demo:
