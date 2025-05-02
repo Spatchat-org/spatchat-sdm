@@ -5,7 +5,7 @@ import base64
 import shutil
 import subprocess
 import zipfile
-
+import pandas as pd
 import gradio as gr
 import geemap.foliumap as foliumap
 import folium
@@ -168,6 +168,15 @@ with gr.Blocks() as demo:
             fetch_button       = gr.Button("🌐 Fetch Predictors")
             run_button         = gr.Button("🧠 Run Model")
             download_button    = gr.DownloadButton("📥 Download Results", zip_results)
+            
+            stats_table        = gr.Dataframe(
+                                    headers=["predictor","coefficient"],
+                                    label="📊 Model Statistics",
+                                    interactive=False
+                                )
+            
+            stats_download     = gr.DownloadButton("📥 Download Stats", lambda: "outputs/model_stats.csv"
+                                )
 
         with gr.Column(scale=3):
             map_output    = gr.HTML(value=create_map(), label="🗺️ Map Preview")
@@ -205,10 +214,19 @@ with gr.Blocks() as demo:
         msg = "✅ Model completed." if res.returncode == 0 else "❌ Model run failed."
         return create_map(), msg
 
+        stats_df = pd.read_csv("outputs/model_stats.csv")
+        return (
+            create_map(),
+            "✅ Model ran successfully!",
+            stats_df,
+            # DownloadButton will call its `file` lambda to grab this path
+            None
+        )
+
     upload_input.change(handle_upload, inputs=[upload_input], outputs=[map_output, status_output])
     fetch_button.click(run_fetch,   inputs=[layer_selector, landcover_selector],
                                          outputs=[map_output, status_output])
-    run_button.click  (run_model,   outputs=[map_output, status_output])
+    run_button.click  (run_model,   outputs=[map_output, status_output, stats_table, stats_download])
     download_button.click(zip_results, None, download_button)
 
     demo.launch()
