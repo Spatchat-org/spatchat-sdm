@@ -229,13 +229,21 @@ def chat_step(file, user_msg, history, state):
 
 def on_upload(f, history):
     new_history = history.copy()
+
+    # 1) wipe out any old predictors, outputs, & ZIP
+    shutil.rmtree("predictor_rasters", ignore_errors=True)
+    shutil.rmtree("outputs", ignore_errors=True)
+    if os.path.exists("spatchat_results.zip"):
+        os.remove("spatchat_results.zip")
+
+    # 2) handle missing file
     if not f or not hasattr(f, "name"):
         return new_history, create_map(), state
 
-    # copy csv in
+    # 3) copy in the new CSV
     shutil.copy(f.name, "inputs/presence_points.csv")
 
-    # now tell them what layers are available
+    # 4) show the available layers message
     extras = LAYERS[19:-1]  # ['elevation','slope','aspect','ndvi']
     last   = LAYERS[-1]     # 'landcover'
     layers_str = (
@@ -251,6 +259,7 @@ def on_upload(f, history):
         )
     })
 
+    # 5) return with a fresh, empty map
     return new_history, create_map(), state
 
 with gr.Blocks() as demo:
