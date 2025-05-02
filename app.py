@@ -77,7 +77,6 @@ After they indicate which layers they want to use, run run_fetch() and fetch tho
 Guide them through each step conversationally.
 """.strip()
 
-
 def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -143,7 +142,6 @@ def create_map():
     rendered = m.get_root().render()
     return f'<iframe srcdoc="{html_lib.escape(rendered)}" style="width:100%; height:600px; border:none;"></iframe>'
 
-
 def run_fetch(sl, lc):
     if not sl and not lc:
         return create_map(), "⚠️ Select at least one predictor."
@@ -157,14 +155,12 @@ def run_fetch(sl, lc):
     msg = "✅ Predictors fetched." if ok else f"❌ Fetch failed:\n{proc.stderr}"
     return create_map(), msg
 
-
 def run_model():
     proc = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
     if proc.returncode != 0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
     stats_df = pd.read_csv("outputs/model_stats.csv")
     return create_map(), "✅ Model ran successfully!", stats_df, "outputs/model_stats.csv"
-
 
 def zip_results():
     zipf = "spatchat_results.zip"
@@ -178,83 +174,89 @@ def zip_results():
                     zf.write(full, arcname=os.path.relpath(full, "."))
     return zipf
 
-
 def chat_step(f, msg, history, state):
-    # ensure zipf always defined
-    zipf = None
-    stage = state.get("stage", "await_upload")
-    cmd = msg.strip().lower()
+    stage = state.get("stage","await_upload")
+    cmd   = msg.strip().lower()
 
-    # 1) FETCH
-    if stage == "await_fetch" and cmd.startswith(("fetch", "get", "use")):
+    # --- decide which op to run (same as before) ---
+    if stage=="await_fetch" and cmd.startswith(("fetch","get","use")):
         m_out, status = run_fetch([], [])
         op_out = status
         next_stage = "await_run"
 
-    # 2) RUN MODEL
-    elif stage == "await_run" and "run model" in cmd:
+    elif stage=="await_run" and "run model" in cmd:
         m_out, status, stats_df, _ = run_model()
-        suffix = ("\n\n" + stats_df.to_markdown(index=False)) if stats_df is not None else ""
-        op_out = status + suffix
+        extra = "\n\n" + stats_df.to_markdown(index=False) if stats_df is not None else ""
+        op_out = status + extra
         next_stage = "await_download"
 
-    # 3) DOWNLOAD
-    elif stage == "await_download" and cmd.startswith(("download", "yes", "y")):
+    elif stage=="await_download" and cmd.startswith(("download","yes","y")):
         zipf = zip_results()
+        m_out = create_map()
         op_out = f"✅ Here is your ZIP: {zipf}"
         next_stage = "done"
+        # return immediately so LLM doesn’t rewrite this final step
+        new_history = history.copy()
+        new_history.append({"role":"user","content": msg})
+        new_history.append({"role":"assistant","content": op_out})
+        return new_history, m_out, zipf, {"stage": next_stage}
 
-    # FALLBACK
     else:
-        if stage == "await_upload":
-            op_out = "Please upload your presence-points CSV to begin."
-            next_stage = "await_upload"
-        elif stage == "await_fetch":
+        # fallback hints
+        if stage=="await_upload":
+            op_out = "Please upload your presence‑points CSV to begin."
+            next_stage="await_upload"
+        elif stage=="await_fetch":
             op_out = 'Say “fetch …” to download your chosen layers.'
-            next_stage = "await_fetch"
-        elif stage == "await_run":
+            next_stage="await_fetch"
+        elif stage=="await_run":
             op_out = 'Say “run model” to train the SDM.'
-            next_stage = "await_run"
+            next_stage="await_run"
         else:
             op_out = "Session complete. Upload a new CSV to restart."
-            next_stage = "await_upload"
-        m_out = create_map()
+            next_stage="await_upload"
 
-    # Build LLM prompt
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for u, a in history:
-        messages.append({"role": "user", "content": u})
-        messages.append({"role": "assistant", "content": a})
-    messages.append({"role": "user", "content": msg})
-    messages.append({"role": "system", "content": op_out})
+    # --- Build LLM prompt ---
+    messages = [{"role":"system","content": SYSTEM_PROMPT}]
+    # history is already a list of {role,content}
+    messages.extend(history)
+    messages.append({"role":"user","content": msg})
+    messages.append({"role":"system","content": op_out})
 
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=messages,
-        temperature=0.3
+        messages=messages, temperature=0.3
     ).choices[0].message.content
 
-    # after you’ve computed `resp`…
+    # --- Append both user + assistant messages to history ---
     new_history = history.copy()
-    new_history.append({ "role": "user", "content": msg})
-    new_history.append({ "role":"assistant", "content": resp })
-    return new_history, m_out, download_path_if_any, {"stage": next_stage}
+    new_history.append({"role":"user","content": msg})
+    new_history.append({"role":"assistant","content": resp})
+
+    # no download yet
+    return new_history, m_out, None, {"stage": next_stage}
 
 def on_upload(f, history):
-    # history is a list of {role,content} dicts
+    new_history = history.copy()
     if not f or not hasattr(f, "name"):
-        return history, create_map(), None, {"stage":"await_upload"}
+        return new_history, create_map(), None, {"stage":"await_upload"}
 
-    # copy in the CSV
+    # copy csv in
     shutil.copy(f.name, "inputs/presence_points.csv")
 
-    # make a brand‑new history list and append an assistant message
-    new_history = history.copy()
+    # now tell them what layers are available
+    layers_list = ", ".join(LAYERS)
     new_history.append({
         "role": "assistant",
-        "content": "✅ Uploaded! You can now say “fetch elevation, ndvi, bio1”, etc."
+        "content": (
+            "✅ Uploaded! Available layers are:\n\n"
+            f"{layers_list}\n\n"
+            "Now say something like “fetch elevation, ndvi, bio1” to grab those layers."
+        )
     })
-    return new_history, create_map(), None, {"stage":"await_fetch"}
+
+    return new_history, create_map(), None, {"stage": "await_fetch"}
+
 
 # --- Build & launch UI ---
 with gr.Blocks() as demo:
@@ -271,7 +273,8 @@ with gr.Blocks() as demo:
             chat        = gr.Chatbot(
                              label="SpatChat Dialog",
                              type="messages",
-                             value=[{"role":"assistant","content":"👋 Hello! Welcome to SpatChat. Please upload your presence‑points CSV to begin."}]
+                             value=[{"role":"assistant",
+                                     "content":"👋 Hello! Welcome to SpatChat. Please upload your presence‑points CSV to begin."}]
                          )
             user_in     = gr.Textbox(placeholder="Type commands…", label="")
             send_btn    = gr.Button("Send")
