@@ -236,6 +236,7 @@ def chat_step(f, msg, history, state):
 
     # after you’ve computed `resp`…
     new_history = history.copy()
+    new_history.append({ "role": "user", "content": msg})
     new_history.append({ "role":"assistant", "content": resp })
     return new_history, m_out, download_path_if_any, {"stage": next_stage}
 
