@@ -34,7 +34,7 @@ ee.Initialize(creds)
 load_dotenv()
 client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
-# --- Utility: clear all data ---
+# --- Utility to clear all data ---
 def clear_all():
     for d in ("predictor_rasters", "outputs", "inputs"):
         shutil.rmtree(d, ignore_errors=True)
@@ -45,7 +45,7 @@ def clear_all():
 # clear on startup
 clear_all()
 
-# --- Layers & Tools ---
+# --- Layers & Tools definitions ---
 LAYERS = [f"bio{i}" for i in range(1, 20)] + ["elevation","slope","aspect","ndvi","landcover"]
 TOOLS = {
     "fetch": lambda args: run_fetch(args.get("layers",[]), args.get("landcover",[])),
@@ -53,10 +53,10 @@ TOOLS = {
     "download": lambda args: (create_map(), zip_results())
 }
 
-# --- Pre-render colorbar ---
+# --- Pre-render colorbar → base64 ---
 fig, ax = plt.subplots(figsize=(4,0.5))
 norm = Normalize(vmin=0, vmax=1)
-plt.colorbar(ScalarMappable(norm=norm, cmap="viridis"),
+plt.colorbar(ScalarMappable(norm=norm,cmap="viridis"),
              cax=ax, orientation="horizontal").set_ticks([])
 ax.set_xlabel("Low    High")
 fig.tight_layout(pad=0)
@@ -95,10 +95,73 @@ Answer the user's question conversationally.
 """.strip()
 
 def create_map():
+    # Base map
     m = folium.Map(location=[0,0], zoom_start=2, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
-    # Presence points, rasters, suitability, colorbar (unchanged)...
-    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%;height:600px;border:none;"></iframe>'
+
+    # 1) Presence points
+    ppath = "inputs/presence_points.csv"
+    if os.path.exists(ppath):
+        df = pd.read_csv(ppath)
+        lat_col = next((c for c in df.columns if c.lower() in ("latitude","decimallatitude","y")), None)
+        lon_col = next((c for c in df.columns if c.lower() in ("longitude","decimallongitude","x")), None)
+        if lat_col and lon_col:
+            pts = df[[lat_col, lon_col]].dropna().values.tolist()
+            if pts:
+                fg = folium.FeatureGroup(name="🟦 Presence Points")
+                for lat, lon in pts:
+                    folium.CircleMarker(
+                        location=[lat, lon],
+                        radius=5,
+                        color="blue",
+                        fill=True,
+                        fill_opacity=0.8
+                    ).add_to(fg)
+                fg.add_to(m)
+                m.fit_bounds(pts)
+
+    # 2) Predictor rasters
+    rasdir = "predictor_rasters/wgs84"
+    if os.path.isdir(rasdir):
+        for fn in sorted(os.listdir(rasdir)):
+            if not fn.endswith(".tif"): continue
+            path = os.path.join(rasdir, fn)
+            with rasterio.open(path) as src:
+                arr = src.read(1); bnd = src.bounds
+            vmin,vmax = np.nanmin(arr), np.nanmax(arr)
+            if not np.isnan(vmin) and vmin!=vmax:
+                rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
+                folium.raster_layers.ImageOverlay(
+                    rgba,
+                    bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
+                    opacity=1.0,
+                    name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
+                ).add_to(m)
+
+    # 3) Suitability map
+    sf = "outputs/suitability_map_wgs84.tif"
+    if os.path.exists(sf):
+        with rasterio.open(sf) as src:
+            arr = src.read(1); bnd = src.bounds
+        vmin,vmax = np.nanmin(arr), np.nanmax(arr)
+        rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
+        folium.raster_layers.ImageOverlay(
+            rgba,
+            bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
+            opacity=0.7,
+            name="🎯 Suitability"
+        ).add_to(m)
+
+    # 4) Controls and colorbar
+    folium.LayerControl(collapsed=False).add_to(m)
+    img_html = (
+        f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
+        'style="position:absolute; bottom:20px; right:10px; '
+        'width:200px; height:30px; z-index:1000;" />'
+    )
+    m.get_root().html.add_child(Element(img_html))
+
+    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:600px; border:none;"></iframe>'
 
 def zip_results():
     archive = "spatchat_results.zip"
@@ -108,7 +171,7 @@ def zip_results():
             for root,_,files in os.walk(fld):
                 for fn in files:
                     full = os.path.join(root,fn)
-                    zf.write(full,arcname=os.path.relpath(full,"."))
+                    zf.write(full, arcname=os.path.relpath(full,"."))
     return archive
 
 def run_fetch(sl, lc):
@@ -118,13 +181,11 @@ def run_fetch(sl, lc):
     if lc: layers.append("landcover")
     os.environ["SELECTED_LAYERS"] = ",".join(layers)
     os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(c.split(" – ")[0] for c in lc)
-    proc = subprocess.run(["python","scripts/fetch_predictors.py"],
-                          capture_output=True, text=True)
+    proc = subprocess.run(["python","scripts/fetch_predictors.py"], capture_output=True, text=True)
     return create_map(), ("✅ Predictors fetched." if proc.returncode==0 else f"❌ Fetch failed:\n{proc.stderr}")
 
 def run_model():
-    proc = subprocess.run(["python","scripts/run_logistic_sdm.py"],
-                          capture_output=True, text=True)
+    proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
     if proc.returncode!=0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
     stats_df = pd.read_csv("outputs/model_stats.csv")
@@ -132,35 +193,28 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, "outputs/model_stats.csv"
 
 def chat_step(file, user_msg, history, state):
-    # 1) Detect reset phrases
+    # reset logic
     if re.search(r"\b(start over|restart|clear everything)\b", user_msg, re.I):
-        # clear all and reset chat
         clear_all()
-        new_hist = [{
-            "role":"assistant",
-            "content":"👋 All cleared! Please upload your presence‑points CSV to begin."
-        }]
+        new_hist = [{"role":"assistant",
+                     "content":"👋 All cleared! Please upload your presence‑points CSV to begin."}]
         return new_hist, create_map(), state
 
-    # 2) Tool‑picker prompt
+    # tool-picking
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
         messages=msgs, temperature=0.0
     ).choices[0].message.content
 
-    # 3) Parse JSON
     try:
         call = json.loads(response)
         tool = call["tool"]
     except:
-        assistant_txt = (
-            "Sorry, I couldn't understand that. Please say 'fetch ...', 'run model', or use the download button."
-        )
+        assistant_txt = ("Sorry, I couldn't understand that. Please say 'fetch ...', 'run model', or use the download button.")
         history.append({"role":"assistant","content":assistant_txt})
         return history, create_map(), state
 
-    # 4) Handle tools
     if tool=="fetch":
         m_out, status = run_fetch(call.get("layers",[]), call.get("landcover",[]))
         assistant_txt = f"{status}\n\nWhen ready, say “run model.”"
@@ -187,12 +241,9 @@ def chat_step(file, user_msg, history, state):
 
 def on_upload(f, history):
     new_history = history.copy()
-    # 1) Clear previous data
     clear_all()
-    # 2) Copy CSV
     if f and hasattr(f,"name"):
         shutil.copy(f.name,"inputs/presence_points.csv")
-        # 3) Prompt layers
         extras = LAYERS[19:-1]
         last   = LAYERS[-1]
         layers_str = f"bio1–bio19, {', '.join(extras)}, and {last} (e.g., water, urban…)"
@@ -207,54 +258,29 @@ def on_upload(f, history):
     return new_history, create_map(), state
 
 with gr.Blocks() as demo:
-    gr.Image(
-    value="logo_long1.png",
-    show_label=False,
-    show_download_button=False,
-    show_share_button=False,
-    type="filepath",
-    elem_id="logo-img"
-    )
-    gr.HTML("""
-    <style>
-    #logo-img img {
-        height: 90px;
-        margin: 10px 50px 10px 10px;  /* top, right, bottom, left */
-        border-radius: 6px;
-    }
-    </style>
-    """)
-    gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven SDM Layout")
+    gr.Markdown("## 🌱 SpatChat SDM – Chat‑Driven Layout")
 
     state = gr.State({"stage":"await_upload"})
 
     with gr.Row():
-        # LEFT column
         with gr.Column(scale=2):
             map_out      = gr.HTML(create_map(), label="🗺️ Map Preview")
             download_btn = gr.DownloadButton("📥 Download Results", zip_results)
-
-        # RIGHT column
         with gr.Column(scale=1):
-            chat       = gr.Chatbot(
-                             value=[{"role":"assistant","content":
-                                     "👋 Hello! Upload your presence‑points CSV to begin."}],
-                             type="messages",
-                             label="💬 Chat"
-                         )
+            chat         = gr.Chatbot(
+                              value=[{"role":"assistant",
+                                      "content":"👋 Hello! Upload your presence‑points CSV to begin."}],
+                              type="messages",
+                              label="💬 Chat"
+                          )
             gr.Markdown("**Ask SpatChat**")
-            user_in    = gr.Textbox(placeholder="Type commands…", label="")
-            file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
+            user_in      = gr.Textbox(placeholder="Type commands…", label="")
+            file_input   = gr.File(label="📄 Upload Presence CSV", type="filepath")
 
-    file_input.change(
-        on_upload, inputs=[file_input, chat],
-        outputs=[chat, map_out, state]
-    )
+    file_input.change(on_upload, inputs=[file_input, chat], outputs=[chat, map_out, state])
 
-    user_in.submit(
-        chat_step, inputs=[file_input, user_in, chat, state],
-        outputs=[chat, map_out, state]
-    )
+    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state],
+                   outputs=[chat, map_out, state])
     user_in.submit(lambda: "", None, user_in)
 
     demo.launch()
