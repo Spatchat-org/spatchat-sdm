@@ -164,4 +164,179 @@ def create_map():
     m.get_root().html.add_child(Element(img_html))
     return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:450px; border:none;"></iframe>'
 
-# ... rest of script remains unchanged ...
+def zip_results():
+    archive = "spatchat_results.zip"
+    if os.path.exists(archive): os.remove(archive)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fld in ("predictor_rasters","outputs"):
+            for root, _, files in os.walk(fld):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    zf.write(full, arcname=os.path.relpath(full, "."))
+    return archive
+
+def run_fetch(sl, lc):
+    if not sl and not lc:
+        return create_map(), "⚠️ Select at least one predictor."
+    layers = list(sl)
+    if lc: layers.append("landcover")
+    os.environ["SELECTED_LAYERS"] = ",".join(layers)
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(c.split(" – ")[0] for c in lc)
+    proc = subprocess.run(["python","scripts/fetch_predictors.py"], capture_output=True, text=True)
+    return create_map(), ("✅ Predictors fetched." if proc.returncode==0 else f"❌ Fetch failed:\n{proc.stderr}")
+
+def run_model():
+    proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
+    # Read performance and coefficients
+    perf_df = pd.read_csv("outputs/performance_metrics.csv")
+    coef_df = pd.read_csv("outputs/coefficients.csv")
+    # Build combined stats_df
+    perf_df = perf_df.rename(columns={
+        'AUC':'coefficient','Threshold':'threshold',
+        'Sensitivity':'sensitivity','Specificity':'specificity',
+        'TSS':'TSS','Kappa':'kappa'
+    })
+    perf_df['predictor'] = 'AUC'
+    perf_df = perf_df[['predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa']]
+    stats_df = pd.concat([perf_df, coef_df], ignore_index=True)
+    zip_results()
+    return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, None
+
+def chat_step(file, user_msg, history, state):
+    if not os.path.exists("inputs/presence_points.csv"):
+        fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
+        reply = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb, temperature=0.7
+        ).choices[0].message.content
+        history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
+        return history, create_map(), state
+    if re.search(r"\b(start over|restart|clear everything|reset)\b", user_msg, re.I):
+        clear_all()
+        return [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}], create_map(), state
+
+    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
+    resp = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=msgs, temperature=0.0
+    ).choices[0].message.content
+    try:
+        call = json.loads(resp)
+        tool = call.get("tool")
+    except:
+        tool = None
+
+    if tool == "fetch":
+        m, status = run_fetch(call.get("layers", []), call.get("landcover", []))
+        txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
+
+    elif tool == "run_model":
+        m_out, status, stats_df, _ = run_model()
+        status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
+        # Performance table
+        perf_df = stats_df.loc[stats_df['predictor']=='AUC', [
+            'predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa'
+        ]].copy()
+        perf_df = perf_df.rename(columns={
+            'predictor':'metric','coefficient':'auc',
+            'threshold':'threshold','sensitivity':'sensitivity',
+            'specificity':'specificity','TSS':'tss','kappa':'kappa'
+        })
+        # Coefficients table
+        coef_df = stats_df.loc[stats_df['predictor']!='AUC', [
+            'predictor','coefficient','p_value','CI_lower','CI_upper'
+        ]].copy()
+        coef_df = coef_df.dropna(axis=1, how='all')
+        perf_md = perf_df.to_markdown(index=False)
+        coef_md = coef_df.to_markdown(index=False)
+        txt = (
+            f"{status}\n\n"
+            f"**Model Performance:**\n\n{perf_md}\n\n"
+            f"**Predictor Coefficients:**\n\n{coef_md}\n\n"
+            "Download your ZIP using the button on the left."
+        )
+        m = m_out
+
+    elif tool == "download":
+        m, _ = create_map(), zip_results()
+        txt = "✅ ZIP is downloading…"
+
+    else:
+        fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
+        txt = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb, temperature=0.7
+        ).choices[0].message.content
+        m = create_map()
+
+    history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":txt}])
+    return history, m, state
+
+# --- Upload callback ---
+def on_upload(f, history, state):
+    history2 = history.copy()
+    clear_all()
+    if f and hasattr(f, "name"):
+        shutil.copy(f.name, "inputs/presence_points.csv")
+        df = pd.read_csv("inputs/presence_points.csv")
+        lat, lon = detect_coords(df)
+        if lat and lon:
+            history2.append({"role":"assistant","content":(
+                "✅ Sweet! I found your `latitude` and `longitude` columns.\n"
+                "You can now pick from these predictors:\n"
+                "• bio1–bio19\n"
+                "• elevation\n"
+                "• slope\n"
+                "• aspect\n"
+                "• NDVI\n"
+                "• landcover (e.g. water, urban)\n\n"
+                "When you’re ready, just say **'fetch elevation, ndvi, bio1'** to grab those layers."
+            )})
+            return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+        else:
+            history2.append({"role":"assistant","content":"I couldn't detect coordinate columns. Please select them and enter CRS below."})
+            cols = list(df.columns)
+            return history2, create_map(), state, gr.update(choices=cols, visible=True), gr.update(choices=cols, visible=True), gr.update(visible=True), gr.update(visible=True)
+    return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+
+# --- CRS confirm callback ---
+def confirm_coords(lat_col, lon_col, crs_raw, history, state):
+    df = pd.read_csv("inputs/presence_points.csv")
+    try:
+        src_epsg = resolve_crs(crs_raw) if crs_raw else 4326
+    except:
+        history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Could you try another format?"})
+        return history, create_map(), state, gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
+    src_crs = RioCRS.from_epsg(src_epsg)
+    dst_crs = RioCRS.from_epsg(4326)
+    lon_vals, lat_vals = rio_transform(src_crs, dst_crs, df[lon_col].tolist(), df[lat_col].tolist())
+    df['latitude'], df['longitude'] = lat_vals, lon_vals
+    df.to_csv("inputs/presence_points.csv", index=False)
+    history.append({"role":"assistant","content":"✅ Coordinates set! Now you can fetch layers (e.g., 'fetch elevation, ndvi')."})
+    return history, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+
+# --- Gradio UI ---
+with gr.Blocks() as demo:
+    state = gr.State({"stage": "await_upload"})
+    with gr.Row():
+        with gr.Column(scale=1):
+            map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
+            download_btn = gr.DownloadButton("📥 Download Results", zip_results)
+        with gr.Column(scale=1):
+            chat = gr.Chatbot(
+                value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}],
+                type="messages", label="💬 Chat", height=400
+            )
+            user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
+            file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
+            lat_dropdown = gr.Dropdown(choices=[], label="Latitude column", visible=False)
+            lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
+            crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
+            confirm_btn = gr.Button("Confirm Coordinates", visible=False)
+    file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
+    confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
+    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state])
+    user_in.submit(lambda: "", None, user_in)
+    demo.launch()
