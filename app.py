@@ -109,9 +109,9 @@ You are SpatChat, a friendly assistant orchestrating SDM.
 Your job is to explain to the user what options they have in each step,
 guiding them through the whole process to build the SDM.
 Whenever the user wants to perform an action, reply _only_ with a JSON object selecting one of your tools:
-- To fetch layers:     {"tool":"fetch","layers":["bio1","ndvi",...]}
-- To run the model:    {"tool":"run_model"}
-- To download results: {"tool":"download"}
+- To fetch layers:     {\"tool\":\"fetch\",\"layers\":[\"bio1\",\"ndvi\",...]} 
+- To run the model:    {\"tool\":\"run_model\"}
+- To download results: {\"tool\":\"download\"}
 After we run that function, we'll display its output and then prompt the user on next steps.
 If the user asks for stats, show them from stats_df.
 If the question is vague, ask for clarification.
@@ -189,10 +189,8 @@ def run_model():
     proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
     if proc.returncode != 0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
-    # Read performance and coefficients
     perf_df = pd.read_csv("outputs/performance_metrics.csv")
     coef_df = pd.read_csv("outputs/coefficients.csv")
-    # Build combined stats_df
     perf_df = perf_df.rename(columns={
         'AUC':'coefficient','Threshold':'threshold',
         'Sensitivity':'sensitivity','Specificity':'specificity',
@@ -234,30 +232,30 @@ def chat_step(file, user_msg, history, state):
 
     elif tool == "run_model":
         m_out, status, stats_df, _ = run_model()
-        status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
-        # Performance table
-        perf_df = stats_df.loc[stats_df['predictor']=='AUC', [
-            'predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa'
-        ]].copy()
-        perf_df = perf_df.rename(columns={
-            'predictor':'metric','coefficient':'auc',
-            'threshold':'threshold','sensitivity':'sensitivity',
-            'specificity':'specificity','TSS':'tss','kappa':'kappa'
-        })
-        # Coefficients table
-        coef_df = stats_df.loc[stats_df['predictor']!='AUC', [
-            'predictor','coefficient','p_value','CI_lower','CI_upper'
-        ]].copy()
-        coef_df = coef_df.dropna(axis=1, how='all')
-        perf_md = perf_df.to_markdown(index=False)
-        coef_md = coef_df.to_markdown(index=False)
-        txt = (
-            f"{status}\n\n"
-            f"**Model Performance:**\n\n{perf_md}\n\n"
-            f"**Predictor Coefficients:**\n\n{coef_md}\n\n"
-            "Download your ZIP using the button on the left."
-        )
-        m = m_out
+        if stats_df is None:
+            txt = status
+            m = m_out
+        else:
+            status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
+            perf_df = stats_df.loc[stats_df['predictor']=='AUC', [
+                'predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa'
+            ]].copy()
+            perf_df = perf_df.rename(columns={
+                'predictor':'metric','coefficient':'auc',
+                'threshold':'threshold','sensitivity':'sensitivity',
+                'specificity':'specificity','TSS':'tss','kappa':'kappa'
+            })
+            coef_df = stats_df.loc[stats_df['predictor']!='AUC', [
+                'predictor','coefficient','p_value','CI_lower','CI_upper'
+            ]].copy()
+            coef_df = coef_df.dropna(axis=1, how='all')
+            perf_md = perf_df.to_markdown(index=False)
+            coef_md = coef_df.to_markdown(index=False)
+            txt = (
+                f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n**Predictor Coefficients:**\n\n{coef_md}\n\n"
+                "Download your ZIP using the button on the left."
+            )
+            m = m_out
 
     elif tool == "download":
         m, _ = create_map(), zip_results()
@@ -285,13 +283,7 @@ def on_upload(f, history, state):
         if lat and lon:
             history2.append({"role":"assistant","content":(
                 "✅ Sweet! I found your `latitude` and `longitude` columns.\n"
-                "You can now pick from these predictors:\n"
-                "• bio1–bio19\n"
-                "• elevation\n"
-                "• slope\n"
-                "• aspect\n"
-                "• NDVI\n"
-                "• landcover (e.g. water, urban)\n\n"
+                "You can now pick from these predictors:\n• bio1–bio19\n• elevation\n• slope\n• aspect\n• NDVI\n• landcover (e.g. water, urban)\n\n"
                 "When you’re ready, just say **'fetch elevation, ndvi, bio1'** to grab those layers."
             )})
             return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
@@ -306,7 +298,7 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
     df = pd.read_csv("inputs/presence_points.csv")
     try:
         src_epsg = resolve_crs(crs_raw) if crs_raw else 4326
-    except:
+    except Exception:
         history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Could you try another format?"})
         return history, create_map(), state, gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
     src_crs = RioCRS.from_epsg(src_epsg)
@@ -326,17 +318,17 @@ with gr.Blocks() as demo:
             download_btn = gr.DownloadButton("📥 Download Results", zip_results)
         with gr.Column(scale=1):
             chat = gr.Chatbot(
-                value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}],
+                value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! Please upload your presence CSV to begin."}],
                 type="messages", label="💬 Chat", height=400
             )
             user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
             file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
             lat_dropdown = gr.Dropdown(choices=[], label="Latitude column", visible=False)
             lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
-            crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
+            crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N…", visible=False)
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
     file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
     confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
     user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state])
     user_in.submit(lambda: "", None, user_in)
-    demo.launch()
+    demo.launch(share=True)
