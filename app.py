@@ -186,21 +186,32 @@ def run_fetch(sl, lc):
     return create_map(), ("✅ Predictors fetched." if proc.returncode==0 else f"❌ Fetch failed:\n{proc.stderr}")
 
 def run_model():
-    proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
-    perf_df = pd.read_csv("outputs/performance_metrics.csv")
-    coef_df = pd.read_csv("outputs/coefficients.csv")
-    perf_df = perf_df.rename(columns={
-        'AUC':'coefficient','Threshold':'threshold',
-        'Sensitivity':'sensitivity','Specificity':'specificity',
-        'TSS':'TSS','Kappa':'kappa'
-    })
-    perf_df['predictor'] = 'AUC'
-    perf_df = perf_df[['predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa']]
-    stats_df = pd.concat([perf_df, coef_df], ignore_index=True)
+    proc = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+    suit_path = "outputs/suitability_map_wgs84.tif"
+    has_map = os.path.exists(suit_path)
+    # If the model script errored and no map, show error
+    if proc.returncode != 0 and not has_map:
+        err_msg = proc.stderr.splitlines()[-1] if proc.stderr else "Unknown error"
+        return create_map(), f"❌ Model run failed: {err_msg}", None, None
+    # Try to read stats
+    stats_df = None
+    try:
+        perf_df = pd.read_csv("outputs/performance_metrics.csv")
+        coef_df = pd.read_csv("outputs/coefficients.csv")
+        perf_df = perf_df.rename(columns={
+            'AUC': 'coefficient', 'Threshold': 'threshold',
+            'Sensitivity': 'sensitivity', 'Specificity': 'specificity',
+            'TSS': 'TSS', 'Kappa': 'kappa'
+        })
+        perf_df['predictor'] = 'AUC'
+        perf_df = perf_df[['predictor', 'coefficient', 'threshold', 'sensitivity', 'specificity', 'TSS', 'kappa']]
+        stats_df = pd.concat([perf_df, coef_df], ignore_index=True)
+        status = "✅ Model ran successfully! Results are ready below." if proc.returncode == 0 else "⚠️ Model completed with warnings."
+    except Exception:
+        status = "⚠️ Map is available, but performance stats could not be read."
+    # Zip results
     zip_results()
-    return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, None
+    return create_map(), status, stats_df, None
 
 def chat_step(file, user_msg, history, state):
     if not os.path.exists("inputs/presence_points.csv"):
