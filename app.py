@@ -23,7 +23,8 @@ from matplotlib.cm import ScalarMappable
 from folium import Element
 from together import Together
 from dotenv import load_dotenv
-from pyproj import CRS, Transformer, database
+from rasterio.crs import CRS as RioCRS
+from rasterio.warp import transform as rio_transform
 
 # --- Authenticate Earth Engine ---
 svc = json.loads(os.environ["GEE_SERVICE_ACCOUNT"])
@@ -93,7 +94,7 @@ def detect_coords(df, fuzz_threshold=80):
         return lat_opts[0], lon_opts[0]
     return None, None
 
-# parse EPSG patterns
+# parse EPSG or UTM patterns
 def parse_epsg_code(s):
     m = re.match(r"^(\d{4,5})$", s.strip())
     return int(m.group(1)) if m else None
@@ -106,12 +107,8 @@ def parse_utm_crs(s):
         return base+zone
     return None
 
-# lookup named CRS
-def lookup_named_crs(s):
-    infos = database.query_crs_info("name", s, case_sensitive=False)
-    return int(infos[0].code) if infos else None
+# lookup_named_crs removed (not available) - rely on LLM fallback
 
-# LLM fallback
 def llm_parse_crs(raw):
     system = {"role":"system","content":"You're a GIS expert. Given a CRS description, respond with only JSON {\"epsg\":###} or {\"epsg\":null}."}
     user = {"role":"user","content":f"CRS: '{raw}'"}
@@ -124,13 +121,14 @@ def llm_parse_crs(raw):
     if not data.get("epsg"): raise ValueError("LLM couldn't parse CRS")
     return data["epsg"]
 
-# resolve to CRS
+# resolve to EPSG integer
 def resolve_crs(raw):
-    for fn in (parse_epsg_code, parse_utm_crs, lookup_named_crs):
+    for fn in (parse_epsg_code, parse_utm_crs):
         code = fn(raw)
-        if code: return CRS.from_epsg(code)
+        if code:
+            return code
     # fallback to LLM
-    return CRS.from_epsg(llm_parse_crs(raw))
+    return llm_parse_crs(raw)
 
 # --- Core app funcs (unchanged) ---
 # ... (create_map, zip_results, run_fetch, run_model, chat_step stay the same)
@@ -139,12 +137,18 @@ def resolve_crs(raw):
 def confirm_coords(lat_col, lon_col, crs_raw, history, state):
     df = pd.read_csv("inputs/presence_points.csv")
     try:
-        src_crs = resolve_crs(crs_raw) if crs_raw else CRS.from_epsg(4326)
+        src_epsg = resolve_crs(crs_raw) if crs_raw else 4326
     except Exception:
         history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Could you try another format?"})
         return history, create_map(), state, gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
-    transformer = Transformer.from_crs(src_crs, CRS.from_epsg(4326), always_xy=True)
-    lon_vals, lat_vals = transformer.transform(df[lon_col].values, df[lat_col].values)
+    # transform using rasterio
+    src_crs = RioCRS.from_epsg(src_epsg)
+    dst_crs = RioCRS.from_epsg(4326)
+    lon_vals, lat_vals = rio_transform(
+        src_crs, dst_crs,
+        df[lon_col].values.tolist(),
+        df[lat_col].values.tolist()
+    )
     df['latitude'], df['longitude'] = lat_vals, lon_vals
     df.to_csv("inputs/presence_points.csv", index=False)
     history.append({"role":"assistant","content":"✅ Coordinates set! Now you can fetch layers (e.g., 'fetch elevation, ndvi')."})
