@@ -9,6 +9,8 @@ from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              cohen_kappa_score)
+from sklearn.model_selection import GroupKFold
+from sklearn.cluster import KMeans
 try:
     import statsmodels.api as sm
     _HAS_SM = True
@@ -54,7 +56,7 @@ for path in rasters:
 stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
-# --- Extract samples ---
+# --- Extract presence samples ---
 inv = ~ref_transform
 presence_samples = []
 for lat, lon in zip(lats, lons):
@@ -85,54 +87,72 @@ Xc, yc = X[mask], y[mask]
 print(f"🔀 Training samples: {X.shape} → after NaN removal: {Xc.shape}")
 
 # --- Spatial cross-validation ---
-from sklearn.model_selection import GroupKFold
-from sklearn.cluster import KMeans
-# Cluster presence points into spatial blocks
-coords = np.column_stack((lats, lons))[mask[:len(presence_samples)]]  # only presence coords
+coords = np.column_stack((lats, lons))[:len(presence_samples)]
+coords = coords[~np.any(np.isnan(presence_samples), axis=1)]  # match mask
 n_blocks = 5
 blocks = KMeans(n_clusters=n_blocks, random_state=42).fit_predict(coords)
 
 gkf = GroupKFold(n_splits=n_blocks)
 cv_aucs, cv_tsses, cv_kappas = [], [], []
 for train_idx, test_idx in gkf.split(presence_samples, yc[:len(presence_samples)], groups=blocks):
-    # Train presence and background
+    # Presence split
     Xp_train = presence_samples[train_idx]
-    Xp_test = presence_samples[test_idx]
-    # Sample background separately for train and test
-    background_pool = pool
+    Xp_test  = presence_samples[test_idx]
+    # Background split
     np.random.seed(42)
-    n_bg_train = 5 * len(train_idx)
-    bg_train_idx = np.random.choice(len(background_pool), size=n_bg_train, replace=False)
-    Xb_train = background_pool[bg_train_idx]
-    n_bg_test = 5 * len(test_idx)
-    bg_test_idx = np.random.choice(len(background_pool), size=n_bg_test, replace=False)
-    Xb_test = background_pool[bg_test_idx]
+    n_bt = 5 * len(train_idx)
+    bt_idx = np.random.choice(len(pool), size=n_bt, replace=False)
+    Xb_train = pool[bt_idx]
+    n_bt2 = 5 * len(test_idx)
+    bt_idx2 = np.random.choice(len(pool), size=n_bt2, replace=False)
+    Xb_test  = pool[bt_idx2]
     # Combine
     X_train = np.vstack([Xp_train, Xb_train])
     y_train = np.concatenate([np.ones(len(Xp_train)), np.zeros(len(Xb_train))])
-    X_test = np.vstack([Xp_test, Xb_test])
-    y_test = np.concatenate([np.ones(len(Xp_test)), np.zeros(len(Xb_test))])
-    # Fit & evaluate
+    X_test  = np.vstack([Xp_test, Xb_test])
+    y_test  = np.concatenate([np.ones(len(Xp_test)), np.zeros(len(Xb_test))])
+
     clf = LogisticRegression(max_iter=1000).fit(X_train, y_train)
-    p_test = clf.predict_proba(X_test)[:, 1]
+    p_test = clf.predict_proba(X_test)[:,1]
     # AUC
     auc_cv = roc_auc_score(y_test, p_test)
-    # Optimal threshold by TSS
+    # Optimal threshold
     fpr_cv, tpr_cv, thr_cv = roc_curve(y_test, p_test)
-    youden_cv = tpr_cv - fpr_cv
-    bt_cv = thr_cv[np.argmax(youden_cv)]
-    yhat_cv = (p_test >= bt_cv).astype(int)
-    tn_cv, fp_cv, fn_cv, tp_cv = confusion_matrix(y_test, yhat_cv).ravel()
-    sens_cv = tp_cv/(tp_cv+fn_cv)
-    spec_cv = tn_cv/(tn_cv+fp_cv)
-    tss_cv = sens_cv + spec_cv - 1
-    kappa_cv = cohen_kappa_score(y_test, yhat_cv)
+    youden = tpr_cv - fpr_cv
+    bt = thr_cv[np.argmax(youden)]
+    yhat = (p_test >= bt).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_test, yhat).ravel()
+    sens = tp/(tp+fn)
+    spec = tn/(tn+fp)
+    tss_cv = sens + spec - 1
+    kappa_cv = cohen_kappa_score(y_test, yhat)
     cv_aucs.append(auc_cv)
     cv_tsses.append(tss_cv)
     cv_kappas.append(kappa_cv)
-# Report CV metrics
+
 print(f"📐 Spatial CV [{n_blocks} folds] AUC: {np.mean(cv_aucs):.3f} ± {np.std(cv_aucs):.3f}")
 print(f"📐 Spatial CV TSS: {np.mean(cv_tsses):.3f} ± {np.std(cv_tsses):.3f}")
 print(f"📐 Spatial CV Kappa: {np.mean(cv_kappas):.3f} ± {np.std(cv_kappas):.3f}")
 
-# --- Train final model ---
+# --- Final model training & full-grid prediction ---
+final_model = LogisticRegression(max_iter=1000).fit(Xc, yc)
+joblib.dump(final_model, "outputs/logistic_model_final.pkl")
+print("🧠 Final model trained on all data.")
+
+# Predict full grid
+pred_flat = np.full(flat.shape[0], np.nan)
+pred_flat[valid_mask] = final_model.predict_proba(pool)[:,1]
+pred_map = pred_flat.reshape((height, width))
+
+profile = {
+    'driver': 'GTiff',
+    'height': height,
+    'width': width,
+    'count': 1,
+    'dtype': rasterio.float32,
+    'crs': ref_crs,
+    'transform': ref_transform
+}
+with rasterio.open(output_map, "w", **profile) as dst:
+    dst.write(pred_map.astype(rasterio.float32), 1)
+print(f"🎯 Final suitability map saved to {output_map}")
