@@ -166,10 +166,10 @@ def zip_results():
     if os.path.exists(archive): os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for fld in ("predictor_rasters","outputs"):
-            for root, _, files in os.walk(fld):
+            for root,_,files in os.walk(fld):
                 for fn in files:
-                    full = os.path.join(root, fn)
-                    zf.write(full, arcname=os.path.relpath(full, "."))
+                    full = os.path.join(root,fn)
+                    zf.write(full, arcname=os.path.relpath(full,"."))
     return archive
 
 def run_fetch(sl, lc):
@@ -186,9 +186,10 @@ def run_model():
     proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
     if proc.returncode!=0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
-    stats_df = pd.read_csv("outputs/model_stats.csv")
+    perf_df = pd.read_csv("outputs/performance_metrics.csv")
+    coef_df = pd.read_csv("outputs/coefficients.csv")
     zip_results()
-    return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, "outputs/model_stats.csv"
+    return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
 
 def chat_step(file, user_msg, history, state):
     if not os.path.exists("inputs/presence_points.csv"):
@@ -207,17 +208,13 @@ def chat_step(file, user_msg, history, state):
     except:
         tool = None
     if tool == "fetch":
-        m, status = run_fetch(call.get("layers", []), call.get("landcover", []))
+        m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
     elif tool == "run_model":
-        # fixed block: assign m and txt
-        m, status, stats_df, _ = run_model()
+        m_out, status, perf_df, coef_df = run_model()
         status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
-        perf_cols = ['predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa']
-        perf_df = stats_df.loc[stats_df['predictor']=='AUC', perf_cols]
-        coef_cols = ['predictor','coefficient','p_value','CI_lower','CI_upper']
-        coef_df  = stats_df.loc[stats_df['predictor']!='AUC', coef_cols].dropna(axis=1, how='all')
         perf_md = perf_df.to_markdown(index=False)
+        coef_df = coef_df.dropna(axis=1, how='all')
         coef_md = coef_df.to_markdown(index=False)
         txt = (
             f"{status}\n\n"
@@ -226,14 +223,14 @@ def chat_step(file, user_msg, history, state):
             "Download your ZIP using the button on the left."
         )
     elif tool == "download":
-        m, _ = create_map(), zip_results()
+        m_out, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
     else:
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
         txt = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
-        m = create_map()
+        m_out = create_map()
     history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":txt}])
-    return history, m, state
+    return history, m_out, state
 
 # --- Upload callback ---
 def on_upload(f, history, state):
