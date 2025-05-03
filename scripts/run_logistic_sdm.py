@@ -143,17 +143,6 @@ spec = tn/(tn+fp)
 tss = sens + spec - 1
 kappa = cohen_kappa_score(yc, yhat)
 
-# p-values & CIs
-enabled_sm = _HAS_SM
-if enabled_sm:
-    X_sm = sm.add_constant(Xc)
-    sm_model = sm.Logit(yc, X_sm).fit(disp=False)
-    pvals = sm_model.pvalues
-    ci = sm_model.conf_int()
-else:
-    pvals = pd.Series([np.nan]*(len(names)+1), index=['const']+names)
-    ci = pd.DataFrame({0:[np.nan]*(len(names)+1),1:[np.nan]*(len(names)+1)})
-
 # --- Write out performance and coefficients ---
 perf_df = pd.DataFrame([{  # performance metrics
     'AUC':          auc,
@@ -167,40 +156,21 @@ perf_df.to_csv("outputs/performance_metrics.csv", index=False)
 print("📊 Performance metrics saved to outputs/performance_metrics.csv")
 
 
-# --- Build and write coefficients robustly ---
-
-# 1. Prepare the coefficient vector
-intercept = sm_model.params['const'] if enabled_sm else model.intercept_[0]
+# --- Write out coefficients (no statsmodels) ---
+# Always produce exactly one row per predictor + intercept
+intercept = model.intercept_[0]
 coef_vals = np.concatenate([[intercept], model.coef_.flatten()])
+predictors = ['Intercept'] + names
 
-# 2. Expected length (intercept + one per predictor)
-n = len(names) + 1
-
-# 3. Ensure p-values has length n
-pv = pvals.values
-if len(pv) != n:
-    pv = np.full(n, np.nan)
-
-# 4. Ensure CIs have length n
-ci_lower = ci[0].values
-ci_upper = ci[1].values
-if len(ci_lower) != n or len(ci_upper) != n:
-    ci_lower = np.full(n, np.nan)
-    ci_upper = np.full(n, np.nan)
-
-# 5. Build the DataFrame
+# Build a simple DataFrame
 coef_df = pd.DataFrame({
-    'predictor':   ['Intercept'] + names,
-    'coefficient': coef_vals,
-    'p_value':     pv,
-    'CI_lower':    ci_lower,
-    'CI_upper':    ci_upper
+    'predictor':   predictors,
+    'coefficient': coef_vals
 })
 
-# 6. Save to CSV
+# Save
 coef_df.to_csv("outputs/coefficients.csv", index=False)
 print("📊 Coefficients saved to outputs/coefficients.csv")
-
 
 # --- Save final suitability map ---
 pred_flat = np.full(flat.shape[0], np.nan)
