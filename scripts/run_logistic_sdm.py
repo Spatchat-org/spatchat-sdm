@@ -59,20 +59,18 @@ stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract presence samples ---
-inv = ~ref_transform  # inverse affine transform
+inv_affine = ~ref_transform  # inverse affine transform
 presence_samples = []
 for lat, lon in zip(lats, lons):
     try:
-        # map (lon, lat) to (row_f, col_f)
-        row_f, col_f = inv * (lon, lat)
+        # inv_affine * (x, y) returns (col_f, row_f)
+        col_f, row_f = inv_affine * (lon, lat)
         row, col = int(row_f), int(col_f)
-        # ensure in bounds and not NaN
         if 0 <= row < height and 0 <= col < width:
             vals = stack[row, col, :]
             if not np.any(np.isnan(vals)):
                 presence_samples.append(vals)
     except Exception:
-        # skip points outside or invalid
         continue
 presence_samples = np.array(presence_samples)
 print(f"📍 Presence samples: {presence_samples.shape}")
