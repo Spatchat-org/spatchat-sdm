@@ -222,8 +222,7 @@ def chat_step(file, user_msg, history, state):
 - AUC: {auc:.5f}
 
 **Predictor Coefficients:**
-{coef_df.to_markdown(index=False)}"""}"
-        )
+{coef_df.to_markdown(index=False)}"""
     elif tool == "download":
         m, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
