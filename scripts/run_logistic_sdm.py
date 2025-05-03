@@ -1,12 +1,10 @@
 import os
-import sys
 import numpy as np
 import pandas as pd
 import rasterio
 import joblib
 
 from rasterio.enums import Resampling
-from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     roc_auc_score, roc_curve, confusion_matrix,
@@ -14,18 +12,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GroupKFold
 from sklearn.cluster import KMeans
-
-# Ensure statsmodels is installed and import it
-try:
-    import statsmodels.api as sm
-except ImportError:
-    print("ℹ️ statsmodels not found. Installing statsmodels...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "statsmodels"]);
-    import statsmodels.api as sm
-
-# Now statsmodels is available
-_Has_SM = True
+import statsmodels.api as sm  # assume installed via requirements.txt
 
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
@@ -36,7 +23,7 @@ output_map  = "outputs/suitability_map_wgs84.tif"
 os.makedirs("outputs", exist_ok=True)
 
 # --- Load presence points ---
-df   = pd.read_csv(csv_path)
+df = pd.read_csv(csv_path)
 lats = df['latitude'].values
 lons = df['longitude'].values
 print(f"📍 Loaded {len(df)} presence points.")
@@ -50,7 +37,7 @@ rasters = sorted([
 if not rasters:
     raise RuntimeError(f"No .tif found in {raster_dir}")
 with rasterio.open(rasters[0]) as ref:
-    ref_crs        = ref.crs
+    ref_crs = ref.crs
     ref_transform = ref.transform
     height, width = ref.height, ref.width
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
@@ -60,9 +47,11 @@ layers, names = [], []
 for path in rasters:
     name = os.path.splitext(os.path.basename(path))[0]
     with rasterio.open(path) as src:
-        arr = src.read(1,
-                       out_shape=(height, width),
-                       resampling=Resampling.nearest)
+        arr = src.read(
+            1,
+            out_shape=(height, width),
+            resampling=Resampling.nearest
+        )
     print(f"🧪 {name}.tif → NaN%: {np.isnan(arr).mean()*100:.2f}")
     layers.append(arr)
     names.append(name)
@@ -84,10 +73,10 @@ print(f"📍 Presence samples: {presence_samples.shape}")
 
 # --- Background sampling ---
 np.random.seed(42)
-flat       = stack.reshape(-1, stack.shape[-1])
+flat = stack.reshape(-1, stack.shape[-1])
 valid_mask = ~np.any(np.isnan(flat), axis=1)
-pool       = flat[valid_mask]
-n_bg       = 5 * len(presence_samples)
+pool = flat[valid_mask]
+n_bg = 5 * len(presence_samples)
 bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)
 background_samples = pool[bg_indices]
 print(f"🌎 Background samples: {background_samples.shape}")
@@ -112,27 +101,27 @@ for train_idx, test_idx in gkf.split(
         yc[:len(presence_samples)],
         groups=blocks
     ):
-    # split
+    # split presence
     Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
-    # background
-    n_bt  = 5 * len(train_idx)
+    # background for train
+    n_bt = 5 * len(train_idx)
     bt_idx = np.random.choice(len(pool), size=n_bt, replace=False)
     Xb_tr = pool[bt_idx]
+    # background for test
     n_bt2 = 5 * len(test_idx)
     bt_idx2 = np.random.choice(len(pool), size=n_bt2, replace=False)
     Xb_te = pool[bt_idx2]
-    # combine
+    # combine and fit
     X_tr = np.vstack([Xp_tr, Xb_tr])
     y_tr = np.concatenate([np.ones(len(Xp_tr)), np.zeros(len(Xb_tr))])
     X_te = np.vstack([Xp_te, Xb_te])
     y_te = np.concatenate([np.ones(len(Xp_te)), np.zeros(len(Xb_te))])
-    # fit & eval
     clf = LogisticRegression(max_iter=1000).fit(X_tr, y_tr)
     p_te = clf.predict_proba(X_te)[:,1]
     auc_cv = roc_auc_score(y_te, p_te)
     fpr_cv, tpr_cv, thr = roc_curve(y_te, p_te)
-    bt     = thr[np.argmax(tpr_cv - fpr_cv)]
-    yhat   = (p_te >= bt).astype(int)
+    bt = thr[np.argmax(tpr_cv - fpr_cv)]
+    yhat = (p_te >= bt).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_te, yhat).ravel()
     sens = tp/(tp+fn)
     spec = tn/(tn+fp)
@@ -159,30 +148,31 @@ spec = tn/(tn+fp)
 tss = sens + spec - 1
 kappa = cohen_kappa_score(yc, yhat)
 
-# p-values & CIs
+# --- p-values & confidence intervals via statsmodels ---
 X_sm = sm.add_constant(Xc)
 sm_model = sm.Logit(yc, X_sm).fit(disp=False)
 pvals = sm_model.pvalues
-ci    = sm_model.conf_int()
+ci = sm_model.conf_int()
 
-# --- Write out performance and coefficients ---
-perf_df = pd.DataFrame([{  # performance metrics
-    'AUC':          auc,
-    'Threshold':    best_thr,
-    'Sensitivity':  sens,
-    'Specificity':  spec,
-    'TSS':          tss,
-    'Kappa':        kappa
+# --- Write out performance metrics ---
+perf_df = pd.DataFrame([{
+    'AUC': auc,
+    'Threshold': best_thr,
+    'Sensitivity': sens,
+    'Specificity': spec,
+    'TSS': tss,
+    'Kappa': kappa
 }])
 perf_df.to_csv("outputs/performance_metrics.csv", index=False)
 print("📊 Performance metrics saved to outputs/performance_metrics.csv")
 
-coef_df = pd.DataFrame({  # model coefficients
-    'predictor':   ['Intercept'] + names,
+# --- Write out coefficients with stats ---
+coef_df = pd.DataFrame({
+    'predictor': ['Intercept'] + names,
     'coefficient': np.concatenate([[sm_model.params['const']], model.coef_.flatten()]),
-    'p_value':     pvals.values,
-    'CI_lower':    ci[0].values,
-    'CI_upper':    ci[1].values
+    'p_value': pvals.values,
+    'CI_lower': ci[0].values,
+    'CI_upper': ci[1].values
 })
 coef_df.to_csv("outputs/coefficients.csv", index=False)
 print("📊 Coefficients saved to outputs/coefficients.csv")
