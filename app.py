@@ -26,6 +26,18 @@ from dotenv import load_dotenv
 from rasterio.crs import CRS as RioCRS
 from rasterio.warp import transform as rio_transform
 
+# --- Pre-render colorbar → base64 ---
+fig, ax = plt.subplots(figsize=(4, 0.5))
+norm = Normalize(vmin=0, vmax=1)
+plt.colorbar(ScalarMappable(norm=norm, cmap="viridis"), cax=ax, orientation="horizontal").set_ticks([])
+ax.set_xlabel("Low    High")
+fig.tight_layout(pad=0)
+buf = io.BytesIO()
+fig.savefig(buf, format="png", dpi=100)
+plt.close(fig)
+buf.seek(0)
+COLORBAR_BASE64 = base64.b64encode(buf.read()).decode()
+
 # --- Authenticate Earth Engine ---
 svc = json.loads(os.environ.get("GEE_SERVICE_ACCOUNT", "{}"))
 creds = ee.ServiceAccountCredentials(svc.get("client_email"), key_data=json.dumps(svc))
