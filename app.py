@@ -210,19 +210,30 @@ def chat_step(file, user_msg, history, state):
         m, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
     elif tool == "run_model":
-        m, status, stats_df, _ = run_model()
+        m_out, status, stats_df, _ = run_model()
         # Clarify download availability
-        status = status + " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
-        # Separate AUC from predictor coefficients
-        auc = stats_df.loc[stats_df['predictor'] == 'AUC', 'coefficient'].values[0]
-        coef_df = stats_df[stats_df['predictor'] != 'AUC']
-        # Build output text
-        txt = f"""{status}
-**Model Performance:**
-- AUC: {auc:.5f}
+        status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
+    
+        # 1) Performance metrics (AUC + threshold/TSS/κ row)
+        perf_cols = ['predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa']
+        perf_df = stats_df.loc[stats_df['predictor']=='AUC', perf_cols]
+    
+        # 2) Coefficients (drop empty columns if all NaN)
+        coef_cols = ['predictor','coefficient','p_value','CI_lower','CI_upper']
+        coef_df  = stats_df.loc[stats_df['predictor']!='AUC', coef_cols]
+        coef_df  = coef_df.dropna(axis=1, how='all')
+    
+        # Render each as its own markdown table
+        perf_md = perf_df.to_markdown(index=False)
+        coef_md = coef_df.to_markdown(index=False)
+    
+        assistant_txt = (
+            f"{status}\n\n"
+            f"**Model Performance:**\n\n{perf_md}\n\n"
+            f"**Predictor Coefficients:**\n\n{coef_md}\n\n"
+            "Download your ZIP using the button on the left."
+        )
 
-**Predictor Coefficients:**
-{coef_df.to_markdown(index=False)}"""
     elif tool == "download":
         m, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
