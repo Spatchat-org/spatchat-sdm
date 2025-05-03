@@ -11,12 +11,6 @@ from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              cohen_kappa_score)
 from sklearn.model_selection import GroupKFold
 from sklearn.cluster import KMeans
-try:
-    import statsmodels.api as sm
-    _HAS_SM = True
-except ImportError:
-    print("⚠️ statsmodels not available; skipping p-values and CIs")
-    _HAS_SM = False
 
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
