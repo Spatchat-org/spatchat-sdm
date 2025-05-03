@@ -211,8 +211,25 @@ def chat_step(file, user_msg, history, state):
         txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
     elif tool == "run_model":
         m, status, stats_df, _ = run_model()
-        stats_md = stats_df.to_markdown(index=False)
-        txt = f"{status}\n\n**Model Statistics:**\n{stats_md}"  
+        # Clarify download availability
+        status = status + " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
+        # Separate AUC from predictor coefficients
+        auc = stats_df.loc[stats_df['predictor'] == 'AUC', 'coefficient'].values[0]
+        coef_df = stats_df[stats_df['predictor'] != 'AUC']
+        # Build output text
+        txt = (
+            f"{status}
+
+"
+            f"**Model Performance:**
+"
+            f"- AUC: {auc:.5f}
+
+"
+            f"**Predictor Coefficients:**
+"
+            f"{coef_df.to_markdown(index=False)}"
+        )
     elif tool == "download":
         m, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
