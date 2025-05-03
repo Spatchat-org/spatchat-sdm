@@ -238,7 +238,16 @@ def on_upload(f, history):
         df = pd.read_csv("inputs/presence_points.csv")
         lat, lon = detect_coords(df)
         if lat and lon:
-            history2.append({"role":"assistant","content":"✅ Uploaded and detected columns: latitude='%s', longitude='%s'. Now fetch layers." % (lat, lon)})
+            history2.append({"role":"assistant","content":"✅ Sweet! I found your `latitude` and `longitude` columns.
+You can now pick from these predictors:
+• bio1–bio19
+• elevation
+• slope
+• aspect
+• NDVI
+• landcover (e.g. water, urban)
+
+When you’re ready, just say something like **\"fetch elevation, ndvi, bio1\"** to grab those layers."})})
             return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
         else:
             history2.append({"role":"assistant","content":"I couldn't detect coordinate columns. Please select them and enter CRS below."})
