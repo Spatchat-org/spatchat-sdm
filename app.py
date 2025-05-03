@@ -113,7 +113,7 @@ Whenever the user wants to perform an action, reply _only_ with a JSON object se
 - To run the model:    {"tool":"run_model"}
 - To download results: {"tool":"download"}
 After we run that function, we'll display its output and then prompt the user on next steps.
-If the user asks for stats, show them from stats_df.
+If the user asks for statistical results, show them from "outputs/performance_metrics.csv" and "outputs/coefficients.csv".
 If the question is vague, ask for clarification.
 """.strip()
 
@@ -219,7 +219,7 @@ def chat_step(file, user_msg, history, state):
             txt = status
         else:
             # Success: show performance and coefficients
-            status += " You can download the suitability map using the 📥 button below the map."
+            status += " You can download the suitability map and all rasters using the 📥 button below the map."
             perf_md = perf_df.to_markdown(index=False)
             coef_df = coef_df.dropna(axis=1, how='all')
             coef_md = coef_df.to_markdown(index=False)
