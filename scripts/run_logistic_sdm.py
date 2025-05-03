@@ -129,8 +129,7 @@ print(f"📐 Spatial CV AUC: {np.mean(cv_aucs):.3f} ± {np.std(cv_aucs):.3f}")
 print(f"📐 Spatial CV TSS: {np.mean(cv_tsses):.3f} ± {np.std(cv_tsses):.3f}")
 print(f"📐 Spatial CV Kappa: {np.mean(cv_kappas):.3f} ± {np.std(cv_kappas):.3f}")
 
-# --- Build stats table on full data ---
-# Fit on full data to compute stats
+# --- Final model fit & stats ---
 model = LogisticRegression(max_iter=1000).fit(Xc, yc)
 joblib.dump(model, "outputs/logistic_model_full.pkl")
 y_prob = model.predict_proba(Xc)[:,1]
@@ -143,8 +142,10 @@ sens = tp/(tp+fn)
 spec = tn/(tn+fp)
 tss = sens + spec - 1
 kappa = cohen_kappa_score(yc, yhat)
+
 # p-values & CIs
-if _HAS_SM:
+enabled_sm = _HAS_SM
+if enabled_sm:
     X_sm = sm.add_constant(Xc)
     sm_model = sm.Logit(yc, X_sm).fit(disp=False)
     pvals = sm_model.pvalues
@@ -152,35 +153,38 @@ if _HAS_SM:
 else:
     pvals = pd.Series([np.nan]*(len(names)+1), index=['const']+names)
     ci = pd.DataFrame({0:[np.nan]*(len(names)+1),1:[np.nan]*(len(names)+1)})
-# summary row
-summary = pd.DataFrame([{
-    'predictor':'AUC', 'coefficient':auc,
-    'p_value':np.nan, 'CI_lower':np.nan, 'CI_upper':np.nan,
-    'threshold':best_thr,
-    'sensitivity':sens, 'specificity':spec,
-    'TSS':tss, 'kappa':kappa
-}])
-# coef rows
-coef_df = pd.DataFrame({
-    'predictor': ['Intercept']+names,
-    'coefficient': np.concatenate([[sm_model.params['const'] if _HAS_SM else model.intercept_[0]], model.coef_.flatten()]),
-    'p_value': pvals.values,
-    'CI_lower': ci[0].values,
-    'CI_upper': ci[1].values,
-    'threshold': np.nan,
-    'sensitivity': np.nan, 'specificity': np.nan,
-    'TSS': np.nan, 'kappa': np.nan
-})
-stats_df = pd.concat([summary, coef_df], ignore_index=True)
-stats_df.to_csv(stats_csv, index=False)
-print(f"📊 Model stats saved to {stats_csv}")
 
-# --- Final full-grid prediction ---
+# --- Write out performance and coefficients ---
+perf_df = pd.DataFrame([{  # performance metrics
+    'AUC':          auc,
+    'Threshold':    best_thr,
+    'Sensitivity':  sens,
+    'Specificity':  spec,
+    'TSS':          tss,
+    'Kappa':        kappa
+}])
+perf_df.to_csv("outputs/performance_metrics.csv", index=False)
+print("📊 Performance metrics saved to outputs/performance_metrics.csv")
+
+coef_df = pd.DataFrame({  # model coefficients
+    'predictor':   ['Intercept'] + names,
+    'coefficient': np.concatenate([[sm_model.params['const'] if enabled_sm else model.intercept_[0]], model.coef_.flatten()]),
+    'p_value':     pvals.values,
+    'CI_lower':    ci[0].values,
+    'CI_upper':    ci[1].values
+})
+coef_df.to_csv("outputs/coefficients.csv", index=False)
+print("📊 Coefficients saved to outputs/coefficients.csv")
+
+# --- Save final suitability map ---
 pred_flat = np.full(flat.shape[0], np.nan)
 pred_flat[valid_mask] = model.predict_proba(pool)[:,1]
 pred_map = pred_flat.reshape((height, width))
-profile = {'driver':'GTiff','height':height,'width':width,'count':1,'dtype':rasterio.float32,
-           'crs':ref_crs,'transform':ref_transform}
+profile = {
+    'driver': 'GTiff', 'height': height, 'width': width,
+    'count': 1, 'dtype': rasterio.float32,
+    'crs': ref_crs, 'transform': ref_transform
+}
 with rasterio.open(output_map, "w", **profile) as dst:
     dst.write(pred_map.astype(rasterio.float32), 1)
 print(f"🎯 Final suitability map saved to {output_map}")
