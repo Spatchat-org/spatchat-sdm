@@ -167,25 +167,40 @@ perf_df.to_csv("outputs/performance_metrics.csv", index=False)
 print("📊 Performance metrics saved to outputs/performance_metrics.csv")
 
 
-# Debug lengths
-intercept = sm_model.params['const'] if enabled_sm else model.intercept_[0]
-coef_list = [intercept] + model.coef_.flatten().tolist()
-print("▶️ DEBUG lengths:")
-print("  predictors:", len(names) + 1)
-print("  coefficients:", len(coef_list))
-print("  p_values:", len(pvals.values))
-print("  CI_lower:", len(ci[0].values))
-print("  CI_upper:", len(ci[1].values))
+# --- Build and write coefficients robustly ---
 
-coef_df = pd.DataFrame({  # model coefficients
+# 1. Prepare the coefficient vector
+intercept = sm_model.params['const'] if enabled_sm else model.intercept_[0]
+coef_vals = np.concatenate([[intercept], model.coef_.flatten()])
+
+# 2. Expected length (intercept + one per predictor)
+n = len(names) + 1
+
+# 3. Ensure p-values has length n
+pv = pvals.values
+if len(pv) != n:
+    pv = np.full(n, np.nan)
+
+# 4. Ensure CIs have length n
+ci_lower = ci[0].values
+ci_upper = ci[1].values
+if len(ci_lower) != n or len(ci_upper) != n:
+    ci_lower = np.full(n, np.nan)
+    ci_upper = np.full(n, np.nan)
+
+# 5. Build the DataFrame
+coef_df = pd.DataFrame({
     'predictor':   ['Intercept'] + names,
-    'coefficient': np.concatenate([[sm_model.params['const'] if enabled_sm else model.intercept_[0]], model.coef_.flatten()]),
-    'p_value':     pvals.values,
-    'CI_lower':    ci[0].values,
-    'CI_upper':    ci[1].values
+    'coefficient': coef_vals,
+    'p_value':     pv,
+    'CI_lower':    ci_lower,
+    'CI_upper':    ci_upper
 })
+
+# 6. Save to CSV
 coef_df.to_csv("outputs/coefficients.csv", index=False)
 print("📊 Coefficients saved to outputs/coefficients.csv")
+
 
 # --- Save final suitability map ---
 pred_flat = np.full(flat.shape[0], np.nan)
