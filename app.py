@@ -212,16 +212,26 @@ def chat_step(file, user_msg, history, state):
         txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
     elif tool == "run_model":
         m_out, status, perf_df, coef_df = run_model()
-        status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
+    
+#    -   # This blows up if perf_df is None:
+#    -   perf_md = perf_df.to_markdown(index=False)
+#    -   coef_md = coef_df.dropna(axis=1).to_markdown(index=False)
+#    -   txt = f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n**Coefficients:**\n\n{coef_md}"
+    # Only convert to markdown if the run succeeded:
+    if perf_df is None:
+        # The subprocess failed; just show the error message
+        txt = status
+    else:
+        # Success: show performance and coefficients
         perf_md = perf_df.to_markdown(index=False)
         coef_df = coef_df.dropna(axis=1, how='all')
         coef_md = coef_df.to_markdown(index=False)
         txt = (
             f"{status}\n\n"
             f"**Model Performance:**\n\n{perf_md}\n\n"
-            f"**Predictor Coefficients:**\n\n{coef_md}\n\n"
-            "Download your ZIP using the button on the left."
+            f"**Predictor Coefficients:**\n\n{coef_md}"
         )
+
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
