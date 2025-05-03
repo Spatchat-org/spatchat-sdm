@@ -281,7 +281,7 @@ with gr.Blocks() as demo:
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
             download_btn = gr.DownloadButton("📥 Download Results", zip_results)
         with gr.Column(scale=1):
-            chat = gr.Chatbot(value=[{"role": "assistant", "content": "👋 Hello, I'm SpatChat! Upload your presence CSV to begin."}], type="messages", label="💬 Chat", height=400)
+            chat = gr.Chatbot(value=[{"role": "assistant", "content": "👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}], type="messages", label="💬 Chat", height=400)
             user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
             file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
             lat_dropdown = gr.Dropdown(choices=[], label="Latitude column", visible=False)
