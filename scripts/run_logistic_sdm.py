@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import pandas as pd
 import rasterio
@@ -7,22 +8,31 @@ import joblib
 from rasterio.enums import Resampling
 from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
-                             cohen_kappa_score)
+from sklearn.metrics import (
+    roc_auc_score, roc_curve, confusion_matrix,
+    cohen_kappa_score
+)
 from sklearn.model_selection import GroupKFold
 from sklearn.cluster import KMeans
+
+# Ensure statsmodels is installed and import it
 try:
     import statsmodels.api as sm
-    _HAS_SM = True
 except ImportError:
-    print("⚠️ statsmodels not available; skipping p-values and CIs")
-    _HAS_SM = False
+    print("ℹ️ statsmodels not found. Installing statsmodels...")
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "statsmodels"]);
+    import statsmodels.api as sm
+
+# Now statsmodels is available
+_Has_SM = True
 
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
 raster_dir  = "predictor_rasters/wgs84"
 stats_csv   = "outputs/model_stats.csv"
 output_map  = "outputs/suitability_map_wgs84.tif"
+
 os.makedirs("outputs", exist_ok=True)
 
 # --- Load presence points ---
@@ -32,9 +42,11 @@ lons = df['longitude'].values
 print(f"📍 Loaded {len(df)} presence points.")
 
 # --- Reference grid ---
-rasters = sorted([os.path.join(raster_dir, f)
-                  for f in os.listdir(raster_dir)
-                  if f.endswith(".tif")])
+rasters = sorted([
+    os.path.join(raster_dir, f)
+    for f in os.listdir(raster_dir)
+    if f.endswith(".tif")
+])
 if not rasters:
     raise RuntimeError(f"No .tif found in {raster_dir}")
 with rasterio.open(rasters[0]) as ref:
@@ -95,11 +107,15 @@ blocks = KMeans(n_clusters=n_blocks, random_state=42).fit_predict(coords)
 
 gkf = GroupKFold(n_splits=n_blocks)
 cv_aucs, cv_tsses, cv_kappas = [], [], []
-for train_idx, test_idx in gkf.split(presence_samples, yc[:len(presence_samples)], groups=blocks):
+for train_idx, test_idx in gkf.split(
+        presence_samples,
+        yc[:len(presence_samples)],
+        groups=blocks
+    ):
     # split
     Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
     # background
-    n_bt = 5 * len(train_idx)
+    n_bt  = 5 * len(train_idx)
     bt_idx = np.random.choice(len(pool), size=n_bt, replace=False)
     Xb_tr = pool[bt_idx]
     n_bt2 = 5 * len(test_idx)
@@ -115,8 +131,8 @@ for train_idx, test_idx in gkf.split(presence_samples, yc[:len(presence_samples)
     p_te = clf.predict_proba(X_te)[:,1]
     auc_cv = roc_auc_score(y_te, p_te)
     fpr_cv, tpr_cv, thr = roc_curve(y_te, p_te)
-    bt = thr[np.argmax(tpr_cv - fpr_cv)]
-    yhat = (p_te >= bt).astype(int)
+    bt     = thr[np.argmax(tpr_cv - fpr_cv)]
+    yhat   = (p_te >= bt).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_te, yhat).ravel()
     sens = tp/(tp+fn)
     spec = tn/(tn+fp)
@@ -144,15 +160,10 @@ tss = sens + spec - 1
 kappa = cohen_kappa_score(yc, yhat)
 
 # p-values & CIs
-enabled_sm = _HAS_SM
-if enabled_sm:
-    X_sm = sm.add_constant(Xc)
-    sm_model = sm.Logit(yc, X_sm).fit(disp=False)
-    pvals = sm_model.pvalues
-    ci = sm_model.conf_int()
-else:
-    pvals = pd.Series([np.nan]*(len(names)+1), index=['const']+names)
-    ci = pd.DataFrame({0:[np.nan]*(len(names)+1),1:[np.nan]*(len(names)+1)})
+X_sm = sm.add_constant(Xc)
+sm_model = sm.Logit(yc, X_sm).fit(disp=False)
+pvals = sm_model.pvalues
+ci    = sm_model.conf_int()
 
 # --- Write out performance and coefficients ---
 perf_df = pd.DataFrame([{  # performance metrics
@@ -168,7 +179,7 @@ print("📊 Performance metrics saved to outputs/performance_metrics.csv")
 
 coef_df = pd.DataFrame({  # model coefficients
     'predictor':   ['Intercept'] + names,
-    'coefficient': np.concatenate([[sm_model.params['const'] if enabled_sm else model.intercept_[0]], model.coef_.flatten()]),
+    'coefficient': np.concatenate([[sm_model.params['const']], model.coef_.flatten()]),
     'p_value':     pvals.values,
     'CI_lower':    ci[0].values,
     'CI_upper':    ci[1].values
