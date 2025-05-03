@@ -218,9 +218,9 @@ def chat_step(file, user_msg, history, state):
 #    -   coef_md = coef_df.dropna(axis=1).to_markdown(index=False)
 #    -   txt = f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n**Coefficients:**\n\n{coef_md}"
     # Only convert to markdown if the run succeeded:
-    if perf_df is None:
-        # The subprocess failed; just show the error message
-        txt = status
+        if perf_df is None:
+            # The subprocess failed; just show the error message
+            txt = status
     else:
         # Success: show performance and coefficients
         perf_md = perf_df.to_markdown(index=False)
