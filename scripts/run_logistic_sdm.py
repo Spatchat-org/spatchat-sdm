@@ -9,7 +9,12 @@ from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              cohen_kappa_score)
-import statsmodels.api as sm
+try:
+    import statsmodels.api as sm
+    _HAS_SM = True
+except ImportError:
+    print("⚠️ statsmodels not available; skipping p-values and CIs")
+    _HAS_SM = False
 
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
