@@ -15,7 +15,8 @@ from sklearn.cluster import KMeans
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
 raster_dir  = "predictor_rasters/wgs84"
-stats_csv   = "outputs/model_stats.csv"
+perf_csv     = "outputs/performance_metrics.csv"
+coef_csv     = "outputs/coefficients.csv"
 output_map  = "outputs/suitability_map_wgs84.tif"
 os.makedirs("outputs", exist_ok=True)
 
@@ -147,7 +148,7 @@ perf_df = pd.DataFrame([{  # performance metrics
     'Kappa':        kappa
 }])
 perf_df.to_csv("outputs/performance_metrics.csv", index=False)
-print("📊 Performance metrics saved to outputs/performance_metrics.csv")
+print(f"📊 Performance metrics saved to {perf_csv}")
 
 
 # --- Write out coefficients (no statsmodels) ---
@@ -164,7 +165,7 @@ coef_df = pd.DataFrame({
 
 # Save
 coef_df.to_csv("outputs/coefficients.csv", index=False)
-print("📊 Coefficients saved to outputs/coefficients.csv")
+print(f"📊 Coefficients saved to {coef_csv}")
 
 # --- Save final suitability map ---
 pred_flat = np.full(flat.shape[0], np.nan)
