@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import zipfile
 import re
+import difflib
 
 import gradio as gr
 import geemap.foliumap as foliumap
@@ -22,7 +23,6 @@ from matplotlib.cm import ScalarMappable
 from folium import Element
 from together import Together
 from dotenv import load_dotenv
-from fuzzywuzzy import process
 from pyproj import CRS, Transformer, database
 
 # --- Authenticate Earth Engine ---
@@ -80,11 +80,11 @@ landcover_choices = [f"{k} – {v}" for k,v in landcover_options.items()]
 def detect_coords(df, fuzz_threshold=80):
     cols = list(df.columns)
     low = [c.lower() for c in cols]
-    # 1) fuzzy name match
-    lat_cand, lat_score = process.extractOne("latitude", low)
-    lon_cand, lon_score = process.extractOne("longitude", low)
-    if lat_score >= fuzz_threshold and lon_score >= fuzz_threshold:
-        return cols[low.index(lat_cand)], cols[low.index(lon_cand)]
+    # 1) fuzzy name match using difflib
+    lat_matches = difflib.get_close_matches("latitude", low, n=1, cutoff=fuzz_threshold/100)
+    lon_matches = difflib.get_close_matches("longitude", low, n=1, cutoff=fuzz_threshold/100)
+    if lat_matches and lon_matches:
+        return cols[low.index(lat_matches[0])], cols[low.index(lon_matches[0])]
     # 2) numeric range
     num = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
     lat_opts = [c for c in num if df[c].between(-90,90).mean()>0.98]
@@ -169,7 +169,7 @@ with gr.Blocks() as demo:
             lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
             crs_input    = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
             confirm_btn  = gr.Button("Confirm Coordinates", visible=False)
-    
+
     # upload callback
     file_input.change(
         on_upload,
