@@ -137,7 +137,7 @@ def create_map():
                 fg = folium.FeatureGroup(name="🟦 Presence Points")
                 for lat, lon in pts:
                     folium.CircleMarker(location=[lat, lon], radius=5, color="blue", fill=True, fill_opacity=0.8).add_to(fg)
-                fg.add_to(m);
+                fg.add_to(m)
                 m.fit_bounds(pts)
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
@@ -165,7 +165,7 @@ def zip_results():
     archive = "spatchat_results.zip"
     if os.path.exists(archive): os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fld in ("predictor_rasters","outputs"): 
+        for fld in ("predictor_rasters","outputs"):
             for root, _, files in os.walk(fld):
                 for fn in files:
                     full = os.path.join(root, fn)
@@ -210,30 +210,21 @@ def chat_step(file, user_msg, history, state):
         m, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
     elif tool == "run_model":
-        m_out, status, stats_df, _ = run_model()
-        # Clarify download availability
+        # fixed block: assign m and txt
+        m, status, stats_df, _ = run_model()
         status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
-    
-        # 1) Performance metrics (AUC + threshold/TSS/κ row)
         perf_cols = ['predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa']
         perf_df = stats_df.loc[stats_df['predictor']=='AUC', perf_cols]
-    
-        # 2) Coefficients (drop empty columns if all NaN)
         coef_cols = ['predictor','coefficient','p_value','CI_lower','CI_upper']
-        coef_df  = stats_df.loc[stats_df['predictor']!='AUC', coef_cols]
-        coef_df  = coef_df.dropna(axis=1, how='all')
-    
-        # Render each as its own markdown table
+        coef_df  = stats_df.loc[stats_df['predictor']!='AUC', coef_cols].dropna(axis=1, how='all')
         perf_md = perf_df.to_markdown(index=False)
         coef_md = coef_df.to_markdown(index=False)
-    
-        assistant_txt = (
+        txt = (
             f"{status}\n\n"
             f"**Model Performance:**\n\n{perf_md}\n\n"
             f"**Predictor Coefficients:**\n\n{coef_md}\n\n"
             "Download your ZIP using the button on the left."
         )
-
     elif tool == "download":
         m, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
