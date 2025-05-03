@@ -212,29 +212,27 @@ def chat_step(file, user_msg, history, state):
         txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
     elif tool == "run_model":
         m_out, status, perf_df, coef_df = run_model()
-    
-#    -   # This blows up if perf_df is None:
-#    -   perf_md = perf_df.to_markdown(index=False)
-#    -   coef_md = coef_df.dropna(axis=1).to_markdown(index=False)
-#    -   txt = f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n**Coefficients:**\n\n{coef_md}"
-    # Only convert to markdown if the run succeeded:
+
+        # Only convert to markdown if the run succeeded:
         if perf_df is None:
-            # The subprocess failed; just show the error message
+            # The subprocess failed; just show the stderr message
             txt = status
-    else:
-        # Success: show performance and coefficients
-        perf_md = perf_df.to_markdown(index=False)
-        coef_df = coef_df.dropna(axis=1, how='all')
-        coef_md = coef_df.to_markdown(index=False)
-        txt = (
-            f"{status}\n\n"
-            f"**Model Performance:**\n\n{perf_md}\n\n"
-            f"**Predictor Coefficients:**\n\n{coef_md}"
-        )
+        else:
+            # Success: show performance and coefficients
+            status += " You can download the suitability map using the 📥 button below the map."
+            perf_md = perf_df.to_markdown(index=False)
+            coef_df = coef_df.dropna(axis=1, how='all')
+            coef_md = coef_df.to_markdown(index=False)
+            txt = (
+                f"{status}\n\n"
+                f"**Model Performance:**\n\n{perf_md}\n\n"
+                f"**Predictor Coefficients:**\n\n{coef_md}"
+            )
 
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
+
     else:
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
         txt = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
