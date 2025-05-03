@@ -85,7 +85,7 @@ def parse_utm_crs(s):
     return None
 
 def llm_parse_crs(raw):
-    system = {"role":"system","content":"You're a GIS expert. Given a CRS description, respond with only JSON {\"epsg\": ###} or {\"epsg\": null}."}
+    system = {"role":"system","content":"You're a GIS expert. Given a CRS description, respond with only JSON {'epsg': ###} or {'epsg': null}."}
     user = {"role":"user","content":f"CRS: '{raw}'"}
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
@@ -107,14 +107,7 @@ def resolve_crs(raw):
 SYSTEM_PROMPT = """
 You are SpatChat, a friendly assistant orchestrating SDM.
 Your job is to explain to the user what options they have in each step,
-guiding them through the whole process to build the SDM.
-Whenever the user wants to perform an action, reply _only_ with a JSON object selecting one of your tools:
-- To fetch layers:     {"tool":"fetch","layers":["bio1","ndvi",...]}
-- To run the model:    {"tool":"run_model"}
-- To download results: {"tool":"download"}
-After we run that function, we'll display its output and then prompt the user on next steps.
-If the user asks for stats, show them from stats_df.
-If the question is vague, ask for clarification.
+... (unchanged) ...
 """.strip()
 
 FALLBACK_PROMPT = """
@@ -136,7 +129,8 @@ def create_map():
             if pts:
                 fg = folium.FeatureGroup(name="🟦 Presence Points")
                 for lat, lon in pts:
-                    folium.CircleMarker(location=[lat, lon], radius=5, color="blue", fill=True, fill_opacity=0.8).add_to(fg)
+                    folium.CircleMarker(location=[lat, lon], radius=5,
+                        color="blue", fill=True, fill_opacity=0.8).add_to(fg)
                 fg.add_to(m)
                 m.fit_bounds(pts)
     rasdir = "predictor_rasters/wgs84"
@@ -148,28 +142,40 @@ def create_map():
                 vmin, vmax = np.nanmin(arr), np.nanmax(arr)
                 if not np.isnan(vmin) and vmin!=vmax:
                     rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
-                    folium.raster_layers.ImageOverlay(rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]], opacity=1.0, name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})").add_to(m)
+                    folium.raster_layers.ImageOverlay(
+                        rgba,
+                        bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
+                        opacity=1.0,
+                        name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
+                    ).add_to(m)
     sf = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(sf):
         with rasterio.open(sf) as src:
             arr = src.read(1); bnd = src.bounds
-        vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-        rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
-        folium.raster_layers.ImageOverlay(rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]], opacity=0.7, name="🎯 Suitability").add_to(m)
+        rgba = colormaps["viridis"]((arr - np.nanmin(arr))/(np.nanmax(arr)-np.nanmin(arr)))
+        folium.raster_layers.ImageOverlay(
+            rgba,
+            bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
+            opacity=0.7,
+            name="🎯 Suitability"
+        ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
-    img_html = f'<img src="data:image/png;base64,{COLORBAR_BASE64}" style="position:absolute; bottom:20px; right:10px; width:200px; height:30px; z-index:1000;"/>'
+    img_html = f'<img src="data:image/png;base64,{COLORBAR_BASE64}" '
+               'style="position:absolute; bottom:20px; right:10px; width:200px; height:30px; '
+               'z-index:1000;"/>'
     m.get_root().html.add_child(Element(img_html))
-    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:450px; border:none;"></iframe>'
+    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" '
+           'style="width:100%; height:450px; border:none;"></iframe>'
 
 def zip_results():
     archive = "spatchat_results.zip"
     if os.path.exists(archive): os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for fld in ("predictor_rasters","outputs"):
-            for root,_,files in os.walk(fld):
+            for root, _, files in os.walk(fld):
                 for fn in files:
-                    full = os.path.join(root,fn)
-                    zf.write(full, arcname=os.path.relpath(full,"."))
+                    full = os.path.join(root, fn)
+                    zf.write(full, arcname=os.path.relpath(full, "."))
     return archive
 
 def run_fetch(sl, lc):
@@ -184,37 +190,69 @@ def run_fetch(sl, lc):
 
 def run_model():
     proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
-    if proc.returncode!=0:
+    if proc.returncode != 0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
+    # Read performance and coefficients
     perf_df = pd.read_csv("outputs/performance_metrics.csv")
     coef_df = pd.read_csv("outputs/coefficients.csv")
+    # Build combined stats_df
+    perf_df = perf_df.rename(columns={
+        'AUC':'coefficient','Threshold':'threshold',
+        'Sensitivity':'sensitivity','Specificity':'specificity',
+        'TSS':'TSS','Kappa':'kappa'
+    })
+    perf_df['predictor'] = 'AUC'
+    perf_df = perf_df[['predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa']]
+    stats_df = pd.concat([perf_df, coef_df], ignore_index=True)
     zip_results()
-    return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
+    return create_map(), "✅ Model ran successfully! Results are ready below.", stats_df, None
 
 def chat_step(file, user_msg, history, state):
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
-        reply = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
+        reply = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb, temperature=0.7
+        ).choices[0].message.content
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
     if re.search(r"\b(start over|restart|clear everything|reset)\b", user_msg, re.I):
         clear_all()
         return [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}], create_map(), state
+
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
-    resp = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=msgs, temperature=0.0).choices[0].message.content
+    resp = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=msgs, temperature=0.0
+    ).choices[0].message.content
     try:
         call = json.loads(resp)
         tool = call.get("tool")
     except:
         tool = None
+
     if tool == "fetch":
-        m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
+        m, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
+
     elif tool == "run_model":
-        m_out, status, perf_df, coef_df = run_model()
+        m_out, status, stats_df, _ = run_model()
         status += " You can download the suitability map and raster layers using the 📥 Download Results button below the map."
-        perf_md = perf_df.to_markdown(index=False)
+        # Performance table
+        perf_df = stats_df.loc[stats_df['predictor']=='AUC', [
+            'predictor','coefficient','threshold','sensitivity','specificity','TSS','kappa'
+        ]].copy()
+        perf_df = perf_df.rename(columns={
+            'predictor':'metric','coefficient':'auc',
+            'threshold':'threshold','sensitivity':'sensitivity',
+            'specificity':'specificity','TSS':'tss','kappa':'kappa'
+        })
+        # Coefficients table
+        coef_df = stats_df.loc[stats_df['predictor']!='AUC', [
+            'predictor','coefficient','p_value','CI_lower','CI_upper'
+        ]].copy()
         coef_df = coef_df.dropna(axis=1, how='all')
+        perf_md = perf_df.to_markdown(index=False)
         coef_md = coef_df.to_markdown(index=False)
         txt = (
             f"{status}\n\n"
@@ -222,15 +260,22 @@ def chat_step(file, user_msg, history, state):
             f"**Predictor Coefficients:**\n\n{coef_md}\n\n"
             "Download your ZIP using the button on the left."
         )
+        m = m_out
+
     elif tool == "download":
-        m_out, _ = create_map(), zip_results()
+        m, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
+
     else:
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
-        txt = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
-        m_out = create_map()
+        txt = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb, temperature=0.7
+        ).choices[0].message.content
+        m = create_map()
+
     history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":txt}])
-    return history, m_out, state
+    return history, m, state
 
 # --- Upload callback ---
 def on_upload(f, history, state):
@@ -283,7 +328,10 @@ with gr.Blocks() as demo:
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
             download_btn = gr.DownloadButton("📥 Download Results", zip_results)
         with gr.Column(scale=1):
-            chat = gr.Chatbot(value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}], type="messages", label="💬 Chat", height=400)
+            chat = gr.Chatbot(
+                value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}],
+                type="messages", label="💬 Chat", height=400
+            )
             user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
             file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
             lat_dropdown = gr.Dropdown(choices=[], label="Latitude column", visible=False)
