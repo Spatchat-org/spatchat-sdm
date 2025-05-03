@@ -166,6 +166,17 @@ perf_df = pd.DataFrame([{  # performance metrics
 perf_df.to_csv("outputs/performance_metrics.csv", index=False)
 print("📊 Performance metrics saved to outputs/performance_metrics.csv")
 
+
+# Debug lengths
+intercept = sm_model.params['const'] if enabled_sm else model.intercept_[0]
+coef_list = [intercept] + model.coef_.flatten().tolist()
+print("▶️ DEBUG lengths:")
+print("  predictors:", len(names) + 1)
+print("  coefficients:", len(coef_list))
+print("  p_values:", len(pvals.values))
+print("  CI_lower:", len(ci[0].values))
+print("  CI_upper:", len(ci[1].values))
+
 coef_df = pd.DataFrame({  # model coefficients
     'predictor':   ['Intercept'] + names,
     'coefficient': np.concatenate([[sm_model.params['const'] if enabled_sm else model.intercept_[0]], model.coef_.flatten()]),
