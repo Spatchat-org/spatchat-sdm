@@ -217,18 +217,12 @@ def chat_step(file, user_msg, history, state):
         auc = stats_df.loc[stats_df['predictor'] == 'AUC', 'coefficient'].values[0]
         coef_df = stats_df[stats_df['predictor'] != 'AUC']
         # Build output text
-        txt = (
-            f"{status}
+        txt = f"""{status}
+**Model Performance:**
+- AUC: {auc:.5f}
 
-"
-            f"**Model Performance:**
-"
-            f"- AUC: {auc:.5f}
-
-"
-            f"**Predictor Coefficients:**
-"
-            f"{coef_df.to_markdown(index=False)}"
+**Predictor Coefficients:**
+{coef_df.to_markdown(index=False)}"""}"
         )
     elif tool == "download":
         m, _ = create_map(), zip_results()
