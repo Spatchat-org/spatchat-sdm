@@ -338,7 +338,7 @@ with gr.Blocks() as demo:
                 <div style="font-size: 14px;">
                 © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
                 If you use Spatchat in research, please cite:<br>
-                <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Landscape Metrics Assistant.</i>
+                <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Species Distribution Model Assistant.</i>
                 </div>
                 """)
     state = gr.State({"stage":"await_upload"})
