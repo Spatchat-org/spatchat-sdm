@@ -59,15 +59,21 @@ stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract presence samples ---
-inv = ~ref_transform
+inv = ~ref_transform  # inverse affine transform
 presence_samples = []
 for lat, lon in zip(lats, lons):
-    col, row = inv * (lon, lat)
-    row, col = int(row), int(col)
-    if 0 <= row < height and 0 <= col < width:
-        vals = stack[row, col, :]
-        if not np.any(np.isnan(vals)):
-            presence_samples.append(vals)
+    try:
+        # map (lon, lat) to (row_f, col_f)
+        row_f, col_f = inv * (lon, lat)
+        row, col = int(row_f), int(col_f)
+        # ensure in bounds and not NaN
+        if 0 <= row < height and 0 <= col < width:
+            vals = stack[row, col, :]
+            if not np.any(np.isnan(vals)):
+                presence_samples.append(vals)
+    except Exception:
+        # skip points outside or invalid
+        continue
 presence_samples = np.array(presence_samples)
 print(f"📍 Presence samples: {presence_samples.shape}")
 
@@ -101,17 +107,13 @@ for train_idx, test_idx in gkf.split(
         yc[:len(presence_samples)],
         groups=blocks
     ):
-    # split presence
     Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
-    # background for train
     n_bt = 5 * len(train_idx)
     bt_idx = np.random.choice(len(pool), size=n_bt, replace=False)
     Xb_tr = pool[bt_idx]
-    # background for test
     n_bt2 = 5 * len(test_idx)
     bt_idx2 = np.random.choice(len(pool), size=n_bt2, replace=False)
     Xb_te = pool[bt_idx2]
-    # combine and fit
     X_tr = np.vstack([Xp_tr, Xb_tr])
     y_tr = np.concatenate([np.ones(len(Xp_tr)), np.zeros(len(Xb_tr))])
     X_te = np.vstack([Xp_te, Xb_te])
@@ -155,7 +157,7 @@ pvals = sm_model.pvalues
 ci = sm_model.conf_int()
 
 # --- Write out performance metrics ---
-perf_df = pd.DataFrame([{
+perf_df = pd.DataFrame([{   
     'AUC': auc,
     'Threshold': best_thr,
     'Sensitivity': sens,
