@@ -462,7 +462,7 @@ def chat_step(file, user_msg, history, state):
         txt = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
         m_out = create_map()
     history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":txt}])
-    return history, m_out, state, file
+    return history, m_out, state
 
 # --- Upload callback ---
 def on_upload(f, history, state):
@@ -583,6 +583,6 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
     file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
     confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
-    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state, file_input])
+    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state])
     user_in.submit(lambda: "", None, user_in)
     demo.launch()
