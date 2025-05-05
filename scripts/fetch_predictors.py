@@ -51,11 +51,10 @@ crs = CRS.from_epsg(4326)
 RES = 30  # 30 m target resolution
 x_size = int((max_lon + buffer - (min_lon - buffer)) * (111320/30))  # approximate
 y_size = int((max_lat + buffer - (min_lat - buffer)) * (110540/30))
-transform = from_bounds(
+grid_transform = from_bounds(
     min_lon - buffer, min_lat - buffer,
     max_lon + buffer, max_lat + buffer,
     x_size, y_size,
-    transform
 )
 
 print(f"📍 Loaded {len(df)} points → region: {min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
@@ -150,14 +149,14 @@ def export_and_align(img: ee.Image, name: str):
             destination=dst_arr,
             src_transform=src.transform,
             src_crs=src.crs,
-            dst_transform=transform,
+            dst_transform=grid_transform,
             dst_crs=crs,
             resampling=Resampling.nearest,
         )
         profile = src.profile.copy()
         profile.update({
             "crs":        crs,
-            "transform":  transform,
+            "transform":  grid_transform,
             "height":     y_size,
             "width":      x_size,
             "count":      1,
@@ -256,14 +255,14 @@ def export_and_align(img: ee.Image, name: str):
             destination=dst_arr,
             src_transform=src.transform,
             src_crs=src.crs,
-            dst_transform=transform,
+            dst_transform=grid_transform,
             dst_crs=CRS.from_epsg(4326),
             resampling=Resampling.nearest,
         )
         profile = src.profile.copy()
         profile.update({
             "crs":       CRS.from_epsg(4326),
-            "transform": transform,
+            "transform": grid_transform,
             "height":    y_size,
             "width":     x_size,
             "count":     1,
@@ -319,14 +318,14 @@ for name in layers:
                 destination=dst,
                 src_transform=src.transform,
                 src_crs=src.crs,
-                dst_transform=transform,
+                dst_transform=grid_transform,
                 dst_crs=crs,
                 resampling=Resampling.nearest,
             )
             profile = src.profile.copy()
             profile.update({
                 "crs":       crs,
-                "transform": transform,
+                "transform": grid_transform,
                 "height":    y_size,
                 "width":     x_size,
                 "count":     1,
