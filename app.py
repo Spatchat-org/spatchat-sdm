@@ -522,7 +522,7 @@ def chat_step(file, user_msg, history, state):
 
         # 5) Let the LLM answer any free‐form question using that context
         msgs = [
-            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"system","content":FALLBACK_PROMPT},
             {"role":"system","content":"Data summary:\n" + summary},
             {"role":"user",  "content":user_msg}
         ]
