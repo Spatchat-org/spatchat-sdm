@@ -144,7 +144,26 @@ SYSTEM_PROMPT = """
 You are SpatChat, a friendly assistant for species distribution modeling.
 
 Available environmental predictors:
-• bio1–bio19  
+• Bioclimatic variables from WorldClim (choose from bio1–bio19):  
+    bio1:  "Annual Mean Temperature"
+    bio2:  "Mean Diurnal Range (mean of monthly (max temp − min temp))"
+    bio3:  "Isothermality (bio2/bio7) × 100"
+    bio4:  "Temperature Seasonality (std. dev. × 100)"
+    bio5:  "Max Temperature of Warmest Month"
+    bio6:  "Min Temperature of Coldest Month"
+    bio7:  "Temperature Annual Range (bio5 − bio6)"
+    bio8:  "Mean Temperature of Wettest Quarter"
+    bio9:  "Mean Temperature of Driest Quarter"
+    bio10: "Mean Temperature of Warmest Quarter"
+    bio11: "Mean Temperature of Coldest Quarter"
+    bio12: "Annual Precipitation"
+    bio13: "Precipitation of Wettest Month"
+    bio14: "Precipitation of Driest Month"
+    bio15: "Precipitation Seasonality (coefficient of variation)"
+    bio16: "Precipitation of Wettest Quarter"
+    bio17: "Precipitation of Driest Quarter"
+    bio18: "Precipitation of Warmest Quarter"
+    bio19: "Precipitation of Coldest Quarter"
 • elevation  
 • slope  
 • aspect  
@@ -171,6 +190,7 @@ Examples of queries you can make:
   – “What is the maximum suitability value?”  
   – “How many presence points do I have?”  
   – “What do bio1–bio19 stand for?”  
+  – “What does bio1 represent?”
   – “Which landcover classes are available?”  
 
 After we run that function, we'll display its output and then prompt the user on next steps.
@@ -296,9 +316,21 @@ def run_query(query_text: str):
         perf = pd.read_csv("outputs/performance_metrics.csv")
         lines = [f"{col}: {perf.at[0,col]:.3f}" for col in perf.columns]
         return "Model performance:\n" + "\n".join(lines)
-    # fallback
-    return "Sorry, I don't know how to answer that. Try asking about max/min suitability, count of points, or model metrics."
+    # 4) Bioclim layers questinos
+    if any(kw in q for kw in ("stand for", "represent")) and any(code in q for code in BIO_DESCRIPTIONS):
+        lines = [f"**{code}**: {desc}" for code, desc in BIO_DESCRIPTIONS.items()]
+        return "Here’s what those BIOCLIM variables mean:\n\n" + "\n".join(lines)
 
+    #  Last, if nothing matched, ask the LLM directly
+    system = {"role": "system", "content": FALLBACK_PROMPT}
+    user   = {"role": "user",   "content": query_text}
+    resp = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=[system, user],
+        temperature=0.7
+    ).choices[0].message.content
+    return resp
+    
 def chat_step(file, user_msg, history, state):
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
