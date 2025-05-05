@@ -360,6 +360,7 @@ def run_fetch(sl, lc):
         if proc.stderr:
             logs += ("\n" + proc.stderr.strip())
         return create_map(), f"❌ Fetch failed:\n```\n{logs}\n```"
+    print("WGS84 rasters:", sorted(os.listdir("predictor_rasters/wgs84")))
 
     # d) Success
     return create_map(), "✅ Predictors fetched."
