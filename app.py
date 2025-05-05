@@ -241,7 +241,7 @@ def run_fetch(sl, lc):
 
     # 2) Require at least one predictor
     if not layers:
-        return create_map(), "⚠️ Please select at least one predictor before fetching."
+        return create_map(), "⚠️ Please select at least one predictor."
 
     # 3) Validate top‑level predictors
     bad_layers = [l for l in layers if l not in VALID_LAYERS]
@@ -422,7 +422,7 @@ def chat_step(file, user_msg, history, state):
         if lc:
             top.append("landcover")
         m_out, status = run_fetch(top, lc)
-        txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
+        txt = f"{status}\n\n 🎉Nice work! Just say “run model” or grab more layers."
         history.extend([
             {"role":"user",     "content": user_msg},
             {"role":"assistant","content": txt}
