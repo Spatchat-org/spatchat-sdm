@@ -1,7 +1,9 @@
 import os, time, json
 import ee
 import geemap
+import math
 import rasterio
+from rasterio.merge import merge
 import numpy as np
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_bounds
@@ -52,7 +54,8 @@ y_size = int((max_lat + buffer - (min_lat - buffer)) * (110540/30))
 transform = from_bounds(
     min_lon - buffer, min_lat - buffer,
     max_lon + buffer, max_lat + buffer,
-    x_size, y_size
+    x_size, y_size,
+    transform
 )
 
 print(f"📍 Loaded {len(df)} points → region: {min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
@@ -105,7 +108,7 @@ EXPORT_SCALES = {
     "elevation": 30,
     "slope":     30,
     "aspect":    30,
-    "ndvi":      250,  # MODIS NDVI is 1 km
+    "ndvi":      250,  # MODIS NDVI is 250 m
     "landcover": 500    # MODIS landcover is 500 m
 }
 
@@ -163,6 +166,114 @@ def export_and_align(img: ee.Image, name: str):
             dst.write(dst_arr, 1)
 
     print(f"🌐 Aligned → {out}")
+
+
+# -------------------------------------------------------------------------
+# Function: export at native scale with tiling if needed, then reproject onto 30 m grid
+# -------------------------------------------------------------------------
+def export_and_align(img: ee.Image, name: str):
+    raw_dir = "predictor_rasters/raw"
+    os.makedirs(raw_dir, exist_ok=True)
+    raw_fp = os.path.join(raw_dir, f"{name}.tif")
+    out_fp = f"predictor_rasters/wgs84/{name}.tif"
+    scale = EXPORT_SCALES.get(name, RES)
+
+    # Estimate max pixels allowed per HTTP export (50 MB limit)
+    max_bytes = 50 * 1024**2
+    bytes_per_pixel = 2  # assume uint16
+    max_pixels = max_bytes // bytes_per_pixel
+    total_pixels = x_size * y_size
+
+    # Prepare the base ee.Image reprojection
+    ee_img = img.reproject(crs="EPSG:4326", scale=scale)
+
+    if total_pixels <= max_pixels:
+        # single export
+        print(f"📥 Exporting '{name}' at {scale} m (single tile)…")
+        geemap.ee_export_image(
+            ee_img.clip(region),
+            filename=raw_fp,
+            scale=scale,
+            region=region,
+            crs="EPSG:4326",
+            file_per_band=False,
+            timeout=600,
+        )
+    else:
+        # tile the region
+        n_tiles = math.ceil(total_pixels / max_pixels)
+        n_cols = math.ceil(math.sqrt(n_tiles))
+        n_rows = math.ceil(n_tiles / n_cols)
+        lon_step = (max_lon + buffer - (min_lon - buffer)) / n_cols
+        lat_step = (max_lat + buffer - (min_lat - buffer)) / n_rows
+
+        tile_files = []
+        print(f"📥 Exporting '{name}' in {n_cols}×{n_rows} tiles…")
+        for i in range(n_cols):
+            for j in range(n_rows):
+                sub_min_lon = min_lon - buffer + i * lon_step
+                sub_max_lon = sub_min_lon + lon_step
+                sub_min_lat = min_lat - buffer + j * lat_step
+                sub_max_lat = sub_min_lat + lat_step
+                sub_region = ee.Geometry.BBox(
+                    sub_min_lon, sub_min_lat, sub_max_lon, sub_max_lat
+                )
+                tile_fp = os.path.join(raw_dir, f"{name}_tile_{i}_{j}.tif")
+                geemap.ee_export_image(
+                    ee_img.clip(sub_region),
+                    filename=tile_fp,
+                    scale=scale,
+                    region=sub_region,
+                    crs="EPSG:4326",
+                    file_per_band=False,
+                    timeout=600,
+                )
+                tile_files.append(tile_fp)
+
+        # mosaic tiles
+        print(f"🔀 Mosaicking {len(tile_files)} tiles…")
+        srcs = [rasterio.open(fp) for fp in tile_files]
+        mosaic_arr, mosaic_trans = merge(srcs)
+        profile = srcs[0].profile.copy()
+        profile.update({
+            "height": mosaic_arr.shape[1],
+            "width":  mosaic_arr.shape[2],
+            "transform": mosaic_trans
+        })
+        with rasterio.open(raw_fp, "w", **profile) as dst:
+            dst.write(mosaic_arr)
+        # optionally delete tile files
+        for fp in tile_files:
+            os.remove(fp)
+
+    # now reproject & align to study grid
+    print(f"🌐 Aligning → {out_fp}")
+    with rasterio.open(raw_fp) as src:
+        src_arr = src.read(1)
+        dst_arr = np.empty((y_size, x_size), dtype=src_arr.dtype)
+        reproject(
+            source=src_arr,
+            destination=dst_arr,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=transform,
+            dst_crs=CRS.from_epsg(4326),
+            resampling=Resampling.nearest,
+        )
+        profile = src.profile.copy()
+        profile.update({
+            "crs":       CRS.from_epsg(4326),
+            "transform": transform,
+            "height":    y_size,
+            "width":     x_size,
+            "count":     1,
+        })
+        os.makedirs(os.path.dirname(out_fp), exist_ok=True)
+        with rasterio.open(out_fp, "w", **profile) as dst:
+            dst.write(dst_arr, 1)
+
+    print(f"✅ '{name}' ready.")
+
 
 # -----------------------------------------------------------------------------
 # 1) Export each regular predictor
