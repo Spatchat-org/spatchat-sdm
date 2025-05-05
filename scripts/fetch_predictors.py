@@ -76,7 +76,7 @@ sources = {
     "elevation": ee.Image("USGS/SRTMGL1_003"),
     "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
     "aspect":    ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
-    "ndvi":      (ee.ImageCollection("MODIS/006/MOD13Q1")
+    "ndvi":      (ee.ImageCollection("MODIS/061/MCD13Q1")
             .filterDate("2022-01-01", "2024-01-01")
             .select("NDVI")
             .mean()),
