@@ -162,55 +162,44 @@ def resolve_crs(raw):
 SYSTEM_PROMPT = """
 You are SpatChat, a friendly assistant for species distribution modeling.
 
-Available environmental predictors:
-• Bioclimatic variables from WorldClim (choose from bio1–bio19):  
-    bio1:  "Annual Mean Temperature"
-    bio2:  "Mean Diurnal Range (mean of monthly (max temp − min temp))"
-    bio3:  "Isothermality (bio2/bio7) × 100"
-    bio4:  "Temperature Seasonality (std. dev. × 100)"
-    bio5:  "Max Temperature of Warmest Month"
-    bio6:  "Min Temperature of Coldest Month"
-    bio7:  "Temperature Annual Range (bio5 − bio6)"
-    bio8:  "Mean Temperature of Wettest Quarter"
-    bio9:  "Mean Temperature of Driest Quarter"
-    bio10: "Mean Temperature of Warmest Quarter"
-    bio11: "Mean Temperature of Coldest Quarter"
-    bio12: "Annual Precipitation"
-    bio13: "Precipitation of Wettest Month"
-    bio14: "Precipitation of Driest Month"
-    bio15: "Precipitation Seasonality (coefficient of variation)"
-    bio16: "Precipitation of Wettest Quarter"
-    bio17: "Precipitation of Driest Quarter"
-    bio18: "Precipitation of Warmest Quarter"
-    bio19: "Precipitation of Coldest Quarter"
-• elevation  
-• slope  
-• aspect  
-• ndvi  
-• landcover (choose from:
-    water, evergreen_needleleaf_forest, 
-    evergreen_broadleaf_forest, deciduous_needleleaf_forest,
-    deciduous_broadleaf_forest, mixed_forest,
-    closed_shrublands, open_shrublands,
-    woody_savannas, savannas, grasslands,
-    permanent_wetlands, croplands,
-    urban_and_built_up, cropland_natural_vegetation_mosaic,
-    snow_and_ice, barren_or_sparsely_vegetated
-)
+── Available data & actions ────────────────────────────────────────────
 
-Whenever you need to perform an action, respond ONLY with a JSON object selecting one of these tools:
+1) Predictors you can fetch:
+   • Bioclim variables: bio1–bio19  
+   • elevation  
+   • slope  
+   • aspect  
+   • ndvi  
+   • landcover (must specify one or more of:
+       water, evergreen_needleleaf_forest, evergreen_broadleaf_forest,
+       deciduous_needleleaf_forest, deciduous_broadleaf_forest, mixed_forest,
+       closed_shrublands, open_shrublands, woody_savannas, savannas,
+       grasslands, permanent_wetlands, croplands, urban_and_built_up,
+       cropland_natural_vegetation_mosaic, snow_and_ice,
+       barren_or_sparsely_vegetated)
 
-  • Fetch predictors:     {"tool":"fetch","layers":["bio1","ndvi",...]}  
-  • Run the model:        {"tool":"run_model"}  
-  • Download results ZIP: {"tool":"download"}  
-  • Query data or metadata: {"tool":"query","query":"<your question>"}  
+2) Once you’ve fetched predictors, you can run the model to produce:
+   • A suitability map (GeoTIFF at outputs/suitability_map_wgs84.tif)  
+   • Performance metrics CSV (outputs/performance_metrics.csv)  
+   • Coefficients CSV (outputs/coefficients.csv)
 
-Examples of queries you can make:
-  – “What is the maximum suitability value?”  
-  – “How many presence points do I have?”  
-  – “What do bio1–bio19 stand for?”  
-  – “What does bio1 represent?”
-  – “Which landcover classes are available?”  
+3) You can download all raster and output files as a ZIP.
+
+4) You can query any of these:
+   • Raster stats (e.g. “max suitability value”, “min suitability”)  
+   • Presence‑point info (e.g. “how many points?”, “mean latitude”)  
+   • Model stats (e.g. “what is the AUC?”, “list coefficients”)  
+   • Metadata (e.g. “what do bio1–bio19 stand for?”, “which landcover classes?”)
+
+── TOOL INSTRUCTIONS ───────────────────────────────────────────────────
+
+When the user requests an action, reply **only** with JSON selecting one tool:
+
+1. **Fetch predictors**  
+   ```json
+   {"tool":"fetch",
+    "layers":[<top‑level names>],
+    "landcover":[<landcover classes>]}
 
 After we run that function, we'll display its output and then prompt the user on next steps.
 If the user asks for statistical results, show them from "outputs/performance_metrics.csv" and "outputs/coefficients.csv".
@@ -407,11 +396,34 @@ def run_query(query_text: str):
     return resp
     
 def chat_step(file, user_msg, history, state):
+    
+    # 0) Shortcut: if the user just names layers, fetch them directly
+    tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
+    if tokens and all(
+        (t in VALID_LAYERS) or (t in LANDCOVER_CLASSES)
+        for t in tokens
+    ):
+        # split top‐level vs. landcover codes
+        top = [t for t in tokens if t in VALID_LAYERS and t != "landcover"]
+        lc  = [t for t in tokens if t in LANDCOVER_CLASSES]
+        if lc:
+            top.append("landcover")
+        m_out, status = run_fetch(top, lc)
+        txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
+        history.extend([
+            {"role":"user",     "content": user_msg},
+            {"role":"assistant","content": txt}
+        ])
+        return history, m_out, state, file
+        
+    # 1) No CSV yet? delegate to fallback LLM  
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
         reply = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
+    
+    # 2) Reset?
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
         return (
@@ -420,6 +432,8 @@ def chat_step(file, user_msg, history, state):
            state,
            gr.update(value=None)        # clear the upload box
         )
+        
+    # 3) Otherwise go through the JSON‐tool router…
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     resp = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=msgs, temperature=0.0).choices[0].message.content
     try:
