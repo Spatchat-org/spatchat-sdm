@@ -68,18 +68,45 @@ clear_all()
 
 # --- Detection helpers ---
 def detect_coords(df, fuzz_threshold=80):
+    """
+    Try to auto‑detect latitude & longitude columns from a wide set of aliases.
+    Falls back to fuzzy‑matching “latitude”/“longitude” and numeric heuristics.
+    """
     cols = list(df.columns)
-    low = [c.lower() for c in cols]
-    lat = difflib.get_close_matches("latitude", low, n=1, cutoff=fuzz_threshold/100)
-    lon = difflib.get_close_matches("longitude", low, n=1, cutoff=fuzz_threshold/100)
-    if lat and lon:
-        return cols[low.index(lat[0])], cols[low.index(lon[0])]
-    nums = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
-    lat_opts = [c for c in nums if df[c].between(-90, 90).mean() > 0.98]
-    lon_opts = [c for c in nums if df[c].between(-180, 180).mean() > 0.98]
+    low = [c.lower().strip() for c in cols]
+
+    # 1) Exact alias lists
+    LAT_ALIASES = {
+        'lat', 'latitude', 'y', 'decilatitude', 'dec_latitude', 'dec lat',
+        'decimallatitude', 'decimal latitude'
+    }
+    LON_ALIASES = {
+        'lon', 'long', 'longitude', 'x', 'decilongitude', 'dec_longitude',
+        'dec longitude', 'decimallongitude', 'decimal longitude'
+    }
+
+    # Try exact alias match first
+    lat_idx = next((i for i,name in enumerate(low) if name in LAT_ALIASES), None)
+    lon_idx = next((i for i,name in enumerate(low) if name in LON_ALIASES), None)
+    if lat_idx is not None and lon_idx is not None:
+        return cols[lat_idx], cols[lon_idx]
+
+    # 2) Fuzzy match “latitude” / “longitude”
+    lat_fz = difflib.get_close_matches("latitude", low, n=1, cutoff=fuzz_threshold/100)
+    lon_fz = difflib.get_close_matches("longitude", low, n=1, cutoff=fuzz_threshold/100)
+    if lat_fz and lon_fz:
+        return cols[low.index(lat_fz[0])], cols[low.index(lon_fz[0])]
+
+    # 3) Numeric heuristics (fall back)
+    numerics = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
+    lat_opts = [c for c in numerics if df[c].between(-90, 90).mean() > 0.98]
+    lon_opts = [c for c in numerics if df[c].between(-180, 180).mean() > 0.98]
     if len(lat_opts) == 1 and len(lon_opts) == 1:
         return lat_opts[0], lon_opts[0]
+
+    # 4) Nothing found
     return None, None
+
 
 # --- CRS parsing helpers ---
 def parse_epsg_code(s):
