@@ -463,7 +463,6 @@ def chat_step(file, user_msg, history, state):
     
     else:
         # --- build dynamic data summary ---
-        import os, pandas as pd, rasterio
 
         # presence points
         try:
