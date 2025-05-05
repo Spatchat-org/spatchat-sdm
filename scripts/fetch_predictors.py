@@ -62,7 +62,10 @@ print(f"🗺  Grid: {x_size}×{y_size} @ {RES} m in EPSG:4326")
 # Which layers + one-hot codes the UI set (via os.environ)
 # -----------------------------------------------------------------------------
 layers = os.environ.get('SELECTED_LAYERS','').split(',')
-codes  = os.environ.get('SELECTED_LANDCOVER_CLASSES','').split(',')
+raw    = os.environ.get('SELECTED_LANDCOVER_CLASSES','')
+labels = [c for c in raw.split(',') if c]
+# convert each snake_case label back to its integer code
+codes  = [ str(name_to_code[c]) for c in labels if c in name_to_code ]
 
 # -----------------------------------------------------------------------------
 # Earth Engine sources
@@ -91,6 +94,8 @@ modis_landcover_map = {
     12:"croplands",13:"urban_and_built_up",14:"cropland_natural_vegetation_mosaic",
     15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
 }
+# reverse mapping of label→code
+name_to_code = { label: code for code, label in modis_landcover_map.items() }
 
 # -----------------------------------------------------------------------------
 # Export scales (native) for each predictor
