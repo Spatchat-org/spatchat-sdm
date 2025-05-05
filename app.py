@@ -431,7 +431,33 @@ def chat_step(file, user_msg, history, state):
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
     
-    # 0b) Layer‑only shortcut: catch “fetch slope” / “urban” / synonyms immediately
+    # 0b) “run model” shortcut
+
+    if re.fullmatch(r"\s*run\s+model\s*", user_msg, re.I):
+        # invoke your run_model() utility directly
+        m_out, status, perf_df, coef_df = run_model()
+        if perf_df is not None:
+            # build the markdown tables
+            perf = pd.read_csv("outputs/performance_metrics.csv")
+            first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
+            perf_md = (
+                "**Model Performance (1 of 2):**\n\n"
+                + first.to_markdown(index=False)
+                + "\n\n**Model Performance (2 of 2):**\n\n"
+                + second.to_markdown(index=False)
+            )
+            coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
+            status += "\n\n**Model Performance:**\n\n" + perf_md
+            status += "\n\n**Predictor Coefficients:**\n\n" + coef.to_markdown(index=False)
+
+        assistant_txt = status
+        history.extend([
+            {"role":"user",   "content": user_msg},
+            {"role":"assistant","content": assistant_txt}
+        ])
+        return history, m_out, state
+    
+    # 0c) Layer‑only shortcut: catch “fetch slope” / “urban” / synonyms immediately
     import re
     # tokenize & lowercase
     tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
@@ -470,7 +496,7 @@ def chat_step(file, user_msg, history, state):
           {"role":"assistant","content": f"{status}\n\n🎉Nice work! Say “run model” next."}
         ])
         return history, m_out, state
-        
+    
     # 1) Handle reset
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
