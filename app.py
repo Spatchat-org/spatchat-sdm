@@ -338,46 +338,74 @@ def run_model():
 
 def run_query(query_text: str):
     """
-    Handle natural‑language queries about:
-    - The suitability map (outputs/suitability_map_wgs84.tif)
-    - The uploaded points (inputs/presence_points.csv)
-    - The model stats CSVs
+    Send **all** queries to the LLM, but first give it a concise snapshot 
+    of your current data: presence points, fetched layers, model results.
     """
-    q = query_text.lower()
-    # 1) Suitability‐map questions
-    if "highest" in q or "maximum" in q:
-        with rasterio.open("outputs/suitability_map_wgs84.tif") as src:
-            arr = src.read(1, masked=True)
-        val = float(arr.max())
-        return f"The maximum suitability value is {val:.3f}."
-    if "lowest" in q or "minimum" in q:
-        with rasterio.open("outputs/suitability_map_wgs84.tif") as src:
-            arr = src.read(1, masked=True)
-        val = float(arr.min())
-        return f"The minimum suitability value is {val:.3f}."
-    # 2) Presence‐points questions
-    if "how many points" in q or "number of points" in q:
-        df = pd.read_csv("inputs/presence_points.csv")
-        return f"There are {len(df)} presence points."
-    # 3) Performance‐metrics questions
-    if "auc" in q or "tss" in q or "kappa" in q:
-        perf = pd.read_csv("outputs/performance_metrics.csv")
-        lines = [f"{col}: {perf.at[0,col]:.3f}" for col in perf.columns]
-        return "Model performance:\n" + "\n".join(lines)
-    # 4) Bioclim layers questinos
-    if any(kw in q for kw in ("stand for", "represent")) and any(code in q for code in BIO_DESCRIPTIONS):
-        lines = [f"**{code}**: {desc}" for code, desc in BIO_DESCRIPTIONS.items()]
-        return "Here’s what those BIOCLIM variables mean:\n\n" + "\n".join(lines)
+    import os, pandas as pd, rasterio
 
-    #  Last, if nothing matched, ask the LLM directly
-    system = {"role": "system", "content": FALLBACK_PROMPT}
-    user   = {"role": "user",   "content": query_text}
+    # 1) Build data context
+    # — Presence points
+    try:
+        df_pts = pd.read_csv("inputs/presence_points.csv")
+        n_pts = len(df_pts)
+    except:
+        n_pts = 0
+
+    # — Fetched layers
+    rasdir = "predictor_rasters/wgs84"
+    if os.path.isdir(rasdir):
+        layers = sorted([f.rstrip(".tif") for f in os.listdir(rasdir) if f.endswith(".tif")])
+    else:
+        layers = []
+
+    # — Model performance (if exists)
+    perf_ctx = ""
+    perf_fp = "outputs/performance_metrics.csv"
+    if os.path.exists(perf_fp):
+        perf = pd.read_csv(perf_fp)
+        perf_lines = [f"{col}: {perf.at[0, col]:.3f}" for col in perf.columns]
+        perf_ctx = "Model performance:\n" + "\n".join(perf_lines)
+
+    # — Suitability map stats (if exists)
+    suit_ctx = ""
+    suit_fp = "outputs/suitability_map_wgs84.tif"
+    if os.path.exists(suit_fp):
+        with rasterio.open(suit_fp) as src:
+            arr = src.read(1, masked=True)
+        suit_ctx = (
+            f"Suitability range: min {float(arr.min()):.3f}, "
+            f"max {float(arr.max()):.3f}."
+        )
+
+    # Assemble a single block of context
+    context = "\n".join([
+        f"- Presence points: {n_pts}",
+        f"- Layers fetched ({len(layers)}): {', '.join(layers) or 'none'}",
+        perf_ctx,
+        suit_ctx
+    ]).strip()
+
+    # 2) Craft LLM messages
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are SpatChat, an expert assistant for species distribution modeling. "
+            "Below is the current data context. Answer the user’s question based on it, "
+            "and do not ask them to re‑upload data or re‑run the model unless absolutely necessary."
+        )
+    }
+    context_msg = {"role": "system", "content": "Data context:\n" + context}
+    user_msg = {"role": "user", "content": query_text}
+
+    # 3) Call the LLM
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=[system, user],
-        temperature=0.7
+        messages=[system_msg, context_msg, user_msg],
+        temperature=0.3
     ).choices[0].message.content
+
     return resp
+
     
 def chat_step(file, user_msg, history, state):
     # —————————————————————————
