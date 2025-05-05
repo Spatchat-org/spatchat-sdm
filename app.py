@@ -153,12 +153,15 @@ def resolve_crs(raw):
 # --- LLM prompts ---
 SYSTEM_PROMPT = """
 You are SpatChat, a friendly assistant and an expert in species distribution modeling.
-When the user issues a **command**:
-  - fetch   → {"tool":"fetch",   "layers":…, "landcover":…}
-  - run_model → {"tool":"run_model"}
-  - download  → {"tool":"download"}
-you MUST reply in JSON exactly as above.
-All *other* inputs are *not* commands.
+Your job is to explain to the user what options they have in each step,
+guiding them through the whole process to build the SDM.
+
+Whenever the user wants to perform an action, reply _only_ with a JSON object selecting one of your tools:
+- To fetch layers:     {"tool":"fetch","layers":["bio1","ndvi",...]}
+- To run the model:    {"tool":"run_model"}
+- To download results: {"tool":"download"}
+
+All *other* inputs are *not* action.
 
 For landcover synonyms, map user‑friendly words into the exact MODIS codes:
     • water, lake, river, ocean                → water
@@ -238,6 +241,7 @@ Interactive App & LLM Integration
 
 Try to keep your answers short—no more than two sentences if possible—while still being helpful.
 Guide the user to next steps: upload data, fetch layers, run model, etc.
+If the question is vague, ask for clarification.
 
 """.strip()
 
@@ -414,94 +418,93 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
     
 def chat_step(file, user_msg, history, state):
-    # —————————————————————————
-    # 0) Layer‑only shortcut (must run before LLM)
-    # —————————————————————————
-    # tokenise on commas and spaces
-    tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
-    # filter out connector words
-    core = [t for t in tokens if t not in {"and","with","plus","&"}]
-    # if *all* core tokens are either valid top‑levels or landcover classes:
-    if core and all((t in VALID_LAYERS) or (t in LANDCOVER_CLASSES) for t in core):
-        top = [t for t in core if t in VALID_LAYERS and t != "landcover"]
-        lc  = [t for t in core if t in LANDCOVER_CLASSES]
-        if lc:
-            top.append("landcover")
-        m_out, status = run_fetch(top, lc)
-        txt = f"{status}\n\n 🎉Nice work! Just say “run model” or grab more layers."
-        history.extend([
-            {"role":"user",     "content": user_msg},
-            {"role":"assistant","content": txt}
-        ])
-        return history, m_out, state
-        
-    # 1) No CSV yet? delegate to fallback LLM  
+    # 1) If no CSV yet: conversational fallback
     if not os.path.exists("inputs/presence_points.csv"):
-        fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
-        reply = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
-        history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
+        fb = [
+            {"role":"system","content":FALLBACK_PROMPT},
+            {"role":"user","content":user_msg}
+        ]
+        reply = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb,
+            temperature=0.7
+        ).choices[0].message.content
+        history.extend([{"role":"user","content":user_msg},
+                        {"role":"assistant","content":reply}])
         return history, create_map(), state
-    
-    # 2) Reset?
-    if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
+
+    # 2) Reset command
+    if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b",
+                 user_msg, re.I):
         clear_all()
-        # just reset history + map + state
-        history = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
+        history = [{"role":"assistant",
+                    "content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
         return history, create_map(), state
-        
-    # 3) Tool call via LLM → JSON
-    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
-    response = client.chat.completions.create(
+
+    # 3) JSON‑tool router
+    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [
+        {"role":"user","content":user_msg}
+    ]
+    resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
         messages=msgs,
         temperature=0.0
     ).choices[0].message.content
 
     try:
-        call = json.loads(response)
+        call = json.loads(resp)
         tool = call["tool"]
     except:
-        history.append({"role":"assistant","content":
-            "Sorry, I couldn't understand that. Please say 'fetch …', 'run model', or 'download'."})
+        # fallback conversational
+        fb = [
+            {"role":"system","content":FALLBACK_PROMPT},
+            {"role":"user","content":user_msg}
+        ]
+        reply = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=fb,
+            temperature=0.7
+        ).choices[0].message.content
+        history.extend([{"role":"user","content":user_msg},
+                        {"role":"assistant","content":reply}])
         return history, create_map(), state
 
-    # 4) Invoke the tool
+    # 4) Execute tools
     if tool == "fetch":
-        m_out, status = run_fetch(call.get("layers",[]), call.get("landcover",[]))
-        txt = f"{status}\n\nGreat! Now say “run model” or fetch more layers."
+        m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
+        assistant_txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
 
     elif tool == "run_model":
         m_out, status, perf_df, coef_df = run_model()
         if perf_df is None:
-            txt = status
+            assistant_txt = status
         else:
-            # same performance+coef rendering as before
-            status += " You can download the suitability map and all rasters using the 📥 button below the map."
+            # build performance + coefficients markdown
             perf = pd.read_csv("outputs/performance_metrics.csv")
-            first, second = perf.iloc[:,:3], perf.iloc[:,3:]
+            first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
             perf_md = (
-               "**Model Performance (1 of 2):**\n\n"
-               f"{first.to_markdown(index=False)}\n\n"
-               "**Model Performance (2 of 2):**\n\n"
-               f"{second.to_markdown(index=False)}"
+                "**Model Performance (1 of 2):**\n\n"
+                f"{first.to_markdown(index=False)}\n\n"
+                "**Model Performance (2 of 2):**\n\n"
+                f"{second.to_markdown(index=False)}"
             )
-            coefs = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how="all")
-            txt = (
-                f"{status}\n\n"
-                f"{perf_md}\n\n"
-                f"**Predictor Coefficients:**\n\n{coefs.to_markdown(index=False)}"
+            coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
+            assistant_txt = (
+                f"{status} You can download your results via the 📥 button.\n\n"
+                f"**{perf_md}**\n\n"
+                f"**Predictor Coefficients:**\n\n{coef.to_markdown(index=False)}"
             )
 
-    else:  # download
+    elif tool == "download":
         m_out, _ = create_map(), zip_results()
-        txt = "✅ ZIP is downloading…"
+        assistant_txt = "✅ ZIP is downloading…"
 
+    # record
     history.extend([
         {"role":"user","content":user_msg},
-        {"role":"assistant","content":txt}
+        {"role":"assistant","content":assistant_txt}
     ])
     return history, m_out, state
-
 
 # --- Upload callback ---
 def on_upload(f, history, state):
