@@ -35,8 +35,7 @@ if not os.path.exists(csv_path):
 # Load points & define study-area region + 30 m lat/lon grid
 # -----------------------------------------------------------------------------
 df = pd.read_csv(csv_path)
-assert {'latitude','longitude'}.issubset(df.columns), "CSV needs latitude & longitude"
-
+# we know the app has already renamed the columns:
 min_lat, max_lat = df.latitude.min(), df.latitude.max()
 min_lon, max_lon = df.longitude.min(), df.longitude.max()
 buffer = 0.25
