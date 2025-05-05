@@ -181,6 +181,13 @@ For landcover synonyms, map user‑friendly words into the exact MODIS codes:
 
 Available layers or predictors to fetch: bio1–bio19, elevation, slope, aspect, ndvi, landcover
 
+ **Example**  
+ User: fetch urban, bio1  
+ Assistant:  
+ ```json
+ {"tool":"fetch","layers":["bio1"],"landcover":["urban_and_built_up"]}
+ ```
+
 SpatChat SDM Pipeline: Methods Summary
 
 Data Ingestion & Coordinate Handling
