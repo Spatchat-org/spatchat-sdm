@@ -345,7 +345,20 @@ def run_fetch(sl, lc):
 
     #  b) Set the SAME python executable and unbuffered mode
     os.environ["SELECTED_LAYERS"] = ",".join(sl)
-    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
+
+    # map snake_case landcover names -> numeric codes
+    modis_landcover_map = {
+        0:"water", 1:"evergreen_needleleaf_forest", 2:"evergreen_broadleaf_forest",
+        3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",5:"mixed_forest",
+        6:"closed_shrublands",7:"open_shrublands",8:"woody_savannas",9:"savannas",
+        10:"grasslands",11:"permanent_wetlands",12:"croplands",
+        13:"urban_and_built_up",14:"cropland_natural_vegetation_mosaic",
+        15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
+    }
+    # reverse lookup
+    name_to_code = {v:str(k) for k,v in modis_landcover_map.items()}
+    codes = [ name_to_code[c] for c in lc if c in name_to_code ]
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(codes)
     cmd = [
         sys.executable,
         "-u",  # unbuffered: so stdout appears as it’s printed
