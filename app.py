@@ -458,7 +458,6 @@ def chat_step(file, user_msg, history, state):
         return history, m_out, state
     
     # 0c) Layer‑only shortcut: catch “fetch slope” / “urban” / synonyms immediately
-    import re
     # tokenize & lowercase
     tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
     # map our user‐friendly synonyms to the exact MODIS codes:
