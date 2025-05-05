@@ -351,7 +351,7 @@ def on_upload(f, history, state):
                 "• slope\n"
                 "• aspect\n"
                 "• NDVI\n"
-                "• landcover (e.g. water, urban)\n\n"
+                "• landcover (e.g. water, urban, cropland, etc.)\n\n"
                 "When you’re ready, just say **'I want elevation, ndvi, bio1'** to grab those layers."
             )})
             return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
@@ -374,14 +374,14 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
     lon_vals, lat_vals = rio_transform(src_crs, dst_crs, df[lon_col].tolist(), df[lat_col].tolist())
     df['latitude'], df['longitude'] = lat_vals, lon_vals
     df.to_csv("inputs/presence_points.csv", index=False)
-    history.append({"role":"assistant","content":"✅ Coordinates set! Now you can grab layers (e.g., 'fetch elevation, ndvi').\n"
-                "You can now pick from these predictors:\n"
+    history.append({"role":"assistant","content":"✅ Coordinates set! You're doing awesome!\n"
+                Now you can pick from these predictors:\n"
                 "• bio1–bio19\n"
                 "• elevation\n"
                 "• slope\n"
                 "• aspect\n"
                 "• NDVI\n"
-                "• landcover (e.g. water, urban)\n\n"
+                "• landcover (e.g. water, urban, cropland, etc.)\n\n"
                 "When you’re ready, just say **'I want elevation, ndvi, bio1'** to grab those layers."})
     return history, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
