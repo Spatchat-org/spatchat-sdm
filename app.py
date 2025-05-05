@@ -385,10 +385,9 @@ def run_fetch(sl, lc):
         13:"urban_and_built_up",14:"cropland_natural_vegetation_mosaic",
         15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
     }
-    # reverse lookup
-    name_to_code = {v:str(k) for k,v in modis_landcover_map.items()}
-    codes = [ name_to_code[c] for c in lc if c in name_to_code ]
-    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(codes)
+    
+    # pass the snake_case labels directly
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
     cmd = [
         sys.executable,
         "-u",  # unbuffered: so stdout appears as it’s printed
