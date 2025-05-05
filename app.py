@@ -599,12 +599,12 @@ def chat_step(file, user_msg, history, state):
         ).choices[0].message.content
         m_out = create_map()
 
-     # 5) record everything
-     history.extend([
-         {"role":"user","content":user_msg},
-         {"role":"assistant","content":assistant_txt}
-     ])
-     return history, m_out, state
+    # 5) record everything
+    history.extend([
+        {"role":"user","content":user_msg},
+        {"role":"assistant","content":assistant_txt}
+    ])
+    return history, m_out, state
 
 
 # --- Upload callback ---
