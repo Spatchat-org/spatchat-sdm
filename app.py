@@ -197,7 +197,7 @@ def chat_step(file, user_msg, history, state):
         reply = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
-    if re.search(r"\b(start over|restart|clear everything|reset)\b", user_msg, re.I):
+    if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
         return [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}], create_map(), state
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
@@ -285,7 +285,44 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
 
 # --- Gradio UI ---
 with gr.Blocks() as demo:
-    state = gr.State({"stage": "await_upload"})
+    gr.Image(
+        value="logo_long1.png",
+        show_label=False,
+        show_download_button=False,
+        show_share_button=False,
+        type="filepath",
+        elem_id="logo-img"
+    )
+    gr.HTML("""
+    <style>
+    #logo-img img {
+        height: 90px;
+        margin: 10px 50px 10px 10px;  /* top, right, bottom, left */
+        border-radius: 6px;
+    }
+    </style>
+    """)
+    gr.Markdown("## Spatchat: Species Distribution Model {sdm}")
+    gr.HTML("""
+    <div style="margin-top: -10px; margin-bottom: 15px;">
+      <input type="text" value="hhttps://spatchat.org/browse/?room=sdm" id="shareLink" readonly style="width: 50%; padding: 5px; background-color: #f8f8f8; color: #222; font-weight: 500; border: 1px solid #ccc; border-radius: 4px;">
+      <button onclick="navigator.clipboard.writeText(document.getElementById('shareLink').value)" style="padding: 5px 10px; background-color: #007BFF; color: white; border: none; border-radius: 4px; cursor: pointer;">
+        📋 Copy Share Link
+      </button>
+      <div style="margin-top: 10px; font-size: 14px;">
+        <b>Share:</b>
+        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=sdm" target="_blank">🐦 Twitter</a> |
+        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=sdm" target="_blank">📘 Facebook</a>
+      </div>
+    </div>
+    """)
+    gr.Markdown("""
+                <div style="font-size: 14px;">
+                © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
+                If you use Spatchat in research, please cite:<br>
+                <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Specides Distribution Model.</i>
+                </div>
+                """)state = gr.State({"stage": "await_upload"})
     with gr.Row():
         with gr.Column(scale=1):
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
