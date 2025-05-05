@@ -356,9 +356,9 @@ def chat_step(file, user_msg, history, state):
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
     
-    # 0b) “run model” shortcut
+    # 0b) “run model” shortcut (also catch “model” or “run” alone)    
+    if re.fullmatch(r"\s*(?:run\s+)?model\s*$", user_msg, re.I):
 
-    if re.fullmatch(r"\s*run\s+model\s*", user_msg, re.I):
         # invoke your run_model() utility directly
         m_out, status, perf_df, coef_df = run_model()
         if perf_df is not None:
