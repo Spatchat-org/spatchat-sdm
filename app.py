@@ -418,7 +418,7 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
     
 def chat_step(file, user_msg, history, state):
-    # 1) If no CSV yet: conversational fallback
+    # 0) If no CSV yet, fallback to conversational LLM
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [
             {"role":"system","content":FALLBACK_PROMPT},
@@ -429,33 +429,29 @@ def chat_step(file, user_msg, history, state):
             messages=fb,
             temperature=0.7
         ).choices[0].message.content
-        history.extend([{"role":"user","content":user_msg},
-                        {"role":"assistant","content":reply}])
+        history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
 
-    # 2) Reset command
-    if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b",
-                 user_msg, re.I):
+    # 1) Handle reset
+    if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
-        history = [{"role":"assistant",
-                    "content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
-        return history, create_map(), state
+        new_hist = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
+        return new_hist, create_map(), state
 
-    # 3) JSON‑tool router
-    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [
-        {"role":"user","content":user_msg}
-    ]
+    # 2) Build the JSON‐tool prompt
+    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
         messages=msgs,
         temperature=0.0
     ).choices[0].message.content
 
+    # 3) Parse and dispatch
     try:
         call = json.loads(resp)
         tool = call["tool"]
-    except:
-        # fallback conversational
+    except Exception:
+        # If even that fails, ask the fallback prompt once
         fb = [
             {"role":"system","content":FALLBACK_PROMPT},
             {"role":"user","content":user_msg}
@@ -465,46 +461,43 @@ def chat_step(file, user_msg, history, state):
             messages=fb,
             temperature=0.7
         ).choices[0].message.content
-        history.extend([{"role":"user","content":user_msg},
-                        {"role":"assistant","content":reply}])
+        history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
 
-    # 4) Execute tools
     if tool == "fetch":
         m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
-        assistant_txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
-
+        assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
     elif tool == "run_model":
         m_out, status, perf_df, coef_df = run_model()
         if perf_df is None:
             assistant_txt = status
         else:
-            # build performance + coefficients markdown
+            # build the markdown tables
             perf = pd.read_csv("outputs/performance_metrics.csv")
             first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
             perf_md = (
-                "**Model Performance (1 of 2):**\n\n"
-                f"{first.to_markdown(index=False)}\n\n"
-                "**Model Performance (2 of 2):**\n\n"
-                f"{second.to_markdown(index=False)}"
+                "**Model Performance (1 of 2):**\n\n" +
+                first.to_markdown(index=False) + "\n\n" +
+                "**Model Performance (2 of 2):**\n\n" +
+                second.to_markdown(index=False)
             )
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
+            coef_md = coef.to_markdown(index=False)
             assistant_txt = (
-                f"{status} You can download your results via the 📥 button.\n\n"
-                f"**{perf_md}**\n\n"
-                f"**Predictor Coefficients:**\n\n{coef.to_markdown(index=False)}"
+                f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n"
+                f"**Predictor Coefficients:**\n\n{coef_md}"
             )
-
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
         assistant_txt = "✅ ZIP is downloading…"
+    else:
+        # shouldn't happen
+        m_out = create_map()
+        assistant_txt = "Sorry, I don’t know that command."
 
-    # record
-    history.extend([
-        {"role":"user","content":user_msg},
-        {"role":"assistant","content":assistant_txt}
-    ])
+    history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":assistant_txt}])
     return history, m_out, state
+
 
 # --- Upload callback ---
 def on_upload(f, history, state):
