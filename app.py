@@ -52,6 +52,15 @@ def clear_all():
     for d in ("predictor_rasters", "outputs", "inputs"):
         shutil.rmtree(d, ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
+    # remove any old input CSV, just in case
+    csv_fp = "inputs/presence_points.csv"
+    if os.path.exists(csv_fp):
+        os.remove(csv_fp)
+
+    # clear environment selection
+    os.environ.pop("SELECTED_LAYERS", None)
+    os.environ.pop("SELECTED_LANDCOVER_CLASSES", None)
+
     if os.path.exists("spatchat_results.zip"):
         os.remove("spatchat_results.zip")
 
@@ -173,14 +182,30 @@ def zip_results():
     return archive
 
 def run_fetch(sl, lc):
-    if not sl and not lc:
-        return create_map(), "⚠️ Select at least one predictor."
-    layers = list(sl)
-    if lc: layers.append("landcover")
-    os.environ["SELECTED_LAYERS"] = ",".join(layers)
-    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(c.split(" – ")[0] for c in lc)
-    proc = subprocess.run(["python","scripts/fetch_predictors.py"], capture_output=True, text=True)
-    return create_map(), ("✅ Predictors fetched." if proc.returncode==0 else f"❌ Fetch failed:\n{proc.stderr}")
+    # 1. Read previous selection (empty string → [])
+    prev = os.environ.get("SELECTED_LAYERS", "")
+    prev_layers = set(prev.split(",")) if prev else set()
+
+    # 2. Add the new ones
+    new_layers = set(sl)
+    if lc:
+        new_layers.add("landcover")
+    all_layers = prev_layers | new_layers
+
+    # 3. Persist back to env
+    os.environ["SELECTED_LAYERS"] = ",".join(sorted(all_layers))
+
+    # 4. Call the fetch script
+    proc = subprocess.run(
+        ["python","scripts/fetch_predictors.py"],
+        capture_output=True, text=True
+    )
+    return (
+        create_map(),
+        "✅ Predictors fetched." if proc.returncode == 0
+        else f"❌ Fetch failed:\n{proc.stderr}"
+    )
+
 
 def run_model():
     proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
