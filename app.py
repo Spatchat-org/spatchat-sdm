@@ -339,34 +339,34 @@ def run_model():
 def run_query(query_text: str):
     """
     Send **all** queries to the LLM, but first give it a concise snapshot 
-    of your current data: presence points, fetched layers, model results.
+    of your current data: presence points, fetched layers, model results,
+    and the contents of your scripts/.
     """
-    import os, pandas as pd, rasterio
+    import os, glob, pandas as pd, rasterio
 
     # 1) Build data context
-    # — Presence points
     try:
         df_pts = pd.read_csv("inputs/presence_points.csv")
         n_pts = len(df_pts)
     except:
         n_pts = 0
 
-    # — Fetched layers
     rasdir = "predictor_rasters/wgs84"
-    if os.path.isdir(rasdir):
-        layers = sorted([f.rstrip(".tif") for f in os.listdir(rasdir) if f.endswith(".tif")])
-    else:
-        layers = []
+    layers = sorted([
+        os.path.splitext(f)[0]
+        for f in os.listdir(rasdir)
+        if f.endswith(".tif")
+    ]) if os.path.isdir(rasdir) else []
 
-    # — Model performance (if exists)
+    # Model performance
     perf_ctx = ""
     perf_fp = "outputs/performance_metrics.csv"
     if os.path.exists(perf_fp):
         perf = pd.read_csv(perf_fp)
-        perf_lines = [f"{col}: {perf.at[0, col]:.3f}" for col in perf.columns]
-        perf_ctx = "Model performance:\n" + "\n".join(perf_lines)
+        lines = [f"{col}: {perf.at[0, col]:.3f}" for col in perf.columns]
+        perf_ctx = "Model performance:\n" + "\n".join(lines)
 
-    # — Suitability map stats (if exists)
+    # Suitability stats
     suit_ctx = ""
     suit_fp = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(suit_fp):
@@ -377,35 +377,46 @@ def run_query(query_text: str):
             f"max {float(arr.max()):.3f}."
         )
 
-    # Assemble a single block of context
-    context = "\n".join([
+    # Assemble the text summary
+    context = "\n".join(filter(None, [
         f"- Presence points: {n_pts}",
         f"- Layers fetched ({len(layers)}): {', '.join(layers) or 'none'}",
         perf_ctx,
         suit_ctx
-    ]).strip()
+    ]))
 
-    # 2) Craft LLM messages
-    system_msg = {
-        "role": "system",
-        "content": (
-            "You are SpatChat, an expert assistant for species distribution modeling. "
-            "Below is the current data context. Answer the user’s question based on it, "
-            "and do not ask them to re‑upload data or re‑run the model unless absolutely necessary."
-        )
-    }
-    context_msg = {"role": "system", "content": "Data context:\n" + context}
-    user_msg = {"role": "user", "content": query_text}
+    # 2) Load all your .py scripts as system messages
+    code_messages = []
+    for path in sorted(glob.glob("scripts/*.py")):
+        with open(path, "r") as fh:
+            content = fh.read()
+        code_messages.append({
+            "role":    "system",
+            "content": f"### Begin {os.path.basename(path)}\n{content}\n### End {os.path.basename(path)}"
+        })
 
-    # 3) Call the LLM
+    # 3) Assemble the LLM prompt
+    messages = [
+        {
+          "role":    "system",
+          "content": (
+            "You are SpatChat, an expert in species distribution modeling. "
+            "Use ALL of the context provided to answer the user’s question."
+          )
+        },
+        {"role": "system", "content": "Data summary:\n" + context},
+        *code_messages,
+        {"role": "user", "content": query_text}
+    ]
+
+    # 4) Call the LLM
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=[system_msg, context_msg, user_msg],
-        temperature=0.3
+        messages=messages,
+        temperature=0.2
     ).choices[0].message.content
 
     return resp
-
     
 def chat_step(file, user_msg, history, state):
     # —————————————————————————
