@@ -551,16 +551,61 @@ def chat_step(file, user_msg, history, state):
                 f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n"
                 f"**Predictor Coefficients:**\n\n{coef_md}"
             )
-    elif tool == "download":
-        m_out, _ = create_map(), zip_results()
-        assistant_txt = "✅ ZIP is downloading…"
-    else:
-        # shouldn't happen
-        m_out = create_map()
-        assistant_txt = "Sorry, I don’t know that command."
+     elif tool == "download":
+         m_out, _ = create_map(), zip_results()
+         assistant_txt = "✅ ZIP is downloading…"
 
-    history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":assistant_txt}])
-    return history, m_out, state
+    else:
+        # --- build dynamic data summary and let LLM answer free‑form questions ---
+        # presence points
+        try:
+            n_pts = len(pd.read_csv("inputs/presence_points.csv"))
+        except:
+            n_pts = 0
+
+        # layers fetched
+        rasdir = "predictor_rasters/wgs84"
+        if os.path.isdir(rasdir):
+            layers = sorted([os.path.splitext(f)[0]
+                             for f in os.listdir(rasdir)
+                             if f.endswith(".tif")])
+        else:
+            layers = []
+
+        # model performance summary (for LLM context)
+        perf_ctx = ""
+        perf_fp = "outputs/performance_metrics.csv"
+        if os.path.exists(perf_fp):
+            perf = pd.read_csv(perf_fp)
+            lines = [f"{col}: {perf.at[0,col]:.3f}" for col in perf.columns]
+            perf_ctx = "Model performance:\n" + "\n".join(lines)
+
+        summary = "\n".join(filter(None, [
+            f"- Presence points: {n_pts}",
+            f"- Layers fetched ({len(layers)}): {', '.join(layers) or 'none'}",
+            perf_ctx
+        ]))
+
+        # send the user’s original question plus this summary into the LLM
+        msgs = [
+            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"system","content": "Data summary:\n" + summary},
+            {"role":"user",  "content":user_msg}
+        ]
+        assistant_txt = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=msgs,
+            temperature=0.7
+        ).choices[0].message.content
+        m_out = create_map()
+
+     # 5) record everything
+     history.extend([
+         {"role":"user","content":user_msg},
+         {"role":"assistant","content":assistant_txt}
+     ])
+     return history, m_out, state
+
 
 # --- Upload callback ---
 def on_upload(f, history, state):
