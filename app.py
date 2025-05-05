@@ -414,7 +414,7 @@ def run_model():
     perf_df = pd.read_csv("outputs/performance_metrics.csv")
     coef_df = pd.read_csv("outputs/coefficients.csv")
     zip_results()
-    return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
+    return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
     
 def chat_step(file, user_msg, history, state):
     # 0a) If no CSV yet, fallback to conversational LLM
@@ -492,7 +492,7 @@ def chat_step(file, user_msg, history, state):
         m_out, status = run_fetch(top, lc)
         history.extend([
           {"role":"user",     "content": user_msg},
-          {"role":"assistant","content": f"{status}\n\n🎉Nice work! Say “run model” next."}
+          {"role":"assistant","content": f"{status}\n\n🎉Nice work! Say “run model” next or grab more layers."}
         ])
         return history, m_out, state
     
