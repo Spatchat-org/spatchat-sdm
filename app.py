@@ -152,17 +152,17 @@ def resolve_crs(raw):
 
 # --- LLM prompts ---
 SYSTEM_PROMPT = """
-You are SpatChat, a species-distribution-modeling assistant.
+You are SpatChat, an expert in species distribution modeling.
+When the user issues a **command**:
+  - fetch   → {"tool":"fetch",   "layers":…, "landcover":…}
+  - run_model → {"tool":"run_model"}
+  - download  → {"tool":"download"}
+you MUST reply in JSON exactly as above.
+All *other* inputs are *not* commands.
 
-── Available actions ───────────────────────────────────────────────────────────
+Available layers or predictors to fetch: bio1–bio19, elevation, slope, aspect, ndvi, landcover
 
-1) Fetch predictors: bio1–bio19, elevation, slope, aspect, ndvi, landcover
-2) Run model
-3) Download results
-4) Query stats or metadata
-
-
-──SpatChat SDM Pipeline: Methods Summary───────────────────────────────────────
+SpatChat SDM Pipeline: Methods Summary
 
 Data Ingestion & Coordinate Handling
 - Users upload a CSV of presence points.
@@ -210,21 +210,6 @@ Interactive App & LLM Integration
 - Custom Python handlers answer layer counts, point counts, map stats, and model stats.
 - All other questions go to the LLM, primed with this methods summary (and optionally your scripts) so it can answer implementation‑level queries accurately.
 
-── TOOL INSTRUCTIONS ───────────────────────────────────────────────────────────
-
-When the user asks you to do something, reply with a single JSON object **only**. No markdown fences, no extra keys.
-
-**Fetch predictors**
-{"tool":"fetch","layers":["elevation","ndvi","bio1"],"landcover":["water","urban"]}
-
-**Run the model**
-{"tool":"run_model"}
-
-**Download all files**
-{"tool":"download"}
-
-**Ask a question**
-{"tool":"query","query":"What is the max suitability value?"}
 """.strip()
 
 FALLBACK_PROMPT = """
@@ -384,71 +369,6 @@ def run_model():
     coef_df = pd.read_csv("outputs/coefficients.csv")
     zip_results()
     return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
-
-def run_query(query_text: str):
-    """
-    Send **all** queries to the LLM, but first give it a concise snapshot 
-    of your current data: presence points, fetched layers, model results,
-    and the contents of your scripts/.
-    """
-    import os, glob, pandas as pd, rasterio
-
-    # 1) Build data context
-    try:
-        df_pts = pd.read_csv("inputs/presence_points.csv")
-        n_pts = len(df_pts)
-    except:
-        n_pts = 0
-
-    rasdir = "predictor_rasters/wgs84"
-    layers = sorted([
-        os.path.splitext(f)[0]
-        for f in os.listdir(rasdir)
-        if f.endswith(".tif")
-    ]) if os.path.isdir(rasdir) else []
-
-    # Model performance
-    perf_ctx = ""
-    perf_fp = "outputs/performance_metrics.csv"
-    if os.path.exists(perf_fp):
-        perf = pd.read_csv(perf_fp)
-        lines = [f"{col}: {perf.at[0, col]:.3f}" for col in perf.columns]
-        perf_ctx = "Model performance:\n" + "\n".join(lines)
-
-    # Suitability stats
-    suit_ctx = ""
-    suit_fp = "outputs/suitability_map_wgs84.tif"
-    if os.path.exists(suit_fp):
-        with rasterio.open(suit_fp) as src:
-            arr = src.read(1, masked=True)
-        suit_ctx = (
-            f"Suitability range: min {float(arr.min()):.3f}, "
-            f"max {float(arr.max()):.3f}."
-        )
-
-    # Assemble the text summary
-    context = "\n".join(filter(None, [
-        f"- Presence points: {n_pts}",
-        f"- Layers fetched ({len(layers)}): {', '.join(layers) or 'none'}",
-        perf_ctx,
-        suit_ctx
-    ]))
-
-    # 3) Assemble the LLM prompt
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": "Data summary:\n" + context},
-        {"role": "user", "content": query_text}
-    ]
-
-    # 4) Call the LLM
-    resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=messages,
-        temperature=0.2
-    ).choices[0].message.content
-
-    return resp
     
 def chat_step(file, user_msg, history, state):
     # —————————————————————————
@@ -541,16 +461,70 @@ def chat_step(file, user_msg, history, state):
         m_out, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
     
-    elif tool == "query":
-        m_out = create_map()
-        # call our new query helper
-        txt = run_query(call.get("query",""))
     else:
-        fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
-        txt = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
+        # --- build dynamic data summary ---
+        import os, pandas as pd, rasterio
+
+        # presence points
+        try:
+            n_pts = len(pd.read_csv("inputs/presence-points.csv"))
+        except:
+            n_pts = 0
+
+        # layers fetched
+        rasdir = "predictor_rasters/wgs84"
+        if os.path.isdir(rasdir):
+            layers = sorted([os.path.splitext(f)[0]
+                             for f in os.listdir(rasdir)
+                             if f.endswith(".tif")])
+        else:
+            layers = []
+
+        # model performance
+        perf_ctx = ""
+        perf_fp = "outputs/performance_metrics.csv"
+        if os.path.exists(perf_fp):
+            perf = pd.read_csv(perf_fp)
+            lines = [f"{col}: {perf.at[0,col]:.3f}" for col in perf.columns]
+            perf_ctx = "Model performance:\n" + "\n".join(lines)
+
+        # suitability map stats
+        suit_ctx = ""
+        suit_fp = "outputs/suitability_map_wgs84.tif"
+        if os.path.exists(suit_fp):
+            with rasterio.open(suit_fp) as src:
+                arr = src.read(1, masked=True)
+            suit_ctx = f"Suitability range: {float(arr.min()):.3f}–{float(arr.max()):.3f}"
+
+        # assemble summary
+        summary = "\n".join(filter(None, [
+            f"- Presence points: {n_pts}",
+            f"- Layers fetched ({len(layers)}): {', '.join(layers) or 'none'}",
+            perf_ctx,
+            suit_ctx
+        ]))
+
+        # --- call LLM with SYSTEM_PROMPT + data summary + user question ---
+        msgs = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": "Data summary:\n" + summary},
+            {"role": "user",   "content": user_msg}
+        ]
+        txt = client.chat.completions.create(
+                  model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                  messages=msgs,
+                  temperature=0.7
+              ).choices[0].message.content
+
+        # preserve the map and append to history
         m_out = create_map()
-    history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":txt}])
+
+    history.extend([
+        {"role": "user",      "content": user_msg},
+        {"role": "assistant", "content": txt}
+    ])
     return history, m_out, state
+
 
 # --- Upload callback ---
 def on_upload(f, history, state):
