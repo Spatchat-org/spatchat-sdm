@@ -97,7 +97,16 @@ modis_landcover_map = {
     15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
 }
 # reverse mapping of label→code
-name_to_code = { label: code for code, label in modis_landcover_map.items() }
+name_to_code = {v: k for k, v in modis_landcover_map.items()}
+
+# -----------------------------------------------------------------------------
+# Which layers + one-hot codes the UI set (via os.environ)
+# -----------------------------------------------------------------------------
+layers = os.environ.get('SELECTED_LAYERS','').split(',')
+raw    = os.environ.get('SELECTED_LANDCOVER_CLASSES','')
+labels = [c for c in raw.split(',') if c]
+# convert each snake_case label back to its integer code
+codes  = [ str(name_to_code[c]) for c in labels if c in name_to_code ]
 
 # -----------------------------------------------------------------------------
 # Export scales (native) for each predictor
