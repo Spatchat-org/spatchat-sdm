@@ -442,118 +442,56 @@ def chat_step(file, user_msg, history, state):
         history = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
         return history, create_map(), state
         
-    # 3) Otherwise go through the JSON‐tool router…
+    # 3) Tool call via LLM → JSON
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
-    resp = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=msgs, temperature=0.0).choices[0].message.content
+    response = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=msgs,
+        temperature=0.0
+    ).choices[0].message.content
+
     try:
-        call = json.loads(resp)
-        tool = call.get("tool")
-        query_text = call.get("query", "")
+        call = json.loads(response)
+        tool = call["tool"]
     except:
-        tool = None
+        history.append({"role":"assistant","content":
+            "Sorry, I couldn't understand that. Please say 'fetch …', 'run model', or 'download'."})
+        return history, create_map(), state
+
+    # 4) Invoke the tool
     if tool == "fetch":
-        m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
-        txt = f"{status}\n\nGreat! Now run the model or fetch more layers."
+        m_out, status = run_fetch(call.get("layers",[]), call.get("landcover",[]))
+        txt = f"{status}\n\nGreat! Now say “run model” or fetch more layers."
+
     elif tool == "run_model":
         m_out, status, perf_df, coef_df = run_model()
-
-        # Only convert to markdown if the run succeeded:
         if perf_df is None:
-            # The subprocess failed; just show the stderr message
             txt = status
         else:
-            # Success: show performance and coefficients
+            # same performance+coef rendering as before
             status += " You can download the suitability map and all rasters using the 📥 button below the map."
-            # read your full performance metrics
-            perf_df = pd.read_csv("outputs/performance_metrics.csv")
-            
-            # split into two halves
-            first = perf_df.iloc[:, :3]   # AUC, Threshold, Sensitivity
-            second = perf_df.iloc[:, 3:]  # Specificity, TSS, Kappa
-            
-            # render each half as its own table
-            perf1 = first.to_markdown(index=False)
-            perf2 = second.to_markdown(index=False)
-            
-            # combine into two sections
+            perf = pd.read_csv("outputs/performance_metrics.csv")
+            first, second = perf.iloc[:,:3], perf.iloc[:,3:]
             perf_md = (
-                "**Model Performance (1 of 2):**\n\n"
-                f"{perf1}\n\n"
-                "**Model Performance (2 of 2):**\n\n"
-                f"{perf2}"
+               "**Model Performance (1 of 2):**\n\n"
+               f"{first.to_markdown(index=False)}\n\n"
+               "**Model Performance (2 of 2):**\n\n"
+               f"{second.to_markdown(index=False)}"
             )
-            coef_df = coef_df.dropna(axis=1, how='all')
-            coef_md = coef_df.to_markdown(index=False)
+            coefs = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how="all")
             txt = (
                 f"{status}\n\n"
-                f"**Model Performance:**\n\n{perf_md}\n\n"
-                f"**Predictor Coefficients:**\n\n{coef_md}"
+                f"{perf_md}\n\n"
+                f"**Predictor Coefficients:**\n\n{coefs.to_markdown(index=False)}"
             )
 
-    elif tool == "download":
+    else:  # download
         m_out, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
-    
-    else:
-        # --- build dynamic data summary ---
-
-        # presence points
-        try:
-            n_pts = len(pd.read_csv("inputs/presence-points.csv"))
-        except:
-            n_pts = 0
-
-        # layers fetched
-        rasdir = "predictor_rasters/wgs84"
-        if os.path.isdir(rasdir):
-            layers = sorted([os.path.splitext(f)[0]
-                             for f in os.listdir(rasdir)
-                             if f.endswith(".tif")])
-        else:
-            layers = []
-
-        # model performance
-        perf_ctx = ""
-        perf_fp = "outputs/performance_metrics.csv"
-        if os.path.exists(perf_fp):
-            perf = pd.read_csv(perf_fp)
-            lines = [f"{col}: {perf.at[0,col]:.3f}" for col in perf.columns]
-            perf_ctx = "Model performance:\n" + "\n".join(lines)
-
-        # suitability map stats
-        suit_ctx = ""
-        suit_fp = "outputs/suitability_map_wgs84.tif"
-        if os.path.exists(suit_fp):
-            with rasterio.open(suit_fp) as src:
-                arr = src.read(1, masked=True)
-            suit_ctx = f"Suitability range: {float(arr.min()):.3f}–{float(arr.max()):.3f}"
-
-        # assemble summary
-        summary = "\n".join(filter(None, [
-            f"- Presence points: {n_pts}",
-            f"- Layers fetched ({len(layers)}): {', '.join(layers) or 'none'}",
-            perf_ctx,
-            suit_ctx
-        ]))
-
-        # --- call LLM with SYSTEM_PROMPT + data summary + user question ---
-        msgs = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": "Data summary:\n" + summary},
-            {"role": "user",   "content": user_msg}
-        ]
-        txt = client.chat.completions.create(
-                  model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-                  messages=msgs,
-                  temperature=0.7
-              ).choices[0].message.content
-
-        # preserve the map and append to history
-        m_out = create_map()
 
     history.extend([
-        {"role": "user",      "content": user_msg},
-        {"role": "assistant", "content": txt}
+        {"role":"user","content":user_msg},
+        {"role":"assistant","content":txt}
     ])
     return history, m_out, state
 
