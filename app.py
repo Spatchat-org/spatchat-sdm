@@ -118,9 +118,10 @@ You are SpatChat, a friendly assistant orchestrating SDM.
 Your job is to explain to the user what options they have in each step,
 guiding them through the whole process to build the SDM.
 Whenever the user wants to perform an action, reply _only_ with a JSON object selecting one of your tools:
-- To fetch layers:     {"tool":"fetch","layers":["bio1","ndvi",...]}
-- To run the model:    {"tool":"run_model"}
-- To download results: {"tool":"download"}
+- To fetch layers:       {"tool":"fetch","layers":["bio1","ndvi",...]}
+- To run the model:      {"tool":"run_model"}
+- To download results:   {"tool":"download"}
+- To query data/stats:   {"tool":"query","query":"<natural-language question>"}
 After we run that function, we'll display its output and then prompt the user on next steps.
 If the user asks for statistical results, show them from "outputs/performance_metrics.csv" and "outputs/coefficients.csv".
 If the question is vague, ask for clarification.
@@ -216,6 +217,37 @@ def run_model():
     zip_results()
     return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
 
+def run_query(query_text: str):
+    """
+    Handle natural‑language queries about:
+    - The suitability map (outputs/suitability_map_wgs84.tif)
+    - The uploaded points (inputs/presence_points.csv)
+    - The model stats CSVs
+    """
+    q = query_text.lower()
+    # 1) Suitability‐map questions
+    if "highest" in q or "maximum" in q:
+        with rasterio.open("outputs/suitability_map_wgs84.tif") as src:
+            arr = src.read(1, masked=True)
+        val = float(arr.max())
+        return f"The maximum suitability value is {val:.3f}."
+    if "lowest" in q or "minimum" in q:
+        with rasterio.open("outputs/suitability_map_wgs84.tif") as src:
+            arr = src.read(1, masked=True)
+        val = float(arr.min())
+        return f"The minimum suitability value is {val:.3f}."
+    # 2) Presence‐points questions
+    if "how many points" in q or "number of points" in q:
+        df = pd.read_csv("inputs/presence_points.csv")
+        return f"There are {len(df)} presence points."
+    # 3) Performance‐metrics questions
+    if "auc" in q or "tss" in q or "kappa" in q:
+        perf = pd.read_csv("outputs/performance_metrics.csv")
+        lines = [f"{col}: {perf.at[0,col]:.3f}" for col in perf.columns]
+        return "Model performance:\n" + "\n".join(lines)
+    # fallback
+    return "Sorry, I don't know how to answer that. Try asking about max/min suitability, count of points, or model metrics."
+
 def chat_step(file, user_msg, history, state):
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
@@ -230,6 +262,7 @@ def chat_step(file, user_msg, history, state):
     try:
         call = json.loads(resp)
         tool = call.get("tool")
+        query_text = call.get("query", "")
     except:
         tool = None
     if tool == "fetch":
@@ -257,7 +290,11 @@ def chat_step(file, user_msg, history, state):
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
         txt = "✅ ZIP is downloading…"
-
+    
+    elif tool == "query":
+        m_out = create_map()
+        # call our new query helper
+        txt = run_query(call.get("query",""))
     else:
         fb = [{"role":"system","content":FALLBACK_PROMPT}, {"role":"user","content":user_msg}]
         txt = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7).choices[0].message.content
