@@ -160,6 +160,25 @@ When the user issues a **command**:
 you MUST reply in JSON exactly as above.
 All *other* inputs are *not* commands.
 
+For landcover synonyms, map user‑friendly words into the exact MODIS codes:
+    • water, lake, river, ocean                → water
+    • evergreen needleleaf forest, pine forest → evergreen_needleleaf_forest
+    • evergreen broadleaf forest               → evergreen_broadleaf_forest
+    • deciduous needleleaf forest              → deciduous_needleleaf_forest
+    • deciduous broadleaf forest               → deciduous_broadleaf_forest
+    • mixed forest, mixed woods                → mixed_forest
+    • closed shrublands, dense shrubs          → closed_shrublands
+    • open shrublands, sparse shrubs           → open_shrublands
+    • woody savannas                           → woody_savannas
+    • savannas, grassy savanna                 → savannas
+    • grass, grassland                         → grasslands
+    • permanent wetlands, marsh, swamp         → permanent_wetlands
+    • cropland, agriculture                    → croplands
+    • cropland‑natural mosaic                  → cropland_natural_vegetation_mosaic
+    • urban, built‑up, artificial surfaces     → urban_and_built_up
+    • snow, ice, glacier                       → snow_and_ice
+    • barren, bare ground, rock                → barren_or_sparsely_vegetated
+
 Available layers or predictors to fetch: bio1–bio19, elevation, slope, aspect, ndvi, landcover
 
 SpatChat SDM Pipeline: Methods Summary
