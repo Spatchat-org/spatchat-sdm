@@ -396,16 +396,17 @@ def run_query(query_text: str):
     return resp
     
 def chat_step(file, user_msg, history, state):
-    
-    # 0) Shortcut: if the user just names layers, fetch them directly
+    # —————————————————————————
+    # 0) Layer‑only shortcut (must run before LLM)
+    # —————————————————————————
+    # tokenise on commas and spaces
     tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
-    if tokens and all(
-        (t in VALID_LAYERS) or (t in LANDCOVER_CLASSES)
-        for t in tokens
-    ):
-        # split top‐level vs. landcover codes
-        top = [t for t in tokens if t in VALID_LAYERS and t != "landcover"]
-        lc  = [t for t in tokens if t in LANDCOVER_CLASSES]
+    # filter out connector words
+    core = [t for t in tokens if t not in {"and","with","plus","&"}]
+    # if *all* core tokens are either valid top‑levels or landcover classes:
+    if core and all((t in VALID_LAYERS) or (t in LANDCOVER_CLASSES) for t in core):
+        top = [t for t in core if t in VALID_LAYERS and t != "landcover"]
+        lc  = [t for t in core if t in LANDCOVER_CLASSES]
         if lc:
             top.append("landcover")
         m_out, status = run_fetch(top, lc)
