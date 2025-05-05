@@ -254,30 +254,43 @@ def zip_results():
     return archive
 
 def run_fetch(sl, lc):
-    # 1. Read previous selection (empty string → [])
-    prev = os.environ.get("SELECTED_LAYERS", "")
-    prev_layers = set(prev.split(",")) if prev else set()
-
-    # 2. Add the new ones
-    new_layers = set(sl)
+    layers = list(sl)
     if lc:
-        new_layers.add("landcover")
-    all_layers = prev_layers | new_layers
+        layers.append("landcover")
 
-    # 3. Persist back to env
-    os.environ["SELECTED_LAYERS"] = ",".join(sorted(all_layers))
+    # If they asked for nothing, quick warning
+    if not layers:
+        return create_map(), "⚠️ Select at least one predictor."
 
-    # 4. Call the fetch script
+    # Detect any layer names that look off: any non‑alphanumeric or too short?
+    bad = [l for l in layers if not re.match(r"^[A-Za-z0-9_]+$", l)]
+    if bad:
+        # Ask the LLM to help clarify
+        user_request = ", ".join(layers)
+        prompt = (
+            f"The user asked for predictors: {user_request}. "
+            f"I couldn't understand: {', '.join(bad)}. "
+            "Could you please restate which predictors they want?"
+        )
+        clarification = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=[
+                {"role":"system","content":FALLBACK_PROMPT},
+                {"role":"user","content": prompt}
+            ],
+            temperature=0.7
+        ).choices[0].message.content
+        return create_map(), clarification
+
+    # Otherwise proceed as normal
+    os.environ["SELECTED_LAYERS"] = ",".join(layers)
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ""
     proc = subprocess.run(
         ["python","scripts/fetch_predictors.py"],
         capture_output=True, text=True
     )
-    return (
-        create_map(),
-        "✅ Predictors fetched." if proc.returncode == 0
-        else f"❌ Fetch failed:\n{proc.stderr}"
-    )
-
+    status = "✅ Predictors fetched." if proc.returncode==0 else f"❌ Fetch failed:\n{proc.stderr}"
+    return create_map(), status
 
 def run_model():
     proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
