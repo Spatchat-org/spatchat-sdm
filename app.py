@@ -468,7 +468,24 @@ def chat_step(file, user_msg, history, state):
         else:
             # Success: show performance and coefficients
             status += " You can download the suitability map and all rasters using the 📥 button below the map."
-            perf_md = perf_df.to_markdown(index=False)
+            # read your full performance metrics
+            perf_df = pd.read_csv("outputs/performance_metrics.csv")
+            
+            # split into two halves
+            first = perf_df.iloc[:, :3]   # AUC, Threshold, Sensitivity
+            second = perf_df.iloc[:, 3:]  # Specificity, TSS, Kappa
+            
+            # render each half as its own table
+            perf1 = first.to_markdown(index=False)
+            perf2 = second.to_markdown(index=False)
+            
+            # combine into two sections
+            perf_md = (
+                "**Model Performance (1 of 2):**\n\n"
+                f"{perf1}\n\n"
+                "**Model Performance (2 of 2):**\n\n"
+                f"{perf2}"
+            )
             coef_df = coef_df.dropna(axis=1, how='all')
             coef_md = coef_df.to_markdown(index=False)
             txt = (
