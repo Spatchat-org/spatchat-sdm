@@ -26,23 +26,23 @@ from dotenv import load_dotenv
 from rasterio.crs import CRS as RioCRS
 from rasterio.warp import transform as rio_transform
 
-PREDICTOR_CHOICES = [
-    *[f"bio{i}" for i in range(1, 20)],
-    "elevation",
-    "slope",
-    "aspect",
-    "ndvi",
-    "landcover",
-]
-VALID_LAYERS = set(PREDICTOR_CHOICES)
+# --- Which top‑level predictors we support (all lower‑case) ---
+PREDICTOR_CHOICES = (
+    [f"bio{i}" for i in range(1, 20)]
+    + ["elevation", "slope", "aspect", "ndvi", "landcover"]
+)
+# force everything to lower-case so our .lower() tokens always match
+VALID_LAYERS = {p.lower() for p in PREDICTOR_CHOICES}
 
 # All available MODIS landcover classes
 LANDCOVER_CLASSES = {
-    "water", "evergreen_needleleaf_forest", "evergreen_broadleaf_forest",
-    "deciduous_needleleaf_forest", "deciduous_broadleaf_forest", "mixed_forest",
-    "closed_shrublands", "open_shrublands", "woody_savannas", "savannas",
-    "grasslands", "permanent_wetlands", "croplands", "urban_and_built_up",
-    "cropland_natural_vegetation_mosaic", "snow_and_ice", "barren_or_sparsely_vegetated"
+    c.lower() for c in (
+        "water", "evergreen_needleleaf_forest", "evergreen_broadleaf_forest",
+        "deciduous_needleleaf_forest", "deciduous_broadleaf_forest", "mixed_forest",
+        "closed_shrublands", "open_shrublands", "woody_savannas", "savannas",
+        "grasslands", "permanent_wetlands", "croplands", "urban_and_built_up",
+        "cropland_natural_vegetation_mosaic", "snow_and_ice", "barren_or_sparsely_vegetated"
+    )
 }
 
 # --- Pre-render colorbar → base64 ---
@@ -160,53 +160,30 @@ def resolve_crs(raw):
 
 # --- LLM prompts ---
 SYSTEM_PROMPT = """
-You are SpatChat, a friendly assistant for species distribution modeling.
+You are SpatChat, a species-distribution-modeling assistant.
 
-── Available data & actions ────────────────────────────────────────────
+── Available actions ───────────────────────────────────────────────────────────
 
-1) Predictors you can fetch:
-   • Bioclim variables: bio1–bio19  
-   • elevation  
-   • slope  
-   • aspect  
-   • ndvi  
-   • landcover (must specify one or more of:
-       water, evergreen_needleleaf_forest, evergreen_broadleaf_forest,
-       deciduous_needleleaf_forest, deciduous_broadleaf_forest, mixed_forest,
-       closed_shrublands, open_shrublands, woody_savannas, savannas,
-       grasslands, permanent_wetlands, croplands, urban_and_built_up,
-       cropland_natural_vegetation_mosaic, snow_and_ice,
-       barren_or_sparsely_vegetated)
+1) Fetch predictors: bio1–bio19, elevation, slope, aspect, ndvi, landcover
+2) Run model
+3) Download results
+4) Query stats or metadata
 
-2) Once you’ve fetched predictors, you can run the model to produce:
-   • A suitability map (GeoTIFF at outputs/suitability_map_wgs84.tif)  
-   • Performance metrics CSV (outputs/performance_metrics.csv)  
-   • Coefficients CSV (outputs/coefficients.csv)
+── TOOL INSTRUCTIONS ───────────────────────────────────────────────────────────
 
-3) You can download all raster and output files as a ZIP.
+When the user asks you to do something, reply with a single JSON object **only**. No markdown fences, no extra keys.
 
-4) You can query any of these:
-   • Raster stats (e.g. “max suitability value”, “min suitability”)  
-   • Presence‑point info (e.g. “how many points?”, “mean latitude”)  
-   • Model stats (e.g. “what is the AUC?”, “list coefficients”)  
-   • Metadata (e.g. “what do bio1–bio19 stand for?”, “which landcover classes?”)
+**Fetch predictors**
+{"tool":"fetch","layers":["elevation","ndvi","bio1"],"landcover":["water","urban"]}
 
-── TOOL INSTRUCTIONS ───────────────────────────────────────────────────
+**Run the model**
+{"tool":"run_model"}
 
-When the user requests an action, reply **only** with JSON selecting one tool:
+**Download all files**
+{"tool":"download"}
 
-1. **Fetch predictors**  
-   ```json
-   {"tool":"fetch",
-    "layers":[<top‑level names>],
-    "landcover":[<landcover classes>]}
-2. {"tool":"run_model"}
-3. {"tool":"download"}
-4. {"tool":"query", "query":"<your natural‑language question>"}
-
-After we run that function, we'll display its output and then prompt the user on next steps.
-If the user asks for statistical results, show them from "outputs/performance_metrics.csv" and "outputs/coefficients.csv".
-If the question is vague, ask for clarification.
+**Ask a question**
+{"tool":"query","query":"What is the max suitability value?"}
 """.strip()
 
 FALLBACK_PROMPT = """
@@ -333,18 +310,30 @@ def run_fetch(sl, lc):
         return create_map(), clar
 
     # 5) All inputs valid → proceed with fetch
+    # —————————————————————————————————————————————
+    #  a) Echo what we're about to do
+    print(f"🧪 [run_fetch] SL={sl!r}   LC={lc!r}", file=sys.stdout)
+
+    #  b) Set the SAME python executable and unbuffered mode
     os.environ["SELECTED_LAYERS"] = ",".join(sl)
     os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
-    proc = subprocess.run(
-        ["python", "scripts/fetch_predictors.py"],
-        capture_output=True, text=True
-    )
-    status = (
-        "✅ Predictors fetched."
-        if proc.returncode == 0
-        else f"❌ Fetch failed:\n{proc.stderr}"
-    )
-    return create_map(), status
+    cmd = [
+        sys.executable,
+        "-u",  # unbuffered: so stdout appears as it’s printed
+        os.path.join("scripts", "fetch_predictors.py")
+    ]
+
+    #  c) Run and capture *both* stdout and stderr
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        # combine stdout+stderr so you see your print() calls and EE logs
+        logs = proc.stdout.strip()
+        if proc.stderr:
+            logs += ("\n" + proc.stderr.strip())
+        return create_map(), f"❌ Fetch failed:\n```\n{logs}\n```"
+
+    # d) Success
+    return create_map(), "✅ Predictors fetched."
 
 def run_model():
     proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
