@@ -322,7 +322,8 @@ with gr.Blocks() as demo:
                 If you use Spatchat in research, please cite:<br>
                 <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Specides Distribution Model.</i>
                 </div>
-                """)state = gr.State({"stage": "await_upload"})
+                """)
+    state = gr.State({"stage": "await_upload"})
     with gr.Row():
         with gr.Column(scale=1):
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
