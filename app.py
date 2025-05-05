@@ -551,9 +551,9 @@ def chat_step(file, user_msg, history, state):
                 f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n"
                 f"**Predictor Coefficients:**\n\n{coef_md}"
             )
-     elif tool == "download":
-         m_out, _ = create_map(), zip_results()
-         assistant_txt = "✅ ZIP is downloading…"
+    elif tool == "download":
+        m_out, _ = create_map(), zip_results()
+        assistant_txt = "✅ ZIP is downloading…"
 
     else:
         # --- build dynamic data summary and let LLM answer free‑form questions ---
