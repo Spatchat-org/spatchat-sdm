@@ -453,6 +453,7 @@ def chat_step(file, user_msg, history, state):
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
 
+    # 4) Execute tools
     if tool == "fetch":
         m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
@@ -481,40 +482,48 @@ def chat_step(file, user_msg, history, state):
         assistant_txt = "✅ ZIP is downloading…"
 
     else:
-        # --- build dynamic data summary and let LLM answer free‑form questions ---
-        # presence points
+        # --- build a complete data summary (points, layers, metrics, coeffs) ---
+        # 1) Presence points
         try:
             n_pts = len(pd.read_csv("inputs/presence_points.csv"))
         except:
             n_pts = 0
 
-        # layers fetched
+        # 2) Layers fetched
         rasdir = "predictor_rasters/wgs84"
         if os.path.isdir(rasdir):
-            layers = sorted([os.path.splitext(f)[0]
-                             for f in os.listdir(rasdir)
-                             if f.endswith(".tif")])
+            fetched = sorted(os.path.splitext(f)[0] for f in os.listdir(rasdir) if f.endswith(".tif"))
         else:
-            layers = []
+            fetched = []
 
-        # model performance summary (for LLM context)
-        perf_ctx = ""
+        # 3) Performance metrics
+        perf_table = ""
         perf_fp = "outputs/performance_metrics.csv"
         if os.path.exists(perf_fp):
             perf = pd.read_csv(perf_fp)
-            lines = [f"{col}: {perf.at[0,col]:.3f}" for col in perf.columns]
-            perf_ctx = "Model performance:\n" + "\n".join(lines)
+            perf_table = perf.to_markdown(index=False)
 
-        summary = "\n".join(filter(None, [
-            f"- Presence points: {n_pts}",
-            f"- Layers fetched ({len(layers)}): {', '.join(layers) or 'none'}",
-            perf_ctx
-        ]))
+        # 4) Coefficients
+        coef_table = ""
+        coef_fp = "outputs/coefficients.csv"
+        if os.path.exists(coef_fp):
+            coef = pd.read_csv(coef_fp).dropna(axis=1, how='all')
+            coef_table = coef.to_markdown(index=False)
 
-        # send the user’s original question plus this summary into the LLM
+        # assemble data‐summary text
+        summary = (
+            f"- Presence points: {n_pts}\n"
+            f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
+            "**Performance Metrics**\n"
+            f"{perf_table or '*none*'}\n\n"
+            "**Predictor Coefficients**\n"
+            f"{coef_table or '*none*'}"
+        )
+
+        # 5) Let the LLM answer any free‐form question using that context
         msgs = [
             {"role":"system","content":SYSTEM_PROMPT},
-            {"role":"system","content": "Data summary:\n" + summary},
+            {"role":"system","content":"Data summary:\n" + summary},
             {"role":"user",  "content":user_msg}
         ]
         assistant_txt = client.chat.completions.create(
