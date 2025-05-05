@@ -283,12 +283,12 @@ def chat_step(file, user_msg, history, state):
         return history, create_map(), state
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
-+       return (
-+           [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}],
-+           create_map(),
-+           state,
-+           gr.update(value=None)        # clear the upload box
-+       )
+       return (
+           [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}],
+           create_map(),
+           state,
+           gr.update(value=None)        # clear the upload box
+       )
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     resp = client.chat.completions.create(model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=msgs, temperature=0.0).choices[0].message.content
     try:
