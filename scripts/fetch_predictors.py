@@ -277,37 +277,73 @@ def export_and_align(img: ee.Image, name: str):
 # -----------------------------------------------------------------------------
 # 1) Export each regular predictor
 # -----------------------------------------------------------------------------
-# Remove any empty entries
 layers = [l for l in layers if l.strip()]
 
 for name in layers:
     if name == "landcover":
         continue
-    if name not in sources:
-        print(f"⚠️ Skipping unknown layer '{name}'")
-        continue
 
+    # set output paths
     raw_fp = f"predictor_rasters/raw/{name}.tif"
     out_fp = f"predictor_rasters/wgs84/{name}.tif"
     scale  = EXPORT_SCALES.get(name, RES)
 
-    try:
-        # Download only if missing
-        if not os.path.exists(raw_fp):
-            print(f"📥 Exporting '{name}' at {scale} m native…")
-            geemap.ee_export_image(
-                sources[name]
-                  .reproject(crs="EPSG:4326", scale=scale)
-                  .clip(region),
-                filename=raw_fp,
-                scale=scale,
-                region=region,
-                crs="EPSG:4326",
-                file_per_band=False,
-                timeout=600,
-            )
-        else:
-            print(f"ℹ️ Raw file for '{name}' exists; skipping download.")
+    # Chunk-based export: split into fixed-size tiles (by pixels)
+    if not os.path.exists(raw_fp):
+        print(f"📥 Chunk-exporting '{name}' at {scale} m native…")
+        # compute degrees per pixel
+        west  = min_lon - buffer
+        east  = max_lon + buffer
+        south = min_lat - buffer
+        north = max_lat + buffer
+        deg_per_px_x = (east - west) / x_size
+        deg_per_px_y = (north - south) / y_size
+        CHUNK_PIXELS = 2000  # fixed chunk dimension
+        chunk_dx = deg_per_px_x * CHUNK_PIXELS
+        chunk_dy = deg_per_px_y * CHUNK_PIXELS
+        tile_files = []
+        nx = math.ceil((east - west) / chunk_dx)
+        ny = math.ceil((north - south) / chunk_dy)
+        for i in range(nx):
+            for j in range(ny):
+                # tile bounds
+                w = west + i * chunk_dx
+                e = min(west + (i+1) * chunk_dx, east)
+                s = south + j * chunk_dy
+                n = min(south + (j+1) * chunk_dy, north)
+                tile_region = ee.Geometry.BBox(w, s, e, n)
+                tile_fp = f"predictor_rasters/raw/{name}_tile_{i}_{j}.tif"
+                print(f"  • exporting tile ({i},{j}) of '{name}'")
+                geemap.ee_export_image(
+                    sources[name]
+                      .reproject(crs="EPSG:4326", scale=scale)
+                      .clip(tile_region),
+                    filename=tile_fp,
+                    scale=scale,
+                    region=tile_region,
+                    crs="EPSG:4326",
+                    file_per_band=False,
+                    timeout=600,
+                )
+                tile_files.append(tile_fp)
+        # merge tiles into single raw
+        print(f"🔀 Merging {len(tile_files)} tiles for '{name}'...")
+        srcs = [rasterio.open(fp) for fp in tile_files]
+        mosaic, out_trans = merge(srcs)
+        profile = srcs[0].profile.copy()
+        profile.update({
+            "height": mosaic.shape[1],
+            "width":  mosaic.shape[2],
+            "transform": out_trans,
+        })
+        with rasterio.open(raw_fp, "w", **profile) as dst:
+            dst.write(mosaic)
+        # cleanup tiles
+        for src, fp in zip(srcs, tile_files):
+            src.close()
+            os.remove(fp)
+    else:
+        print(f"ℹ️ Raw file for '{name}' exists; skipping chunk export.")
 
         # Reproject & align
         with rasterio.open(raw_fp) as src:
