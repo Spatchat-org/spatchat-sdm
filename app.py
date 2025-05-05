@@ -200,6 +200,9 @@ When the user requests an action, reply **only** with JSON selecting one tool:
    {"tool":"fetch",
     "layers":[<top‑level names>],
     "landcover":[<landcover classes>]}
+2. {"tool":"run_model"}
+3. {"tool":"download"}
+4. {"tool":"query", "query":"<your natural‑language question>"}
 
 After we run that function, we'll display its output and then prompt the user on next steps.
 If the user asks for statistical results, show them from "outputs/performance_metrics.csv" and "outputs/coefficients.csv".
