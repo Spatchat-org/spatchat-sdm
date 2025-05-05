@@ -60,30 +60,7 @@ grid_transform = from_bounds(
 print(f"📍 Loaded {len(df)} points → region: {min_lat-buffer},{min_lon-buffer} → {max_lat+buffer},{max_lon+buffer}")
 print(f"🗺  Grid: {x_size}×{y_size} @ {RES} m in EPSG:4326")
 
-# -----------------------------------------------------------------------------
-# Which layers + one-hot codes the UI set (via os.environ)
-# -----------------------------------------------------------------------------
-layers = os.environ.get('SELECTED_LAYERS','').split(',')
-raw    = os.environ.get('SELECTED_LANDCOVER_CLASSES','')
-labels = [c for c in raw.split(',') if c]
-# convert each snake_case label back to its integer code
-codes  = [ str(name_to_code[c]) for c in labels if c in name_to_code ]
 
-# -----------------------------------------------------------------------------
-# Earth Engine sources
-# -----------------------------------------------------------------------------
-sources = {
-    "elevation": ee.Image("USGS/SRTMGL1_003"),
-    "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
-    "aspect":    ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
-    "ndvi":      (ee.ImageCollection("MODIS/061/MCD13Q1")
-            .filterDate("2022-01-01", "2024-01-01")
-            .select("NDVI")
-            .mean()),
-    "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first(),
-}
-for i in range(1,20):
-    sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO").select(f"bio{str(i).zfill(2)}")
 
 # -----------------------------------------------------------------------------
 # Modis landcover code → snake_case label map
@@ -97,16 +74,33 @@ modis_landcover_map = {
     15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
 }
 # reverse mapping of label→code
-name_to_code = {v: k for k, v in modis_landcover_map.items()}
+name_to_code = {label: str(code) for code, label in modis_landcover_map.items()}
 
 # -----------------------------------------------------------------------------
-# Which layers + one-hot codes the UI set (via os.environ)
+# Which layers + one‑hot codes the UI set (via os.environ)
 # -----------------------------------------------------------------------------
-layers = os.environ.get('SELECTED_LAYERS','').split(',')
-raw    = os.environ.get('SELECTED_LANDCOVER_CLASSES','')
-labels = [c for c in raw.split(',') if c]
+layers = os.environ.get("SELECTED_LAYERS", "").split(",")
+raw    = os.environ.get("SELECTED_LANDCOVER_CLASSES", "")
+labels = [c for c in raw.split(",") if c]
 # convert each snake_case label back to its integer code
-codes  = [ str(name_to_code[c]) for c in labels if c in name_to_code ]
+codes  = [name_to_code[c] for c in labels if c in name_to_code]
+
+# -----------------------------------------------------------------------------
+# Earth Engine sources
+# -----------------------------------------------------------------------------
+sources = {
+    "elevation": ee.Image("USGS/SRTMGL1_003"),
+    "slope":     ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("slope"),
+    "aspect":    ee.Terrain.products(ee.Image("USGS/SRTMGL1_003")).select("aspect"),
+    # ← Here’s the only change: use the v061 MOD13Q1 collection
+    "ndvi": (ee.ImageCollection("MODIS/061/MOD13Q1")
+                 .filterDate("2022-01-01", "2024-01-01")
+                 .select("NDVI")
+                 .mean()),
+    "landcover": ee.ImageCollection("MODIS/061/MCD12Q1").select("LC_Type1").first(),
+}
+for i in range(1, 20):
+    sources[f"bio{i}"] = ee.Image("WORLDCLIM/V1/BIO").select(f"bio{str(i).zfill(2)}")
 
 # -----------------------------------------------------------------------------
 # Export scales (native) for each predictor
