@@ -163,13 +163,66 @@ def export_and_align(img: ee.Image, name: str):
 # -----------------------------------------------------------------------------
 # 1) Export each regular predictor
 # -----------------------------------------------------------------------------
+# Remove any empty entries
+layers = [l for l in layers if l.strip()]
+
 for name in layers:
-    if name == "landcover": 
+    if name == "landcover":
         continue
     if name not in sources:
         print(f"⚠️ Skipping unknown layer '{name}'")
         continue
-    export_and_align(sources[name], name)
+
+    raw_fp = f"predictor_rasters/raw/{name}.tif"
+    out_fp = f"predictor_rasters/wgs84/{name}.tif"
+    scale  = EXPORT_SCALES.get(name, RES)
+
+    try:
+        # Download only if missing
+        if not os.path.exists(raw_fp):
+            print(f"📥 Exporting '{name}' at {scale} m native…")
+            geemap.ee_export_image(
+                sources[name]
+                  .reproject(crs="EPSG:4326", scale=scale)
+                  .clip(region),
+                filename=raw_fp,
+                scale=scale,
+                region=region,
+                crs="EPSG:4326",
+                file_per_band=False,
+                timeout=600,
+            )
+        else:
+            print(f"ℹ️ Raw file for '{name}' exists; skipping download.")
+
+        # Reproject & align
+        with rasterio.open(raw_fp) as src:
+            arr = src.read(1)
+            dst = np.empty((y_size, x_size), dtype=arr.dtype)
+            reproject(
+                source=arr,
+                destination=dst,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform,
+                dst_crs=crs,
+                resampling=Resampling.nearest,
+            )
+            profile = src.profile.copy()
+            profile.update({
+                "crs":       crs,
+                "transform": transform,
+                "height":    y_size,
+                "width":     x_size,
+                "count":     1,
+            })
+            with rasterio.open(out_fp, "w", **profile) as dst_file:
+                dst_file.write(dst, 1)
+        print(f"🌐 Aligned → {out_fp}")
+
+    except Exception as e:
+        print(f"❌ Failed processing '{name}': {e}")
+        continue
 
 # -----------------------------------------------------------------------------
 # 2) One-hot encode landcover
