@@ -354,13 +354,13 @@ def run_fetch(sl, lc):
 
     #  c) Run and capture *both* stdout and stderr
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    # capture everything
+    logs = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     if proc.returncode != 0:
-        # combine stdout+stderr so you see your print() calls and EE logs
-        logs = proc.stdout.strip()
-        if proc.stderr:
-            logs += ("\n" + proc.stderr.strip())
         return create_map(), f"❌ Fetch failed:\n```\n{logs}\n```"
-    print("WGS84 rasters:", sorted(os.listdir("predictor_rasters/wgs84")))
+    else:
+        # show you the full export log on success
+        return create_map(), f"✅ Predictors fetched.\n\n```bash\n{logs}\n```"
 
     # d) Success
     return create_map(), "✅ Predictors fetched."
