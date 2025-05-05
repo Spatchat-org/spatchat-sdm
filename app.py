@@ -434,21 +434,10 @@ def run_query(query_text: str):
         suit_ctx
     ]))
 
-    # 2) Load all your .py scripts as system messages
-    code_messages = []
-    for path in sorted(glob.glob("scripts/*.py")):
-        with open(path, "r") as fh:
-            content = fh.read()
-        code_messages.append({
-            "role":    "system",
-            "content": f"### Begin {os.path.basename(path)}\n{content}\n### End {os.path.basename(path)}"
-        })
-
     # 3) Assemble the LLM prompt
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": "Data summary:\n" + context},
-        *code_messages,
         {"role": "user", "content": query_text}
     ]
 
