@@ -26,6 +26,25 @@ from dotenv import load_dotenv
 from rasterio.crs import CRS as RioCRS
 from rasterio.warp import transform as rio_transform
 
+PREDICTOR_CHOICES = [
+    *[f"bio{i}" for i in range(1, 20)],
+    "elevation",
+    "slope",
+    "aspect",
+    "ndvi",
+    "landcover",
+]
+VALID_LAYERS = set(PREDICTOR_CHOICES)
+
+# All available MODIS landcover classes
+LANDCOVER_CLASSES = {
+    "water", "evergreen_needleleaf_forest", "evergreen_broadleaf_forest",
+    "deciduous_needleleaf_forest", "deciduous_broadleaf_forest", "mixed_forest",
+    "closed_shrublands", "open_shrublands", "woody_savannas", "savannas",
+    "grasslands", "permanent_wetlands", "croplands", "urban_and_built_up",
+    "cropland_natural_vegetation_mosaic", "snow_and_ice", "barren_or_sparsely_vegetated"
+}
+
 # --- Pre-render colorbar → base64 ---
 fig, ax = plt.subplots(figsize=(4, 0.5))
 norm = Normalize(vmin=0, vmax=1)
@@ -254,42 +273,85 @@ def zip_results():
     return archive
 
 def run_fetch(sl, lc):
+    # 1) Build the list of requested predictors
     layers = list(sl)
     if lc:
         layers.append("landcover")
 
-    # If they asked for nothing, quick warning
+    # 2) Require at least one predictor
     if not layers:
-        return create_map(), "⚠️ Select at least one predictor."
+        return create_map(), "⚠️ Please select at least one predictor before fetching."
 
-    # Detect any layer names that look off: any non‑alphanumeric or too short?
-    bad = [l for l in layers if not re.match(r"^[A-Za-z0-9_]+$", l)]
-    if bad:
-        # Ask the LLM to help clarify
-        user_request = ", ".join(layers)
+    # 3) Validate top‑level predictors
+    bad_layers = [l for l in layers if l not in VALID_LAYERS]
+    if bad_layers:
+        # 3a) Try difflib suggestions
+        suggestions = []
+        for b in bad_layers:
+            match = difflib.get_close_matches(b, VALID_LAYERS, n=1, cutoff=0.6)
+            if match:
+                suggestions.append(f"Did you mean '{match[0]}' instead of '{b}'?")
+        if suggestions:
+            return create_map(), "⚠️ " + " ".join(suggestions)
+
+        # 3b) LLM fallback for top‑level names
         prompt = (
-            f"The user asked for predictors: {user_request}. "
-            f"I couldn't understand: {', '.join(bad)}. "
-            "Could you please restate which predictors they want?"
+            f"You requested these predictors: {', '.join(layers)}. "
+            f"I don't recognize: {', '.join(bad_layers)}. "
+            "Could you please clarify which predictors you want?"
         )
-        clarification = client.chat.completions.create(
+        clar = client.chat.completions.create(
             model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
             messages=[
-                {"role":"system","content":FALLBACK_PROMPT},
-                {"role":"user","content": prompt}
+                {"role": "system", "content": FALLBACK_PROMPT},
+                {"role": "user",   "content": prompt}
             ],
             temperature=0.7
         ).choices[0].message.content
-        return create_map(), clarification
+        return create_map(), clar
 
-    # Otherwise proceed as normal
-    os.environ["SELECTED_LAYERS"] = ",".join(layers)
-    os.environ["SELECTED_LANDCOVER_CLASSES"] = ""
+    # 4) Validate landcover subclasses
+    bad_codes = [c for c in lc if c not in LANDCOVER_CLASSES]
+    if bad_codes:
+        # 4a) difflib suggestions for codes
+        suggestions = []
+        for b in bad_codes:
+            match = difflib.get_close_matches(b, LANDCOVER_CLASSES, n=1, cutoff=0.6)
+            if match:
+                suggestions.append(
+                    f"Did you mean landcover class '{match[0]}' instead of '{b}'?"
+                )
+        if suggestions:
+            return create_map(), "⚠️ " + " ".join(suggestions)
+
+        # 4b) LLM fallback for landcover codes
+        prompt = (
+            f"You requested landcover classes: {', '.join(lc)}. "
+            f"I don't recognize: {', '.join(bad_codes)}. "
+            "Could you please clarify which landcover classes you want?"
+        )
+        clar = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=[
+                {"role": "system", "content": FALLBACK_PROMPT},
+                {"role": "user",   "content": prompt}
+            ],
+            temperature=0.7
+        ).choices[0].message.content
+        return create_map(), clar
+
+    # 5) All inputs valid → proceed with fetch
+    os.environ["SELECTED_LAYERS"] = ",".join(sl)
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
     proc = subprocess.run(
-        ["python","scripts/fetch_predictors.py"],
+        ["python", "scripts/fetch_predictors.py"],
         capture_output=True, text=True
     )
-    status = "✅ Predictors fetched." if proc.returncode==0 else f"❌ Fetch failed:\n{proc.stderr}"
+    status = (
+        "✅ Predictors fetched."
+        if proc.returncode == 0
+        else f"❌ Fetch failed:\n{proc.stderr}"
+    )
     return create_map(), status
 
 def run_model():
