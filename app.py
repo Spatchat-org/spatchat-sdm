@@ -470,7 +470,7 @@ def chat_step(file, user_msg, history, state):
             {"role":"user",     "content": user_msg},
             {"role":"assistant","content": txt}
         ])
-        return history, m_out, state, file
+        return history, m_out, state
         
     # 1) No CSV yet? delegate to fallback LLM  
     if not os.path.exists("inputs/presence_points.csv"):
