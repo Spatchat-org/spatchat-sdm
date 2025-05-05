@@ -88,42 +88,33 @@ clear_all()
 
 # --- Detection helpers ---
 def detect_coords(df, fuzz_threshold=80):
-    """
-    Try to auto‑detect latitude & longitude columns from a wide set of aliases.
-    Falls back to fuzzy‑matching “latitude”/“longitude” and numeric heuristics.
-    """
     cols = list(df.columns)
-    low = [c.lower().strip() for c in cols]
+    low  = [c.lower().strip() for c in cols]
 
-    # 1) Exact alias lists
     LAT_ALIASES = {
-        'lat', 'latitude', 'y', 'y_coordinate', 'decilatitude', 'dec_latitude', 'dec lat',
-        'decimallatitude', 'decimal latitude'
+        'lat','latitude','y','y_coordinate','decilatitude','dec_latitude','dec lat',
+        'decimallatitude','decimal latitude'
     }
     LON_ALIASES = {
-        'lon', 'long', 'longitude', 'x', 'x_coordinate','decilongitude', 'dec_longitude',
-        'dec longitude', 'decimallongitude', 'decimal longitude'
+        'lon','long','longitude','x','x_coordinate','decilongitude','dec_longitude',
+        'dec longitude','decimallongitude','decimal longitude'
     }
-
-    # Try exact alias match first
-    lat_idx = next((i for i,name in enumerate(low) if name in LAT_ALIASES), None)
-    lon_idx = next((i for i,name in enumerate(low) if name in LON_ALIASES), None)
+    # 1) Exact match
+    lat_idx = next((i for i,n in enumerate(low) if n in LAT_ALIASES), None)
+    lon_idx = next((i for i,n in enumerate(low) if n in LON_ALIASES), None)
     if lat_idx is not None and lon_idx is not None:
         return cols[lat_idx], cols[lon_idx]
-
-    # 2) Fuzzy match “latitude” / “longitude”
+    # 2) Fuzzy match
     lat_fz = difflib.get_close_matches("latitude", low, n=1, cutoff=fuzz_threshold/100)
     lon_fz = difflib.get_close_matches("longitude", low, n=1, cutoff=fuzz_threshold/100)
     if lat_fz and lon_fz:
         return cols[low.index(lat_fz[0])], cols[low.index(lon_fz[0])]
-
-    # 3) Numeric heuristics (fall back)
+    # 3) Numeric heuristics
     numerics = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
     lat_opts = [c for c in numerics if df[c].between(-90, 90).mean() > 0.98]
     lon_opts = [c for c in numerics if df[c].between(-180, 180).mean() > 0.98]
     if len(lat_opts) == 1 and len(lon_opts) == 1:
         return lat_opts[0], lon_opts[0]
-
     # 4) Nothing found
     return None, None
 
@@ -478,10 +469,16 @@ def on_upload(f, history, state):
     history2 = history.copy()
     clear_all()
     if f and hasattr(f, "name"):
+        # 1. copy original CSV
         shutil.copy(f.name, "inputs/presence_points.csv")
+        # 2. load & detect whatever the user called their coords
         df = pd.read_csv("inputs/presence_points.csv")
         lat, lon = detect_coords(df)
         if lat and lon:
+            # 3. rename to the exact column names fetch_predictors expects
+            df = df.rename(columns={lat: "latitude", lon: "longitude"})
+            df.to_csv("inputs/presence_points.csv", index=False)
+
             history2.append({"role":"assistant","content":(
                 "✅ Sweet! I found your `latitude` and `longitude` columns.\n"
                 "You can now pick from these predictors:\n"
