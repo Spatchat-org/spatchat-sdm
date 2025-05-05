@@ -418,7 +418,7 @@ def run_model():
     return create_map(), "✅ Model ran successfully! Results are ready below.", perf_df, coef_df
     
 def chat_step(file, user_msg, history, state):
-    # 0) If no CSV yet, fallback to conversational LLM
+    # 0a) If no CSV yet, fallback to conversational LLM
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [
             {"role":"system","content":FALLBACK_PROMPT},
@@ -431,7 +431,47 @@ def chat_step(file, user_msg, history, state):
         ).choices[0].message.content
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
-
+    
+    # 0b) Layer‑only shortcut: catch “fetch slope” / “urban” / synonyms immediately
+    import re
+    # tokenize & lowercase
+    tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
+    # map our user‐friendly synonyms to the exact MODIS codes:
+    syn = {
+      "urban":           "urban_and_built_up",
+      "built‑up":        "urban_and_built_up",
+      "artificial":      "urban_and_built_up",
+      "cropland":        "croplands",
+      "agriculture":     "croplands",
+      "forest":          "mixed_forest",
+      "ice":             "snow_and_ice",
+      "snow":            "snow_and_ice",
+      "wetland":         "permanent_wetlands",
+      "marsh":           "permanent_wetlands",
+      "swamp":           "permanent_wetlands",
+      "water":           "water",
+      "lake":            "water",
+      "river":           "water",
+      "grass":           "grasslands",
+      "grassland":       "grasslands"
+    }
+    # apply synonym mapping
+    tokens = [syn.get(t, t) for t in tokens]
+    # strip out filler words (and the word “fetch” itself)
+    core = [t for t in tokens if t not in {"and","with","plus","&","fetch"}]
+    # if everything in core is a valid top‑level or landcover code:
+    if core and all((t in VALID_LAYERS) or (t in LANDCOVER_CLASSES) for t in core):
+        top = [t for t in core if t in VALID_LAYERS and t!="landcover"]
+        lc  = [t for t in core if t in LANDCOVER_CLASSES]
+        if lc:
+            top.append("landcover")
+        m_out, status = run_fetch(top, lc)
+        history.extend([
+          {"role":"user",     "content": user_msg},
+          {"role":"assistant","content": f"{status}\n\n🎉Nice work! Say “run model” next."}
+        ])
+        return history, m_out, state
+        
     # 1) Handle reset
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
@@ -497,7 +537,6 @@ def chat_step(file, user_msg, history, state):
 
     history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":assistant_txt}])
     return history, m_out, state
-
 
 # --- Upload callback ---
 def on_upload(f, history, state):
