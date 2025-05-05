@@ -405,11 +405,9 @@ def chat_step(file, user_msg, history, state):
     # 2) Reset?
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
-        return (
-           [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}],
-           create_map(),
-           state,
-        )
+    # just reset history + map + state
+    history = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
+    return history, create_map(), state
         
     # 3) Otherwise go through the JSON‐tool router…
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
