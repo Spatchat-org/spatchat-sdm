@@ -77,11 +77,11 @@ def detect_coords(df, fuzz_threshold=80):
 
     # 1) Exact alias lists
     LAT_ALIASES = {
-        'lat', 'latitude', 'y', 'decilatitude', 'dec_latitude', 'dec lat',
+        'lat', 'latitude', 'y', 'y_coordinate', 'decilatitude', 'dec_latitude', 'dec lat',
         'decimallatitude', 'decimal latitude'
     }
     LON_ALIASES = {
-        'lon', 'long', 'longitude', 'x', 'decilongitude', 'dec_longitude',
+        'lon', 'long', 'longitude', 'x', 'x_coordinate','decilongitude', 'dec_longitude',
         'dec longitude', 'decimallongitude', 'decimal longitude'
     }
 
