@@ -409,7 +409,6 @@ def chat_step(file, user_msg, history, state):
            [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}],
            create_map(),
            state,
-           gr.update(value=None)        # clear the upload box
         )
         
     # 3) Otherwise go through the JSON‐tool router…
