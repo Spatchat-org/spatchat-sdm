@@ -168,6 +168,7 @@ Data Ingestion & Coordinate Handling
 - Users upload a CSV of presence points.
 - Column names are auto‑detected (aliases, fuzzy match, numeric heuristics) and renamed to latitude/longitude.
 - All coordinates are reprojected to EPSG:4326 if needed.
+- If the user does not yet have occurrence points, recommend obtaining them from public repositories such as GBIF (https://www.gbif.org), iNaturalist (https://www.inaturalist.org), or OBIS (https://obis.org).
 
 Predictor Selection & Fetching
 - Available layers:
