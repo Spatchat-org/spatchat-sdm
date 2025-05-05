@@ -7,6 +7,7 @@ import subprocess
 import zipfile
 import re
 import difflib
+import sys
 
 import gradio as gr
 import geemap.foliumap as foliumap
