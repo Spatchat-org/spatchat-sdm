@@ -533,7 +533,7 @@ def chat_step(file, user_msg, history, state):
             {"role":"user","content":user_msg}
         ]
         assistant_txt = client.chat.completions.create(
-            model=MODEL,
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
             messages=msgs,
             temperature=0.7
         ).choices[0].message.content
