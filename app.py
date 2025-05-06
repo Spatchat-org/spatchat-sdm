@@ -518,19 +518,22 @@ def chat_step(file, user_msg, history, state):
             "**Predictor Coefficients**\n"
             f"{coef_table or '*none*'}"
         )
-        # ── DEBUG ECHO ───────────────────────────────────────────────────────────
-        # As a quick check, spit the raw summary back in the chat so you can see it.
-        history.append({"role":"assistant", "content": "🛠️ **DEBUG SUMMARY:**\n" + summary})
-        return history, create_map(), state
         
-        # 5) Let the LLM answer any free‐form question using that context
+        # 5) Free‑form explanation: feed a direct explain prompt + the metrics
+        explain_sys = {
+            "role":"system",
+            "content":(
+                "You are SpatChat, an expert in species distribution modeling. "
+                "Use ALL of the context below to answer the user's question as clearly as possible."
+            )
+        }
         msgs = [
-            {"role":"system","content":FALLBACK_PROMPT},
+            explain_sys,
             {"role":"system","content":"Data summary:\n" + summary},
-            {"role":"user",  "content":user_msg}
+            {"role":"user","content":user_msg}
         ]
         assistant_txt = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            model=MODEL,
             messages=msgs,
             temperature=0.7
         ).choices[0].message.content
