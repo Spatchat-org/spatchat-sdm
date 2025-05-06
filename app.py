@@ -440,18 +440,8 @@ def chat_step(file, user_msg, history, state):
         call = json.loads(resp)
         tool = call["tool"]
     except Exception:
-        # If even that fails, ask the fallback prompt once
-        fb = [
-            {"role":"system","content":FALLBACK_PROMPT},
-            {"role":"user","content":user_msg}
-        ]
-        reply = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=fb,
-            temperature=0.7
-        ).choices[0].message.content
-        history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
-        return history, create_map(), state
+        # Couldn't parse JSON → treat as a free‑form query
+        tool = None
 
     # 4) Execute tools
     if tool == "fetch":
