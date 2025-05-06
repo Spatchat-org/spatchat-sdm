@@ -519,7 +519,11 @@ def chat_step(file, user_msg, history, state):
             "**Predictor Coefficients**\n"
             f"{coef_table or '*none*'}"
         )
-
+        # ── DEBUG ECHO ───────────────────────────────────────────────────────────
+        # As a quick check, spit the raw summary back in the chat so you can see it.
+        history.append({"role":"assistant", "content": "🛠️ **DEBUG SUMMARY:**\n" + summary})
+        return history, create_map(), state
+        
         # 5) Let the LLM answer any free‐form question using that context
         msgs = [
             {"role":"system","content":FALLBACK_PROMPT},
