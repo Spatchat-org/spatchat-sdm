@@ -383,6 +383,15 @@ def chat_step(file, user_msg, history, state):
         return history, m_out, state
     
     # 0c) Layer‑only shortcut: catch “fetch slope” / “urban” / synonyms immediately
+    
+    # first normalize “bio 1” → “bio1”
+    user_msg = re.sub(
+        r"\bbio\s+([1-9]|1[0-9])\b",
+        lambda m: f"bio{m.group(1)}",
+        user_msg,
+        flags=re.IGNORECASE
+    )
+    
     # tokenize & lowercase
     tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
     # map our user‐friendly synonyms to the exact MODIS codes:
