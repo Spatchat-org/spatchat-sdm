@@ -153,9 +153,9 @@ def resolve_crs(raw):
 # --- LLM prompts ---
 SYSTEM_PROMPT = """
 You are SpatChat, a friendly species distribution modeling assistant.
-When the user asks to fetch environmental layers (using verbs like fetch, get, grab, "I want"), respond with exactly a JSON object:
+When the user asks to fetch environmental layers (using verbs like fetch, download, get, grab, "I want", etc.), respond with exactly a JSON object:
 {"tool":"fetch","layers":[<layer names>],"landcover":[<landcover classes>]}
-When the user asks to run the model (e.g., "run model"), respond with exactly:
+When the user asks to run the model (e.g., "run model", "run species distribution model", "run SDM", etc.), respond with exactly:
 {"tool":"run_model"}
 If the user's request does not match either of these intents, reply naturally without JSON.
 
