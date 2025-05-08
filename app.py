@@ -161,10 +161,10 @@ Whenever the user wants to perform an action, reply _only_ with a JSON object se
 All *other* inputs are *not* action.
 Available layers or predictors to fetch: bio1–bio19, elevation, slope, aspect, ndvi, landcover
  **Example**  
- User: fetch urban, bio1  
+ User: I want ndvi, urban, bio1  
  Assistant:  
  ```json
- {"tool":"fetch","layers":["bio1"],"landcover":["urban_and_built_up"]}
+ {"tool":"fetch","layers":["ndvi"], "layers":["bio1"],"landcover":["urban_and_built_up"]}
  ```
 Try to keep your answers short—no more than two sentences—while still being helpful.
 If the question is vague, ask for clarification.
@@ -341,6 +341,14 @@ def run_model():
     zip_results()
     return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
     
+import os
+import re
+import json
+import pandas as pd
+from your_module import client, run_fetch, run_model, clear_all, create_map, zip_results  # adjust imports as needed
+
+# FALLBACK_PROMPT and SYSTEM_PROMPT assumed defined elsewhere in this module
+
 def chat_step(file, user_msg, history, state):
     # 0a) If no CSV yet, fallback to conversational LLM
     if not os.path.exists("inputs/presence_points.csv"):
@@ -356,13 +364,11 @@ def chat_step(file, user_msg, history, state):
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
     
-    # 0b) “run model” shortcut (also catch “model” or “run” alone)    
+    # 0b) “run model” shortcut (also catch “model” or “run” alone)
     if re.fullmatch(r"\s*(?:run\s+)?model\s*$", user_msg, re.I):
-
-        # invoke your run_model() utility directly
+        # invoke model directly
         m_out, status, perf_df, coef_df = run_model()
         if perf_df is not None:
-            # build the markdown tables
             perf = pd.read_csv("outputs/performance_metrics.csv")
             first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
             perf_md = (
@@ -374,69 +380,22 @@ def chat_step(file, user_msg, history, state):
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
             status += "\n\n**Model Performance:**\n\n" + perf_md
             status += "\n\n**Predictor Coefficients:**\n\n" + coef.to_markdown(index=False)
-
         assistant_txt = status
         history.extend([
-            {"role":"user",   "content": user_msg},
-            {"role":"assistant","content": assistant_txt}
+            {"role":"user","content":user_msg},
+            {"role":"assistant","content":assistant_txt}
         ])
         return history, m_out, state
-    
-    # 0c) Layer‑only shortcut: catch “fetch slope” / “urban” / synonyms immediately
-    
-    # first normalize “bio 1” → “bio1”
-    user_msg = re.sub(
-        r"\bbio\s+([1-9]|1[0-9])\b",
-        lambda m: f"bio{m.group(1)}",
-        user_msg,
-        flags=re.IGNORECASE
-    )
-    
-    # tokenize & lowercase
-    tokens = [t.strip().lower() for t in re.split(r"[,\s]+", user_msg) if t.strip()]
-    # map our user‐friendly synonyms to the exact MODIS codes:
-    syn = {
-      "urban":           "urban_and_built_up",
-      "built‑up":        "urban_and_built_up",
-      "artificial":      "urban_and_built_up",
-      "cropland":        "croplands",
-      "agriculture":     "croplands",
-      "forest":          "mixed_forest",
-      "ice":             "snow_and_ice",
-      "snow":            "snow_and_ice",
-      "wetland":         "permanent_wetlands",
-      "marsh":           "permanent_wetlands",
-      "swamp":           "permanent_wetlands",
-      "water":           "water",
-      "lake":            "water",
-      "river":           "water",
-      "grass":           "grasslands",
-      "grassland":       "grasslands"
-    }
-    # apply synonym mapping
-    tokens = [syn.get(t, t) for t in tokens]
-    # strip out filler words (and the word “fetch” itself)
-    core = [t for t in tokens if t not in {"and","with","plus","&","fetch"}]
-    # if everything in core is a valid top‑level or landcover code:
-    if core and all((t in VALID_LAYERS) or (t in LANDCOVER_CLASSES) for t in core):
-        top = [t for t in core if t in VALID_LAYERS and t!="landcover"]
-        lc  = [t for t in core if t in LANDCOVER_CLASSES]
-        if lc:
-            top.append("landcover")
-        m_out, status = run_fetch(top, lc)
-        history.extend([
-          {"role":"user",     "content": user_msg},
-          {"role":"assistant","content": f"{status}\n\n🎉Nice work! Say “run model” next or grab more layers."}
-        ])
-        return history, m_out, state
-    
+
+    # -- Removed manual layer-only shortcut to rely on LLM for parsing fetch commands --
+
     # 1) Handle reset
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
         new_hist = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
         return new_hist, create_map(), state
 
-    # 2) Build the JSON‐tool prompt
+    # 2) Build the JSON-tool prompt
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
@@ -447,9 +406,8 @@ def chat_step(file, user_msg, history, state):
     # 3) Parse and dispatch
     try:
         call = json.loads(resp)
-        tool = call["tool"]
+        tool = call.get("tool")
     except Exception:
-        # Couldn't parse JSON → treat as a free‑form query
         tool = None
 
     # 4) Execute tools
@@ -461,14 +419,11 @@ def chat_step(file, user_msg, history, state):
         if perf_df is None:
             assistant_txt = status
         else:
-            # build the markdown tables
             perf = pd.read_csv("outputs/performance_metrics.csv")
             first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
             perf_md = (
-                "**Model Performance (1 of 2):**\n\n" +
-                first.to_markdown(index=False) + "\n\n" +
-                "**Model Performance (2 of 2):**\n\n" +
-                second.to_markdown(index=False)
+                "**Model Performance (1 of 2):**\n\n" + first.to_markdown(index=False)
+                + "\n\n**Model Performance (2 of 2):**\n\n" + second.to_markdown(index=False)
             )
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
             coef_md = coef.to_markdown(index=False)
@@ -479,37 +434,27 @@ def chat_step(file, user_msg, history, state):
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
         assistant_txt = "✅ ZIP is downloading…"
-
     else:
-        # --- build a complete data summary (points, layers, metrics, coeffs) ---
-        # 1) Presence points
+        # summary block remains unchanged
         try:
             n_pts = len(pd.read_csv("inputs/presence_points.csv"))
         except:
             n_pts = 0
-
-        # 2) Layers fetched
         rasdir = "predictor_rasters/wgs84"
         if os.path.isdir(rasdir):
             fetched = sorted(os.path.splitext(f)[0] for f in os.listdir(rasdir) if f.endswith(".tif"))
         else:
             fetched = []
-
-        # 3) Performance metrics
         perf_table = ""
         perf_fp = "outputs/performance_metrics.csv"
         if os.path.exists(perf_fp):
             perf = pd.read_csv(perf_fp)
             perf_table = perf.to_markdown(index=False)
-
-        # 4) Coefficients
         coef_table = ""
         coef_fp = "outputs/coefficients.csv"
         if os.path.exists(coef_fp):
             coef = pd.read_csv(coef_fp).dropna(axis=1, how='all')
             coef_table = coef.to_markdown(index=False)
-
-        # assemble data‐summary text
         summary = (
             f"- Presence points: {n_pts}\n"
             f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
@@ -518,8 +463,6 @@ def chat_step(file, user_msg, history, state):
             "**Predictor Coefficients**\n"
             f"{coef_table or '*none*'}"
         )
-        
-        # 5) Free‑form explanation: feed a direct explain prompt + the metrics
         explain_sys = {
             "role":"system",
             "content":(
@@ -527,11 +470,7 @@ def chat_step(file, user_msg, history, state):
                 "Use ALL of the context below to answer the user's question as clearly as possible."
             )
         }
-        msgs = [
-            explain_sys,
-            {"role":"system","content":"Data summary:\n" + summary},
-            {"role":"user","content":user_msg}
-        ]
+        msgs = [explain_sys, {"role":"system","content":"Data summary:\n" + summary}, {"role":"user","content":user_msg}]
         assistant_txt = client.chat.completions.create(
             model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
             messages=msgs,
@@ -545,7 +484,6 @@ def chat_step(file, user_msg, history, state):
         {"role":"assistant","content":assistant_txt}
     ])
     return history, m_out, state
-
 
 # --- Upload callback ---
 def on_upload(f, history, state):
