@@ -341,14 +341,6 @@ def run_model():
     zip_results()
     return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
     
-import os
-import re
-import json
-import pandas as pd
-from your_module import client, run_fetch, run_model, clear_all, create_map, zip_results  # adjust imports as needed
-
-# FALLBACK_PROMPT and SYSTEM_PROMPT assumed defined elsewhere in this module
-
 def chat_step(file, user_msg, history, state):
     # 0a) If no CSV yet, fallback to conversational LLM
     if not os.path.exists("inputs/presence_points.csv"):
@@ -386,8 +378,6 @@ def chat_step(file, user_msg, history, state):
             {"role":"assistant","content":assistant_txt}
         ])
         return history, m_out, state
-
-    # -- Removed manual layer-only shortcut to rely on LLM for parsing fetch commands --
 
     # 1) Handle reset
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
