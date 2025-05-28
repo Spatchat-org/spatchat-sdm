@@ -590,7 +590,7 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             chat = gr.Chatbot(value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}], type="messages", label="💬 Chat", height=400)
             user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
-            file_input = gr.File(label="📄 Upload Presence CSV", type="filepath")
+            file_input = gr.File(label="📄 Upload Presence CSV", type="filepath", file_types=[".csv"])
             lat_dropdown = gr.Dropdown(choices=[], label="Latitude column", visible=False)
             lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
             crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
