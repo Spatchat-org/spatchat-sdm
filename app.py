@@ -637,4 +637,7 @@ with gr.Blocks(title="SpatChat: SDM") as demo:
     user_in.submit(lambda: "", None, user_in)
 
 # Queue with low concurrency to avoid bursty duplicates; disable SSR to reduce duplicate backend mounts
-demo.queue(concurrency_count=1, max_size=32).launch(ssr_mode=False)
+try:
+    demo.queue(max_size=32).launch(ssr_mode=False)
+except TypeError:
+    demo.launch(ssr_mode=False)
