@@ -34,9 +34,6 @@ try:
 except Exception:
     HF_AVAILABLE = False
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Config & Globals
-# ──────────────────────────────────────────────────────────────────────────────
 print("Starting SpatChat SDM (Together → optional HF Serverless fallback)")
 
 load_dotenv()
@@ -44,7 +41,7 @@ TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY", "")
 HF_TOKEN         = os.getenv("HF_TOKEN", "")  # optional fallback
 HF_FALLBACK_MODEL = os.getenv("HF_FALLBACK_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 
-# Together client (import lazy to avoid import error if not installed)
+# Together client (lazy import)
 Together = None
 if TOGETHER_API_KEY:
     try:
@@ -70,7 +67,6 @@ LANDCOVER_CLASSES = {
     )
 }
 
-# Layer documentation (used for “what is bio5?”, etc.)
 LAYER_DOCS = {
     "bio": "WorldClim v1 Bioclimatic variables (WORLDCLIM/V1/BIO, ~1 km). bio1=Annual Mean Temp, bio12=Annual Precip, etc.",
     "elevation": "USGS SRTM GL1 v003 elevation (USGS/SRTMGL1_003, 30 m).",
@@ -80,7 +76,7 @@ LAYER_DOCS = {
     "landcover": "MODIS IGBP Land Cover Type 1 (MODIS/061/MCD12Q1, 500 m).",
 }
 
-# Pre-render colorbar image (base64)
+# Pre-render colorbar → base64
 fig, ax = plt.subplots(figsize=(4, 0.5))
 norm = Normalize(vmin=0, vmax=1)
 plt.colorbar(ScalarMappable(norm=norm, cmap="viridis"), cax=ax, orientation="horizontal").set_ticks([])
@@ -92,7 +88,7 @@ plt.close(fig)
 _buf.seek(0)
 COLORBAR_BASE64 = base64.b64encode(_buf.read()).decode()
 
-# Auth Earth Engine via service account (expects JSON in env)
+# Earth Engine auth
 svc_json = os.environ.get("GEE_SERVICE_ACCOUNT", "")
 if not svc_json:
     print("⚠️ GEE_SERVICE_ACCOUNT is not set. Earth Engine calls will fail.")
@@ -123,7 +119,6 @@ def create_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
 
-    # Add presence points if available
     ppath = "inputs/presence_points.csv"
     if os.path.exists(ppath):
         try:
@@ -140,7 +135,7 @@ def create_map():
         except Exception as e:
             print("Warn reading CSV for map:", e)
 
-    # Raster overlays (aligned WGS84)
+    # predictor overlays
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
         for fn in sorted(os.listdir(rasdir)):
@@ -156,13 +151,13 @@ def create_map():
                     folium.raster_layers.ImageOverlay(
                         rgba,
                         bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
-                        opacity=1.0,  # predictors fully opaque
+                        opacity=1.0,  # fully opaque
                         name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
                     ).add_to(m)
             except Exception as e:
                 print(f"Overlay warn for {fn}:", e)
 
-    # Suitability (opaque)
+    # suitability (opaque)
     sf = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(sf):
         try:
@@ -173,7 +168,7 @@ def create_map():
             rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
             folium.raster_layers.ImageOverlay(
                 rgba, bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
-                opacity=1.0,  # opaque as requested
+                opacity=1.0,
                 name="🎯 Suitability"
             ).add_to(m)
         except Exception as e:
@@ -233,7 +228,7 @@ def resolve_crs(raw: str) -> int:
         zone, hemi = int(m.group(1)), m.group(2).upper()
         return (32600 if hemi == 'N' else 32700) + zone
 
-    # As last resort ask LLM to parse; if unavailable, default 4326
+    # LLM parse (optional)
     if Together:
         try:
             resp = Together.chat.completions.create(
@@ -261,7 +256,7 @@ Schemas:
 {"tool":"fetch","layers":["bio1","ndvi",...],"landcover":["water","urban_and_built_up",...]}
 {"tool":"run_model"}
 {"tool":"explain_stats"}
-{"tool":"download"}   // provide ZIP of results
+{"tool":"download"}
 
 Rules:
 - Map natural phrasings like "download", "get", "grab", "fetch", "add", "i want" to {"tool":"fetch",...}
@@ -272,34 +267,11 @@ Rules:
 - If the user asks to "explain/interpret/understand the stats, numbers, results, metrics",
   return {"tool":"explain_stats"}.
 - Otherwise, reply with a short helpful sentence (not JSON).
-
-Examples:
-User: can you help me download ndvi?
-Assistant: {"tool":"fetch","layers":["ndvi"],"landcover":[]}
-
-User: i want bio1, ndvi, elevation
-Assistant: {"tool":"fetch","layers":["bio1","ndvi","elevation"],"landcover":[]}
-
-User: add landcover water and urban_and_built_up
-Assistant: {"tool":"fetch","layers":[],"landcover":["water","urban_and_built_up"]}
-
-User: run model
-Assistant: {"tool":"run_model"}
-
-User: explain those stats
-Assistant: {"tool":"explain_stats"}
-
-User: get me a zip
-Assistant: {"tool":"download"}
 """.strip()
 
 FALLBACK_PROMPT = "You are SpatChat (SDM). Be brief and helpful."
 
 def call_llm(messages: List[dict]) -> str:
-    """
-    Returns assistant text. Tries Together first; on failure uses HF Serverless if available.
-    """
-    # Try Together
     if Together:
         try:
             out = Together.chat.completions.create(
@@ -309,32 +281,23 @@ def call_llm(messages: List[dict]) -> str:
             ).choices[0].message.content
             return out
         except Exception as e:
-            err = str(e)
-            print("Together error:", err)
+            print("Together error:", e)
 
-    # HF fallback (only if token & lib available)
     if HF_AVAILABLE and HF_TOKEN:
         try:
             client = InferenceClient(model=HF_FALLBACK_MODEL, token=HF_TOKEN)
-            # Simple chat formatting for text generation models
             prompt = ""
             for m in messages:
-                role = m.get("role", "user").upper()
-                prompt += f"{role}: {m.get('content','')}\n"
+                prompt += f"{m.get('role','user').upper()}: {m.get('content','')}\n"
             prompt += "ASSISTANT: "
             out = client.text_generation(prompt, max_new_tokens=256, temperature=0.2, do_sample=False)
             return out
         except Exception as e:
             print("HF fallback error:", e)
 
-    # Last resort: very short apology
     return "(LLM unavailable) If you want to fetch layers, say e.g. 'I want bio1, ndvi'."
 
 def llm_route(user_msg: str, history: List[dict]) -> dict:
-    """
-    Returns dict with keys: tool, layers, landcover
-    or {"tool":"text","text":"..."} for non-tool replies.
-    """
     messages = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     raw = call_llm(messages)
     try:
@@ -364,7 +327,6 @@ def maybe_answer_layer_info(user_msg: str) -> str | None:
     m = LAYER_QUESTION_RE.search(user_msg or "")
     if not m:
         return None
-    # get the layer token
     token = re.search(r"(bio\d{1,2}|ndvi|elevation|slope|aspect|landcover)", user_msg, re.I)
     if not token:
         return None
@@ -374,7 +336,7 @@ def maybe_answer_layer_info(user_msg: str) -> str | None:
     return f"**{key}** — {LAYER_DOCS.get(key, 'No description available.')}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Actions: fetch layers, run model, explain stats
+# Actions
 # ──────────────────────────────────────────────────────────────────────────────
 def run_fetch(sl: List[str], lc: List[str]) -> Tuple[str, str]:
     layers = [l.strip().lower() for l in sl or [] if l and l.strip()]
@@ -401,7 +363,6 @@ def run_fetch(sl: List[str], lc: List[str]) -> Tuple[str, str]:
             if match: sug.append(f"Did you mean landcover '{match[0]}' instead of '{b}'?")
         return create_map(), "⚠️ " + (" ".join(sug) if sug else f"Unknown landcover: {', '.join(bad_codes)}.")
 
-    # Hand off to script (env passthrough)
     os.environ["SELECTED_LAYERS"] = ",".join([l for l in layers if l != "landcover"] + (["landcover"] if "landcover" in layers else []))
     os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(landc)
 
@@ -411,13 +372,6 @@ def run_fetch(sl: List[str], lc: List[str]) -> Tuple[str, str]:
     if proc.returncode != 0:
         return create_map(), f"❌ Fetch failed:\n```\n{logs}\n```"
     return create_map(), f"✅ Predictors fetched.\n\n```bash\n{logs}\n```"
-
-def run_model():
-    proc = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return create_map(), f"❌ Model run failed:\n```\n{proc.stderr}\n```"
-    zip_results()
-    return create_map(), "✅ Model trained. Download results below (ZIP)."
 
 def explain_latest_stats() -> str:
     perf_fp = "outputs/performance_metrics.csv"
@@ -431,7 +385,7 @@ def explain_latest_stats() -> str:
             have_any = True
             out.append("\n**Performance metrics**")
             out.append(perf.to_markdown(index=False))
-            # Tiny highlight if common columns exist
+            # helpful highlights if present
             for col in ("AUC", "Accuracy", "F1", "Precision", "Recall"):
                 if col in perf.columns:
                     try:
@@ -446,18 +400,30 @@ def explain_latest_stats() -> str:
         try:
             coef = pd.read_csv(coef_fp).dropna(axis=1, how='all')
             have_any = True
-            out.append("\n**Top coefficients (by absolute value)**")
-            if {"term","coef"}.issubset({c.lower() for c in coef.columns}):
-                # Different scripts may name columns differently; just show table
-                out.append(coef.to_markdown(index=False))
-            else:
-                out.append(coef.to_markdown(index=False))
+            out.append("\n**Coefficients**")
+            out.append(coef.to_markdown(index=False))
         except Exception as e:
             out.append(f"(Couldn't read coefficients: {e})")
 
     if not have_any:
         return "I couldn't find any saved results yet. Try **run model**, then ask me to explain the stats."
     return "\n".join(out)
+
+def run_model() -> Tuple[str, str]:
+    """
+    Train model, then return map + a rich chat message that includes the stats summary.
+    """
+    proc = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return create_map(), f"❌ Model run failed:\n```\n{proc.stderr}\n```"
+
+    # Package results
+    zip_results()
+
+    # Compose stats into the success message
+    stats_md = explain_latest_stats()
+    msg = "✅ Model trained. Download results below (ZIP).\n\n" + stats_md + "\n\n_Tip: you can also type **\"explain those stats\"** any time to reprint this summary._"
+    return create_map(), msg
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Chat loop
@@ -479,13 +445,12 @@ LONG_HELP = (
 )
 
 def chat_step(file, user_msg, history, state):
-    # If no CSV yet → brief guidance + no LLM
     if not os.path.exists("inputs/presence_points.csv"):
         reply = "Please upload your presence CSV to begin."
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":reply}])
         return history, create_map(), state
 
-    # Local intercepts
+    # Local intercepts first
     ans = maybe_answer_layer_info(user_msg)
     if ans:
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":ans}])
@@ -506,7 +471,7 @@ def chat_step(file, user_msg, history, state):
 
     elif tool == "run_model":
         m_out, status = run_model()
-        assistant_txt = status
+        assistant_txt = status  # includes stats summary now
 
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
@@ -516,7 +481,6 @@ def chat_step(file, user_msg, history, state):
         m_out, assistant_txt = create_map(), explain_latest_stats()
 
     elif tool == "text":
-        # Non-tool reply from router → show its text (short)
         m_out, assistant_txt = create_map(), call.get("text", "I'm here to help!")
 
     else:
