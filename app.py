@@ -726,7 +726,7 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
 
     # Serialize execution to avoid concurrent LLM calls from UI events
-    demo.queue(concurrency_count=1, max_size=16)
+    demo.queue(max_size=16)
 
     file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
     confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
