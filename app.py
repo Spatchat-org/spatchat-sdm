@@ -8,6 +8,9 @@ import zipfile
 import re
 import difflib
 import sys
+import time
+import random
+import threading
 
 import gradio as gr
 import geemap.foliumap as foliumap
@@ -22,12 +25,16 @@ from matplotlib import pyplot as plt, colormaps
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from folium import Element
-from together import Together
 from dotenv import load_dotenv
 from rasterio.crs import CRS as RioCRS
 from rasterio.warp import transform as rio_transform
 
-# --- Which top‑level predictors we support (all lower‑case) ---
+# LLM providers
+from huggingface_hub import InferenceClient
+from together import Together
+from together.error import RateLimitError, ServiceUnavailableError
+
+# --- Which top-level predictors we support (all lower-case) ---
 PREDICTOR_CHOICES = (
     [f"bio{i}" for i in range(1, 20)]
     + ["elevation", "slope", "aspect", "ndvi", "landcover"]
@@ -59,13 +66,142 @@ buf.seek(0)
 COLORBAR_BASE64 = base64.b64encode(buf.read()).decode()
 
 # --- Authenticate Earth Engine ---
+load_dotenv()
 svc = json.loads(os.environ.get("GEE_SERVICE_ACCOUNT", "{}"))
 creds = ee.ServiceAccountCredentials(svc.get("client_email"), key_data=json.dumps(svc))
 ee.Initialize(creds)
 
-# --- LLM client ---
-load_dotenv()
-client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
+# ──────────────────────────────────────────────────────────────
+# LLM: HF primary, Together fallback with pacing for 0.6 QPM
+# ──────────────────────────────────────────────────────────────
+
+HF_MODEL_DEFAULT = "meta-llama/Meta-Llama-3.1-8B-Instruct"  # good, lightweight default
+TOGETHER_MODEL_DEFAULT = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+
+class _SpacedCallLimiter:
+    """Ensure at least `min_interval_seconds` between calls (per process)."""
+    def __init__(self, min_interval_seconds: float):
+        self.min_interval = float(min_interval_seconds)
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self._last = time.monotonic()
+
+class UnifiedLLM:
+    """
+    Primary: Hugging Face (Serverless or your Endpoint via HF_ENDPOINT_URL)
+    Fallback: Together.ai (if TOGETHER_API_KEY is set)
+    Returns: plain string (assistant content)
+    """
+    def __init__(self):
+        # HF: model can be a model id OR an endpoint URL
+        hf_model_or_url = os.getenv("HF_ENDPOINT_URL", HF_MODEL_DEFAULT)
+        self.hf_client = InferenceClient(
+            model=hf_model_or_url,
+            token=os.getenv("HF_TOKEN"),
+            timeout=300,
+        )
+
+        # Together fallback (optional)
+        self.together = None
+        self.together_model = os.getenv("TOGETHER_MODEL", TOGETHER_MODEL_DEFAULT)
+        tg_key = os.getenv("TOGETHER_API_KEY")
+        if tg_key:
+            self.together = Together(api_key=tg_key)
+            # 0.6 QPM ≈ 100s between requests
+            self._tg_limiter = _SpacedCallLimiter(min_interval_seconds=100.0)
+
+    # minimal retry for transient HF 429/5xx
+    def _hf_chat(self, messages, max_tokens=512, temperature=0.3, stream=False):
+        tries, delay = 3, 2.5
+        last_err = None
+        for _ in range(tries):
+            try:
+                if hasattr(self.hf_client, "chat_completion"):
+                    resp = self.hf_client.chat_completion(
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        stream=stream,
+                    )
+                    if stream:
+                        text = "".join(ch.choices[0].delta.get("content", "") for ch in resp)
+                    else:
+                        text = resp.choices[0].message.get("content", "")
+                    return text
+                else:
+                    # fallback to text_generation if model lacks chat endpoint
+                    prompt = self._messages_to_prompt(messages)
+                    text = self.hf_client.text_generation(
+                        prompt,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                        stream=False,
+                        return_full_text=False,
+                    )
+                    return text
+            except Exception as e:
+                last_err = e
+                time.sleep(delay)
+                delay *= 1.8
+        raise last_err
+
+    @staticmethod
+    def _messages_to_prompt(messages):
+        parts = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if role == "system":
+                parts.append(f"<|system|>\n{content}\n")
+            elif role == "user":
+                parts.append(f"<|user|>\n{content}\n")
+            else:
+                parts.append(f"<|assistant|>\n{content}\n")
+        parts.append("<|assistant|>\n")
+        return "".join(parts)
+
+    def chat(self, messages, temperature=0.3, max_tokens=512, stream=False):
+        """
+        Try HF first; on error, fall back to Together (if configured).
+        Together calls are spaced to ~100s and retried on 429/503.
+        """
+        try:
+            return self._hf_chat(messages, max_tokens=max_tokens, temperature=temperature, stream=stream)
+        except Exception as hf_err:
+            print(f"[LLM] HF primary failed: {hf_err}", file=sys.stderr)
+            if self.together is None:
+                raise
+
+            # Pace BEFORE first attempt to respect 0.6 QPM
+            self._tg_limiter.wait()
+
+            # Retry Together on 429/503 with exponential backoff + jitter
+            backoff = 12.0
+            for attempt in range(4):  # 1 try + up to 3 retries
+                try:
+                    resp = self.together.chat.completions.create(
+                        model=self.together_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                    )
+                    return resp.choices[0].message.get("content", "")
+                except (RateLimitError, ServiceUnavailableError) as e:
+                    if attempt == 3:
+                        raise
+                    time.sleep(backoff + random.uniform(0, 3))
+                    backoff *= 1.8
+
+# single shared instance
+llm = UnifiedLLM()
 
 # --- Utility to clear all data ---
 def clear_all():
@@ -134,10 +270,12 @@ def parse_utm_crs(s):
 def llm_parse_crs(raw):
     system = {"role":"system","content":"You're a GIS expert. Given a CRS description, respond with only JSON {\"epsg\": ###} or {\"epsg\": null}."}
     user = {"role":"user","content":f"CRS: '{raw}'"}
-    resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=[system, user], temperature=0.0
-    ).choices[0].message.content
+    resp = llm.chat(
+        [system, user],
+        temperature=0.0,
+        max_tokens=32,
+        stream=False
+    )
     code = json.loads(resp).get("epsg")
     if not code:
         raise ValueError("LLM couldn't parse CRS")
@@ -234,7 +372,7 @@ def run_fetch(sl, lc):
     if not layers:
         return create_map(), "⚠️ Please select at least one predictor."
 
-    # 3) Validate top‑level predictors
+    # 3) Validate top-level predictors
     bad_layers = [l for l in layers if l not in VALID_LAYERS]
     if bad_layers:
         # 3a) Try difflib suggestions
@@ -246,20 +384,21 @@ def run_fetch(sl, lc):
         if suggestions:
             return create_map(), "⚠️ " + " ".join(suggestions)
 
-        # 3b) LLM fallback for top‑level names
+        # 3b) LLM fallback for top-level names (HF primary)
         prompt = (
             f"You requested these predictors: {', '.join(layers)}. "
             f"I don't recognize: {', '.join(bad_layers)}. "
             "Could you please clarify which predictors you want?"
         )
-        clar = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        clar = llm.chat(
             messages=[
                 {"role": "system", "content": FALLBACK_PROMPT},
                 {"role": "user",   "content": prompt}
             ],
-            temperature=0.7
-        ).choices[0].message.content
+            temperature=0.7,
+            max_tokens=256,
+            stream=False
+        )
         return create_map(), clar
 
     # 4) Validate landcover subclasses
@@ -276,20 +415,21 @@ def run_fetch(sl, lc):
         if suggestions:
             return create_map(), "⚠️ " + " ".join(suggestions)
 
-        # 4b) LLM fallback for landcover codes
+        # 4b) LLM fallback for landcover codes (HF primary)
         prompt = (
             f"You requested landcover classes: {', '.join(lc)}. "
             f"I don't recognize: {', '.join(bad_codes)}. "
             "Could you please clarify which landcover classes you want?"
         )
-        clar = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        clar = llm.chat(
             messages=[
                 {"role": "system", "content": FALLBACK_PROMPT},
                 {"role": "user",   "content": prompt}
             ],
-            temperature=0.7
-        ).choices[0].message.content
+            temperature=0.7,
+            max_tokens=256,
+            stream=False
+        )
         return create_map(), clar
 
     # 5) All inputs valid → proceed with fetch
@@ -300,16 +440,6 @@ def run_fetch(sl, lc):
     #  b) Set the SAME python executable and unbuffered mode
     os.environ["SELECTED_LAYERS"] = ",".join(sl)
 
-    # map snake_case landcover names -> numeric codes
-    modis_landcover_map = {
-        0:"water", 1:"evergreen_needleleaf_forest", 2:"evergreen_broadleaf_forest",
-        3:"deciduous_needleleaf_forest",4:"deciduous_broadleaf_forest",5:"mixed_forest",
-        6:"closed_shrublands",7:"open_shrublands",8:"woody_savannas",9:"savannas",
-        10:"grasslands",11:"permanent_wetlands",12:"croplands",
-        13:"urban_and_built_up",14:"cropland_natural_vegetation_mosaic",
-        15:"snow_and_ice",16:"barren_or_sparsely_vegetated"
-    }
-    
     # pass the snake_case labels directly
     os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
     cmd = [
@@ -347,11 +477,12 @@ def chat_step(file, user_msg, history, state):
             {"role":"system","content":FALLBACK_PROMPT},
             {"role":"user","content":user_msg}
         ]
-        reply = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=fb,
-            temperature=0.7
-        ).choices[0].message.content
+        reply = llm.chat(
+            fb,
+            temperature=0.7,
+            max_tokens=256,
+            stream=False
+        )
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
     
@@ -386,11 +517,12 @@ def chat_step(file, user_msg, history, state):
 
     # 2) Build the JSON-tool prompt
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
-    resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=msgs,
-        temperature=0.0
-    ).choices[0].message.content
+    resp = llm.chat(
+        msgs,
+        temperature=0.0,
+        max_tokens=256,
+        stream=False
+    )
 
     # 3) Parse and dispatch
     try:
@@ -460,11 +592,12 @@ def chat_step(file, user_msg, history, state):
             )
         }
         msgs = [explain_sys, {"role":"system","content":"Data summary:\n" + summary}, {"role":"user","content":user_msg}]
-        assistant_txt = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=msgs,
-            temperature=0.7
-        ).choices[0].message.content
+        assistant_txt = llm.chat(
+            msgs,
+            temperature=0.7,
+            max_tokens=384,
+            stream=False
+        )
         m_out = create_map()
 
     # 5) record everything
@@ -591,8 +724,12 @@ with gr.Blocks() as demo:
             lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
             crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
+
+    # Serialize execution to avoid concurrent LLM calls from UI events
+    demo.queue(concurrency_count=1, max_size=16)
+
     file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
     confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
     user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state])
     user_in.submit(lambda: "", None, user_in)
-    demo.launch()
+    demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=True)
