@@ -1,3 +1,4 @@
+# app.py
 import os
 import io
 import json
@@ -8,9 +9,9 @@ import zipfile
 import re
 import difflib
 import sys
+from typing import List, Tuple
 
 import gradio as gr
-import geemap.foliumap as foliumap  # kept for future map features
 import folium
 import html as html_lib
 import pandas as pd
@@ -22,87 +23,43 @@ from matplotlib import pyplot as plt, colormaps
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from folium import Element
-from together import Together
 from dotenv import load_dotenv
 from rasterio.crs import CRS as RioCRS
 from rasterio.warp import transform as rio_transform
 
-print("Starting SpatChat SDM (layer catalog wired to WorldClim v1, SRTMGL1 v003, MODIS 061)")
+# Optional HF fallback
+try:
+    from huggingface_hub import InferenceClient
+    HF_AVAILABLE = True
+except Exception:
+    HF_AVAILABLE = False
 
-# ------------------------- Layer catalog (now matches fetch_predictors.py) -------------------------
-# Earth Engine sources used in scripts/fetch_predictors.py:
-# - Bioclim: WORLDCLIM/V1/BIO (bio1..bio19) ~1 km
-# - Elevation: USGS/SRTMGL1_003 (30 m)
-# - Slope/Aspect: ee.Terrain.products(USGS/SRTMGL1_003) (30 m)
-# - NDVI: MODIS/061/MOD13Q1, NDVI band, mean(2022-01-01 .. 2024-01-01) (250 m)
-# - Landcover: MODIS/061/MCD12Q1, LC_Type1 (IGBP classes) (500 m)
+# ──────────────────────────────────────────────────────────────────────────────
+# Config & Globals
+# ──────────────────────────────────────────────────────────────────────────────
+print("Starting SpatChat SDM (Together → optional HF Serverless fallback)")
 
-BIO_DEFS = {
-    "bio1": "Annual mean temperature",
-    "bio2": "Mean diurnal range (mean of monthly (max temp − min temp))",
-    "bio3": "Isothermality (BIO2/BIO7 × 100)",
-    "bio4": "Temperature seasonality (std. dev. × 100)",
-    "bio5": "Max temperature of warmest month",
-    "bio6": "Min temperature of coldest month",
-    "bio7": "Temperature annual range (BIO5 − BIO6)",
-    "bio8": "Mean temperature of wettest quarter",
-    "bio9": "Mean temperature of driest quarter",
-    "bio10": "Mean temperature of warmest quarter",
-    "bio11": "Mean temperature of coldest quarter",
-    "bio12": "Annual precipitation",
-    "bio13": "Precipitation of wettest month",
-    "bio14": "Precipitation of driest month",
-    "bio15": "Precipitation seasonality (coefficient of variation)",
-    "bio16": "Precipitation of wettest quarter",
-    "bio17": "Precipitation of driest quarter",
-    "bio18": "Precipitation of warmest quarter",
-    "bio19": "Precipitation of coldest quarter",
-}
+load_dotenv()
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY", "")
+HF_TOKEN         = os.getenv("HF_TOKEN", "")  # optional fallback
+HF_FALLBACK_MODEL = os.getenv("HF_FALLBACK_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 
-LAYER_CATALOG = {
-    "bioclim": {
-        "name": "Bioclim variables (BIO1–BIO19)",
-        "source": "WorldClim v1 bioclim normals via Earth Engine: WORLDCLIM/V1/BIO",
-        "resolution": "~1 km",
-        "notes": "Use names bio1 … bio19. Examples: bio1=annual mean temperature, bio12=annual precipitation.",
-    },
-    "elevation": {
-        "name": "Elevation (DEM)",
-        "source": "USGS/SRTMGL1_003 via Earth Engine",
-        "resolution": "30 m",
-        "notes": "Slope and aspect are derived from SRTM.",
-    },
-    "slope": {
-        "name": "Slope (derived from SRTM)",
-        "source": "ee.Terrain.products(USGS/SRTMGL1_003)",
-        "resolution": "30 m",
-        "notes": "Units in degrees.",
-    },
-    "aspect": {
-        "name": "Aspect (derived from SRTM)",
-        "source": "ee.Terrain.products(USGS/SRTMGL1_003)",
-        "resolution": "30 m",
-        "notes": "Degrees clockwise from North (0–360).",
-    },
-    "ndvi": {
-        "name": "NDVI (vegetation greenness)",
-        "source": "MODIS/061/MOD13Q1 NDVI mean (2022-01-01 to 2024-01-01)",
-        "resolution": "250 m",
-        "notes": "Range ~ −1 to 1; higher = greener vegetation.",
-    },
-    "landcover": {
-        "name": "Land cover (IGBP classes)",
-        "source": "MODIS/061/MCD12Q1 LC_Type1",
-        "resolution": "500 m",
-        "notes": "Snake_case names (e.g., water, urban_and_built_up, croplands…).",
-    },
-}
+# Together client (import lazy to avoid import error if not installed)
+Together = None
+if TOGETHER_API_KEY:
+    try:
+        from together import Together as TogetherClient
+        Together = TogetherClient(api_key=TOGETHER_API_KEY)
+    except Exception as e:
+        print("⚠️ Together client not available:", e)
 
-# Which top-level predictors the UI supports (lower-case)
-PREDICTOR_CHOICES = ([f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"])
+# Predictors we expose
+PREDICTOR_CHOICES = (
+    [f"bio{i}" for i in range(1, 20)]
+    + ["elevation", "slope", "aspect", "ndvi", "landcover"]
+)
 VALID_LAYERS = {p.lower() for p in PREDICTOR_CHOICES}
 
-# MODIS landcover classes (IGBP)
 LANDCOVER_CLASSES = {
     c.lower() for c in (
         "water", "evergreen_needleleaf_forest", "evergreen_broadleaf_forest",
@@ -113,308 +70,115 @@ LANDCOVER_CLASSES = {
     )
 }
 
-# --- Pre-render colorbar → base64 (for map legend) ---
+# Layer documentation (used for “what is bio5?”, etc.)
+LAYER_DOCS = {
+    "bio": "WorldClim v1 Bioclimatic variables (WORLDCLIM/V1/BIO, ~1 km). bio1=Annual Mean Temp, bio12=Annual Precip, etc.",
+    "elevation": "USGS SRTM GL1 v003 elevation (USGS/SRTMGL1_003, 30 m).",
+    "slope": "Terrain slope derived from SRTM GL1 (30 m).",
+    "aspect": "Terrain aspect derived from SRTM GL1 (30 m).",
+    "ndvi": "MODIS NDVI mean (MODIS/061/MOD13Q1, 2022-01-01 to 2024-01-01), 250 m.",
+    "landcover": "MODIS IGBP Land Cover Type 1 (MODIS/061/MCD12Q1, 500 m).",
+}
+
+# Pre-render colorbar image (base64)
 fig, ax = plt.subplots(figsize=(4, 0.5))
 norm = Normalize(vmin=0, vmax=1)
 plt.colorbar(ScalarMappable(norm=norm, cmap="viridis"), cax=ax, orientation="horizontal").set_ticks([])
 ax.set_xlabel("Low    High")
 fig.tight_layout(pad=0)
-buf = io.BytesIO()
-fig.savefig(buf, format="png", dpi=100)
+_buf = io.BytesIO()
+fig.savefig(_buf, format="png", dpi=100)
 plt.close(fig)
-buf.seek(0)
-COLORBAR_BASE64 = base64.b64encode(buf.read()).decode()
+_buf.seek(0)
+COLORBAR_BASE64 = base64.b64encode(_buf.read()).decode()
 
-# --- Authenticate Earth Engine ---
-load_dotenv()
-svc = json.loads(os.environ.get("GEE_SERVICE_ACCOUNT", "{}"))
-creds = ee.ServiceAccountCredentials(svc.get("client_email"), key_data=json.dumps(svc))
-ee.Initialize(creds)
+# Auth Earth Engine via service account (expects JSON in env)
+svc_json = os.environ.get("GEE_SERVICE_ACCOUNT", "")
+if not svc_json:
+    print("⚠️ GEE_SERVICE_ACCOUNT is not set. Earth Engine calls will fail.")
+else:
+    try:
+        svc = json.loads(svc_json)
+        creds = ee.ServiceAccountCredentials(svc.get("client_email"), key_data=json.dumps(svc))
+        ee.Initialize(creds)
+        print("✅ Earth Engine authenticated.")
+    except Exception as e:
+        print("❌ Failed EE auth:", e)
 
-# --- LLM client (Together primary) ---
-client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
-
-# ------------------------- Helper: layer menu text -------------------------
-def layers_help_text() -> str:
-    return (
-        "### 📦 Available layers (exact datasets)\n"
-        f"- **Bioclim**: **bio1–bio19** — {LAYER_CATALOG['bioclim']['source']} ({LAYER_CATALOG['bioclim']['resolution']})\n"
-        f"- **Topography**: **elevation**, **slope**, **aspect** — {LAYER_CATALOG['elevation']['source']} (30 m)\n"
-        f"- **Remote sensing**: **ndvi** — {LAYER_CATALOG['ndvi']['source']} (250 m)\n"
-        f"- **Landcover**: **MODIS IGBP classes** — {LAYER_CATALOG['landcover']['source']} (500 m)\n"
-        "\n"
-        "### 💬 Say it like this\n"
-        "• **\"I want bio1, ndvi, elevation\"** (fetch layers)\n"
-        "• **\"Fetch bio5, bio12 and slope\"**\n"
-        "• **\"Add landcover water and urban_and_built_up\"**\n"
-        "• **\"Run model\"** (train & predict)\n"
-        "• **\"What is bio5?\"**, **\"Where does landcover come from?\"**\n"
-        "• **\"Explain those stats\"** (summarize latest performance & coefficients)\n"
-    )
-
-def describe_layer_token(tok: str) -> str:
-    t = tok.strip().lower()
-    if t in BIO_DEFS:
-        return (
-            f"**{t.upper()}** — {BIO_DEFS[t]}\n"
-            f"• Source: {LAYER_CATALOG['bioclim']['source']} ({LAYER_CATALOG['bioclim']['resolution']})\n"
-            f"• Notes: {LAYER_CATALOG['bioclim']['notes']}"
-        )
-    if t in ("elevation", "slope", "aspect"):
-        info = LAYER_CATALOG[t]
-        return f"**{info['name']}**\n• Source: {info['source']} ({info['resolution']})\n• Notes: {info['notes']}"
-    if t == "ndvi":
-        info = LAYER_CATALOG["ndvi"]
-        return f"**{info['name']}**\n• Source: {info['source']} ({info['resolution']})\n• Notes: {info['notes']}"
-    if t == "landcover":
-        info = LAYER_CATALOG["landcover"]
-        cats = ", ".join(sorted(list(LANDCOVER_CLASSES))[:10]) + ", …"
-        return (
-            f"**{info['name']}**\n"
-            f"• Source: {info['source']} ({info['resolution']})\n"
-            f"• Notes: {info['notes']}\n"
-            f"• Example classes: {cats}"
-        )
-    m = re.match(r"bio\s*[-_ ]?(\d{1,2})$", t)
-    if m:
-        key = f"bio{int(m.group(1))}"
-        if key in BIO_DEFS:
-            return describe_layer_token(key)
-    return f"Sorry — I don’t recognize **{tok}** as a fetchable layer."
-
-def explain_layers_from_text(user_msg: str) -> str:
-    toks = re.findall(r"(bio\s*[-_ ]?\d{1,2}|ndvi|elevation|slope|aspect|landcover)", user_msg, flags=re.I)
-    if not toks:
-        parts = [
-            "### ℹ️ Data sources (summary)",
-            f"**Bioclim** — {LAYER_CATALOG['bioclim']['source']} ({LAYER_CATALOG['bioclim']['resolution']})",
-            f"**Elevation/Slope/Aspect** — {LAYER_CATALOG['elevation']['source']} (30 m)",
-            f"**NDVI** — {LAYER_CATALOG['ndvi']['source']} (250 m)",
-            f"**Landcover** — {LAYER_CATALOG['landcover']['source']} (500 m)",
-            "",
-            layers_help_text()
-        ]
-        return "\n".join(parts)
-    out = ["### ℹ️ Layer details"]
-    seen = set()
-    for tok in toks:
-        key = tok.lower().strip()
-        if key not in seen:
-            out.append("- " + describe_layer_token(tok))
-            seen.add(key)
-    return "\n".join(out)
-
-# ------------------------- Stats explanation (no LLM) -------------------------
-def explain_latest_stats() -> str:
-    perf_fp = "outputs/performance_metrics.csv"
-    coef_fp = "outputs/coefficients.csv"
-    lines = []
-    had_any = False
-
-    if os.path.exists(perf_fp):
-        try:
-            perf = pd.read_csv(perf_fp)
-            if not perf.empty:
-                had_any = True
-                row = perf.iloc[0]
-                metrics = []
-                def pick(name):
-                    for c in perf.columns:
-                        if c.lower() == name:
-                            return c
-                    return None
-                for key, label in [
-                    ("auc", "AUC"),
-                    ("accuracy", "Accuracy"),
-                    ("sensitivity", "Sensitivity"),
-                    ("specificity", "Specificity"),
-                    ("precision", "Precision"),
-                    ("recall", "Recall"),
-                    ("f1", "F1"),
-                    ("tss", "TSS"),
-                ]:
-                    col = pick(key)
-                    if col and pd.api.types.is_numeric_dtype(perf[col]):
-                        val = row[col]
-                        if pd.notna(val):
-                            metrics.append(f"{label} ≈ {val:.3f}")
-                header = "### 🔍 Model performance"
-                if metrics:
-                    lines.append(header)
-                    lines.append("• " + " | ".join(metrics))
-                else:
-                    lines.append(header + "\n(Performance file present, but no standard metric columns detected.)")
-        except Exception as e:
-            lines.append(f"⚠️ Couldn’t parse performance_metrics.csv: {e}")
-
-    if os.path.exists(coef_fp):
-        try:
-            coef = pd.read_csv(coef_fp).dropna(axis=1, how="all")
-            term_col = next((c for c in coef.columns if c.lower() in ("term", "feature", "variable", "predictor")), None)
-            val_col = next((c for c in coef.columns if c.lower() in ("coef", "coefficient", "estimate", "beta", "weight")), None)
-            if term_col and val_col and not coef.empty:
-                had_any = True
-                mask = ~coef[term_col].str.lower().str.contains(r"^intercept$|^const$", regex=True, na=False)
-                slim = coef.loc[mask, [term_col, val_col]].copy()
-                slim["abs"] = slim[val_col].abs()
-                top = slim.sort_values("abs", ascending=False).head(5)
-                pos = top[top[val_col] > 0].head(3)
-                neg = top[top[val_col] < 0].head(3)
-                lines.append("### 🧠 Important predictors")
-                if not top.empty:
-                    if not pos.empty:
-                        lines.append("• Strongest positive effects: " + ", ".join(f"{r[term_col]} (+{r[val_col]:.3g})" for _, r in pos.iterrows()))
-                    if not neg.empty:
-                        lines.append("• Strongest negative effects: " + ", ".join(f"{r[term_col]} ({r[val_col]:.3g})" for _, r in neg.iterrows()))
-                else:
-                    lines.append("(Couldn’t rank predictors.)")
-            else:
-                lines.append("### 🧠 Coefficients\n(Coefficients file present, but couldn’t detect ‘term/coef’ columns.)")
-        except Exception as e:
-            lines.append(f"⚠️ Couldn’t parse coefficients.csv: {e}")
-
-    if not had_any:
-        return "I couldn’t find any model outputs yet. Try **run model**, then say **explain those stats**."
-    lines.append("\nTip: If any metric is unclear, ask e.g. “What does AUC mean?”")
-    return "\n".join(lines)
-
-# ------------------------- App state & housekeeping -------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers: filesystem, map, zips
+# ──────────────────────────────────────────────────────────────────────────────
 def clear_all():
     for d in ("predictor_rasters", "outputs", "inputs"):
         shutil.rmtree(d, ignore_errors=True)
     os.makedirs("inputs", exist_ok=True)
     if os.path.exists("spatchat_results.zip"):
         os.remove("spatchat_results.zip")
+    os.environ.pop("SELECTED_LAYERS", None)
+    os.environ.pop("SELECTED_LANDCOVER_CLASSES", None)
 
 clear_all()
 
-# ------------------------- Detection helpers -------------------------
-def detect_coords(df, fuzz_threshold=80):
-    cols = list(df.columns)
-    low  = [c.lower().strip() for c in cols]
-
-    LAT_ALIASES = {
-        'lat','latitude','y','y_coordinate','decilatitude','dec_latitude','dec lat',
-        'decimallatitude','decimal latitude'
-    }
-    LON_ALIASES = {
-        'lon','long','longitude','x','x_coordinate','decilongitude','dec_longitude',
-        'dec longitude','decimallongitude','decimal longitude'
-    }
-    lat_idx = next((i for i,n in enumerate(low) if n in LAT_ALIASES), None)
-    lon_idx = next((i for i,n in enumerate(low) if n in LON_ALIASES), None)
-    if lat_idx is not None and lon_idx is not None:
-        return cols[lat_idx], cols[lon_idx]
-    lat_fz = difflib.get_close_matches("latitude", low, n=1, cutoff=fuzz_threshold/100)
-    lon_fz = difflib.get_close_matches("longitude", low, n=1, cutoff=fuzz_threshold/100)
-    if lat_fz and lon_fz:
-        return cols[low.index(lat_fz[0])], cols[low.index(lon_fz[0])]
-    numerics = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
-    lat_opts = [c for c in numerics if df[c].between(-90, 90).mean() > 0.98]
-    lon_opts = [c for c in numerics if df[c].between(-180, 180).mean() > 0.98]
-    if len(lat_opts) == 1 and len(lon_opts) == 1:
-        return lat_opts[0], lon_opts[0]
-    return None, None
-
-# ------------------------- CRS parsing helpers -------------------------
-def parse_epsg_code(s):
-    m = re.match(r"^(\d{4,5})$", s.strip())
-    return int(m.group(1)) if m else None
-
-def parse_utm_crs(s):
-    m = re.search(r"utm\s*zone\s*(\d+)\s*([NS])", s, re.I)
-    if m:
-        zone, hemi = int(m.group(1)), m.group(2).upper()
-        return (32600 if hemi=='N' else 32700) + zone
-    return None
-
-def llm_parse_crs(raw):
-    system = {"role":"system","content":"You're a GIS expert. Given a CRS description, respond with only JSON {\"epsg\": ###} or {\"epsg\": null}."}
-    user = {"role":"user","content":f"CRS: '{raw}'"}
-    resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=[system, user], temperature=0.0
-    ).choices[0].message.content
-    code = json.loads(resp).get("epsg")
-    if not code:
-        raise ValueError("LLM couldn't parse CRS")
-    return code
-
-def resolve_crs(raw):
-    for fn in (parse_epsg_code, parse_utm_crs):
-        code = fn(raw)
-        if code:
-            return code
-    return llm_parse_crs(raw)
-
-# ------------------------- LLM prompts -------------------------
-SYSTEM_PROMPT = """
-You are SpatChat, a friendly species distribution modeling assistant.
-When the user asks to fetch environmental layers (verbs like fetch, download, get, grab, "I want", "add"), respond with exactly a JSON object:
-{"tool":"fetch","layers":[<layer names>],"landcover":[<landcover classes>]}
-When the user asks to run the model (e.g., "run model", "run SDM", "train"), respond with exactly:
-{"tool":"run_model"}
-If the request doesn’t match these tools, reply naturally without JSON.
-Examples:
-User: I want bio2 and ndvi
-Assistant: {"tool":"fetch","layers":["bio2","ndvi"],"landcover":[]}
-User: Grab slope, elevation
-Assistant: {"tool":"fetch","layers":["slope","elevation"],"landcover":[]}
-User: Run model now
-Assistant: {"tool":"run_model"}
-User: How many points are uploaded?
-Assistant: There are currently 193 presence points uploaded.
-""".strip()
-
-FALLBACK_PROMPT = """
-You are SpatChat, a friendly assistant for species distribution modeling.
-Keep answers short (<=2 sentences) and guide the user to next steps: upload data, fetch layers, run model, or ask about layers ("What is bio5?").
-""".strip()
-
-# ------------------------- Map / ZIP -------------------------
 def create_map():
-    m = folium.Map(location=[0,0], zoom_start=2, control_scale=True)
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
+
+    # Add presence points if available
     ppath = "inputs/presence_points.csv"
     if os.path.exists(ppath):
-        df = pd.read_csv(ppath)
-        lat_col, lon_col = detect_coords(df)
-        if lat_col and lon_col:
-            pts = df[[lat_col, lon_col]].dropna().values.tolist()
-            if pts:
-                fg = folium.FeatureGroup(name="🟦 Presence Points")
-                for lat, lon in pts:
-                    folium.CircleMarker(location=[lat, lon], radius=5, color="blue", fill=True, fill_opacity=0.8).add_to(fg)
-                fg.add_to(m)
-                m.fit_bounds(pts)
+        try:
+            df = pd.read_csv(ppath)
+            lat_col, lon_col = detect_coords(df)
+            if lat_col and lon_col:
+                pts = df[[lat_col, lon_col]].dropna().values.tolist()
+                if pts:
+                    fg = folium.FeatureGroup(name="🟦 Presence Points")
+                    for lat, lon in pts:
+                        folium.CircleMarker(location=[lat, lon], radius=5, color="blue", fill=True, fill_opacity=0.8).add_to(fg)
+                    fg.add_to(m)
+                    m.fit_bounds(pts)
+        except Exception as e:
+            print("Warn reading CSV for map:", e)
+
+    # Raster overlays (aligned WGS84)
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
         for fn in sorted(os.listdir(rasdir)):
-            if fn.endswith(".tif"):
+            if not fn.endswith(".tif"):
+                continue
+            try:
                 with rasterio.open(os.path.join(rasdir, fn)) as src:
-                    arr = src.read(1); bnd = src.bounds
+                    arr = src.read(1)
+                    bnd = src.bounds
                 vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-                if not np.isnan(vmin) and vmin!=vmax:
-                    rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
+                if not np.isnan(vmin) and vmin != vmax:
+                    rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
                     folium.raster_layers.ImageOverlay(
                         rgba,
-                        bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
-                        opacity=1.0,  # predictors shown opaque
+                        bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
+                        opacity=1.0,  # predictors fully opaque
                         name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
                     ).add_to(m)
+            except Exception as e:
+                print(f"Overlay warn for {fn}:", e)
+
+    # Suitability (opaque)
     sf = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(sf):
-        with rasterio.open(sf) as src:
-            arr = src.read(1); bnd = src.bounds
-        vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-        rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
-        # 👉 Make suitability NOT semi-transparent (opacity = 1.0)
-        folium.raster_layers.ImageOverlay(
-            rgba,
-            bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
-            opacity=1.0,   # was 0.7 before
-            name="🎯 Suitability"
-        ).add_to(m)
+        try:
+            with rasterio.open(sf) as src:
+                arr = src.read(1)
+                bnd = src.bounds
+            vmin, vmax = np.nanmin(arr), np.nanmax(arr)
+            rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
+            folium.raster_layers.ImageOverlay(
+                rgba, bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
+                opacity=1.0,  # opaque as requested
+                name="🎯 Suitability"
+            ).add_to(m)
+        except Exception as e:
+            print("Suitability overlay warn:", e)
+
     folium.LayerControl(collapsed=False).add_to(m)
     img_html = f'<img src="data:image/png;base64,{COLORBAR_BASE64}" style="position:absolute; bottom:20px; right:10px; width:200px; height:30px; z-index:1000;"/>'
     m.get_root().html.add_child(Element(img_html))
@@ -424,199 +188,350 @@ def zip_results():
     archive = "spatchat_results.zip"
     if os.path.exists(archive): os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fld in ("predictor_rasters","outputs"):
-            for root,_,files in os.walk(fld):
+        for fld in ("predictor_rasters", "outputs"):
+            for root, _, files in os.walk(fld):
                 for fn in files:
-                    full = os.path.join(root,fn)
-                    zf.write(full, arcname=os.path.relpath(full,"."))
+                    full = os.path.join(root, fn)
+                    zf.write(full, arcname=os.path.relpath(full, "."))
     return archive
 
-# ------------------------- Actions -------------------------
-def run_fetch(sl, lc):
-    layers = list(sl)
-    if lc:
+# ──────────────────────────────────────────────────────────────────────────────
+# Column detection & CRS helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def detect_coords(df: pd.DataFrame, fuzz_threshold=80) -> Tuple[str, str]:
+    cols = list(df.columns)
+    low = [c.lower().strip() for c in cols]
+    LAT = {'lat','latitude','y','y_coordinate','decilatitude','dec_latitude','dec lat','decimallatitude','decimal latitude'}
+    LON = {'lon','long','longitude','x','x_coordinate','decilongitude','dec_longitude','dec longitude','decimallongitude','decimal longitude'}
+
+    lat_idx = next((i for i, n in enumerate(low) if n in LAT), None)
+    lon_idx = next((i for i, n in enumerate(low) if n in LON), None)
+    if lat_idx is not None and lon_idx is not None:
+        return cols[lat_idx], cols[lon_idx]
+
+    lat_fz = difflib.get_close_matches("latitude", low, n=1, cutoff=fuzz_threshold/100)
+    lon_fz = difflib.get_close_matches("longitude", low, n=1, cutoff=fuzz_threshold/100)
+    if lat_fz and lon_fz:
+        return cols[low.index(lat_fz[0])], cols[low.index(lon_fz[0])]
+
+    numerics = [c for c in cols if np.issubdtype(df[c].dtype, np.number)]
+    lat_opts = [c for c in numerics if df[c].between(-90, 90).mean() > 0.98]
+    lon_opts = [c for c in numerics if df[c].between(-180, 180).mean() > 0.98]
+    if len(lat_opts) == 1 and len(lon_opts) == 1:
+        return lat_opts[0], lon_opts[0]
+    return None, None
+
+def resolve_crs(raw: str) -> int:
+    raw = (raw or "").strip()
+    if not raw:
+        return 4326
+    m = re.match(r"^(\d{4,5})$", raw)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"utm\s*zone\s*(\d+)\s*([NS])", raw, re.I)
+    if m:
+        zone, hemi = int(m.group(1)), m.group(2).upper()
+        return (32600 if hemi == 'N' else 32700) + zone
+
+    # As last resort ask LLM to parse; if unavailable, default 4326
+    if Together:
+        try:
+            resp = Together.chat.completions.create(
+                model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                messages=[
+                    {"role":"system","content":"You're a GIS expert. Answer only as JSON: {\"epsg\": #### or null}."},
+                    {"role":"user","content":f"CRS: '{raw}'"}
+                ],
+                temperature=0.0
+            ).choices[0].message.content
+            code = json.loads(resp).get("epsg")
+            return int(code) if code else 4326
+        except Exception:
+            return 4326
+    return 4326
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LLM Router (Together → HF fallback)
+# ──────────────────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """
+You are SpatChat, a helpful SDM assistant. When the user requests one of these intents,
+respond with **JSON only** (no prose) using the exact schema below.
+
+Schemas:
+{"tool":"fetch","layers":["bio1","ndvi",...],"landcover":["water","urban_and_built_up",...]}
+{"tool":"run_model"}
+{"tool":"explain_stats"}
+{"tool":"download"}   // provide ZIP of results
+
+Rules:
+- Map natural phrasings like "download", "get", "grab", "fetch", "add", "i want" to {"tool":"fetch",...}
+- If the user specifies just names (e.g., "bio1, bio12"), put them into "layers".
+- Landcover subclasses go into "landcover".
+- If the user asks to run the model, return {"tool":"run_model"}.
+- If the user asks to download outputs/zip, return {"tool":"download"}.
+- If the user asks to "explain/interpret/understand the stats, numbers, results, metrics",
+  return {"tool":"explain_stats"}.
+- Otherwise, reply with a short helpful sentence (not JSON).
+
+Examples:
+User: can you help me download ndvi?
+Assistant: {"tool":"fetch","layers":["ndvi"],"landcover":[]}
+
+User: i want bio1, ndvi, elevation
+Assistant: {"tool":"fetch","layers":["bio1","ndvi","elevation"],"landcover":[]}
+
+User: add landcover water and urban_and_built_up
+Assistant: {"tool":"fetch","layers":[],"landcover":["water","urban_and_built_up"]}
+
+User: run model
+Assistant: {"tool":"run_model"}
+
+User: explain those stats
+Assistant: {"tool":"explain_stats"}
+
+User: get me a zip
+Assistant: {"tool":"download"}
+""".strip()
+
+FALLBACK_PROMPT = "You are SpatChat (SDM). Be brief and helpful."
+
+def call_llm(messages: List[dict]) -> str:
+    """
+    Returns assistant text. Tries Together first; on failure uses HF Serverless if available.
+    """
+    # Try Together
+    if Together:
+        try:
+            out = Together.chat.completions.create(
+                model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                messages=messages,
+                temperature=0.0
+            ).choices[0].message.content
+            return out
+        except Exception as e:
+            err = str(e)
+            print("Together error:", err)
+
+    # HF fallback (only if token & lib available)
+    if HF_AVAILABLE and HF_TOKEN:
+        try:
+            client = InferenceClient(model=HF_FALLBACK_MODEL, token=HF_TOKEN)
+            # Simple chat formatting for text generation models
+            prompt = ""
+            for m in messages:
+                role = m.get("role", "user").upper()
+                prompt += f"{role}: {m.get('content','')}\n"
+            prompt += "ASSISTANT: "
+            out = client.text_generation(prompt, max_new_tokens=256, temperature=0.2, do_sample=False)
+            return out
+        except Exception as e:
+            print("HF fallback error:", e)
+
+    # Last resort: very short apology
+    return "(LLM unavailable) If you want to fetch layers, say e.g. 'I want bio1, ndvi'."
+
+def llm_route(user_msg: str, history: List[dict]) -> dict:
+    """
+    Returns dict with keys: tool, layers, landcover
+    or {"tool":"text","text":"..."} for non-tool replies.
+    """
+    messages = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
+    raw = call_llm(messages)
+    try:
+        call = json.loads(raw)
+        if isinstance(call, dict) and "tool" in call:
+            return call
+    except Exception:
+        pass
+    return {"tool":"text","text": raw}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Local interceptors (no LLM)
+# ──────────────────────────────────────────────────────────────────────────────
+EXPLAIN_STATS_RE = re.compile(
+    r"(explain|interpret|help me understand|make sense of|what do (these|those) (numbers|stats|results|metrics) mean|"
+    r"explain (these|those)? (stats|numbers|results|metrics))",
+    re.I,
+)
+def is_explain_stats_query(text: str) -> bool:
+    return bool(EXPLAIN_STATS_RE.search(text or ""))
+
+LAYER_QUESTION_RE = re.compile(
+    r"\b(what\s+is|where\s+does|source\s+of|which\s+dataset\s+is)\b.*\b(bio\d{1,2}|ndvi|elevation|slope|aspect|landcover)\b",
+    re.I,
+)
+def maybe_answer_layer_info(user_msg: str) -> str | None:
+    m = LAYER_QUESTION_RE.search(user_msg or "")
+    if not m:
+        return None
+    # get the layer token
+    token = re.search(r"(bio\d{1,2}|ndvi|elevation|slope|aspect|landcover)", user_msg, re.I)
+    if not token:
+        return None
+    key = token.group(1).lower()
+    if key.startswith("bio"):
+        return f"**{key.upper()}** — {LAYER_DOCS['bio']}"
+    return f"**{key}** — {LAYER_DOCS.get(key, 'No description available.')}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Actions: fetch layers, run model, explain stats
+# ──────────────────────────────────────────────────────────────────────────────
+def run_fetch(sl: List[str], lc: List[str]) -> Tuple[str, str]:
+    layers = [l.strip().lower() for l in sl or [] if l and l.strip()]
+    landc = [c.strip().lower() for c in lc or [] if c and c.strip()]
+    if landc:
         layers.append("landcover")
-    if not layers:
-        return create_map(), "⚠️ Please select at least one predictor."
+
+    if not layers and not landc:
+        return create_map(), "⚠️ Please specify at least one layer (e.g., 'I want bio1, ndvi')."
 
     bad_layers = [l for l in layers if l not in VALID_LAYERS]
     if bad_layers:
-        suggestions = []
+        sug = []
         for b in bad_layers:
             match = difflib.get_close_matches(b, VALID_LAYERS, n=1, cutoff=0.6)
-            if match:
-                suggestions.append(f"Did you mean '{match[0]}' instead of '{b}'?")
-        if suggestions:
-            return create_map(), "⚠️ " + " ".join(suggestions)
-        prompt = (
-            f"You requested these predictors: {', '.join(layers)}. "
-            f"I don't recognize: {', '.join(bad_layers)}. "
-            "Could you please clarify which predictors you want?"
-        )
-        clar = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=[{"role": "system", "content": FALLBACK_PROMPT},{"role": "user", "content": prompt}],
-            temperature=0.7
-        ).choices[0].message.content
-        return create_map(), clar
+            if match: sug.append(f"Did you mean '{match[0]}' instead of '{b}'?")
+        return create_map(), "⚠️ " + (" ".join(sug) if sug else f"Unknown: {', '.join(bad_layers)}.")
 
-    bad_codes = [c for c in lc if c not in LANDCOVER_CLASSES]
+    bad_codes = [c for c in landc if c not in LANDCOVER_CLASSES]
     if bad_codes:
-        suggestions = []
+        sug = []
         for b in bad_codes:
             match = difflib.get_close_matches(b, LANDCOVER_CLASSES, n=1, cutoff=0.6)
-            if match:
-                suggestions.append(f"Did you mean landcover class '{match[0]}' instead of '{b}'?")
-        if suggestions:
-            return create_map(), "⚠️ " + " ".join(suggestions)
-        prompt = (
-            f"You requested landcover classes: {', '.join(lc)}. "
-            f"I don't recognize: {', '.join(bad_codes)}. "
-            "Could you please clarify which landcover classes you want?"
-        )
-        clar = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=[{"role": "system", "content": FALLBACK_PROMPT},{"role": "user", "content": prompt}],
-            temperature=0.7
-        ).choices[0].message.content
-        return create_map(), clar
+            if match: sug.append(f"Did you mean landcover '{match[0]}' instead of '{b}'?")
+        return create_map(), "⚠️ " + (" ".join(sug) if sug else f"Unknown landcover: {', '.join(bad_codes)}.")
 
-    print(f"🧪 [run_fetch] SL={sl!r}   LC={lc!r}", file=sys.stdout)
-    os.environ["SELECTED_LAYERS"] = ",".join(sl)
-    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
+    # Hand off to script (env passthrough)
+    os.environ["SELECTED_LAYERS"] = ",".join([l for l in layers if l != "landcover"] + (["landcover"] if "landcover" in layers else []))
+    os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(landc)
+
     cmd = [sys.executable, "-u", os.path.join("scripts", "fetch_predictors.py")]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     logs = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     if proc.returncode != 0:
         return create_map(), f"❌ Fetch failed:\n```\n{logs}\n```"
-    else:
-        return create_map(), f"✅ Predictors fetched.\n\n```bash\n{logs}\n```"
+    return create_map(), f"✅ Predictors fetched.\n\n```bash\n{logs}\n```"
 
 def run_model():
-    proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
-    if proc.returncode!=0:
-        return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
-    perf_df = pd.read_csv("outputs/performance_metrics.csv")
-    coef_df = pd.read_csv("outputs/coefficients.csv")
+    proc = subprocess.run(["python", "scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return create_map(), f"❌ Model run failed:\n```\n{proc.stderr}\n```"
     zip_results()
-    return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
+    return create_map(), "✅ Model trained. Download results below (ZIP)."
 
-# ------------------------- Chat loop -------------------------
+def explain_latest_stats() -> str:
+    perf_fp = "outputs/performance_metrics.csv"
+    coef_fp = "outputs/coefficients.csv"
+
+    have_any = False
+    out = ["**Summary of recent model results**"]
+    if os.path.exists(perf_fp):
+        try:
+            perf = pd.read_csv(perf_fp)
+            have_any = True
+            out.append("\n**Performance metrics**")
+            out.append(perf.to_markdown(index=False))
+            # Tiny highlight if common columns exist
+            for col in ("AUC", "Accuracy", "F1", "Precision", "Recall"):
+                if col in perf.columns:
+                    try:
+                        val = float(perf[col].iloc[0])
+                        out.append(f"- {col}: **{val:.3f}**")
+                    except Exception:
+                        pass
+        except Exception as e:
+            out.append(f"(Couldn't read performance: {e})")
+
+    if os.path.exists(coef_fp):
+        try:
+            coef = pd.read_csv(coef_fp).dropna(axis=1, how='all')
+            have_any = True
+            out.append("\n**Top coefficients (by absolute value)**")
+            if {"term","coef"}.issubset({c.lower() for c in coef.columns}):
+                # Different scripts may name columns differently; just show table
+                out.append(coef.to_markdown(index=False))
+            else:
+                out.append(coef.to_markdown(index=False))
+        except Exception as e:
+            out.append(f"(Couldn't read coefficients: {e})")
+
+    if not have_any:
+        return "I couldn't find any saved results yet. Try **run model**, then ask me to explain the stats."
+    return "\n".join(out)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Chat loop
+# ──────────────────────────────────────────────────────────────────────────────
+LONG_HELP = (
+    "Now say things like **\"I want bio1, ndvi, elevation\"** to fetch layers, or **\"run model\"** to train & predict.\n\n"
+    "### 📦 Available layers (exact datasets)\n"
+    "- **Bioclim:** bio1–bio19 — WorldClim v1 bioclim normals (WORLDCLIM/V1/BIO, ~1 km)\n"
+    "- **Topography:** elevation, slope, aspect — USGS/SRTMGL1_003 (30 m)\n"
+    "- **Remote sensing:** ndvi — MODIS/061/MOD13Q1 mean (2022-01-01→2024-01-01) (250 m)\n"
+    "- **Landcover:** MODIS IGBP classes — MODIS/061/MCD12Q1 LC_Type1 (500 m)\n\n"
+    "### 💬 Say it like this\n"
+    "• \"I want bio1, ndvi, elevation\" (fetch layers)\n"
+    "• \"Fetch bio5, bio12 and slope\"\n"
+    "• \"Add landcover water and urban_and_built_up\"\n"
+    "• \"Run model\" (train & predict)\n"
+    "• \"What is bio5?\" / \"Where does ndvi come from?\"\n"
+    "• \"Explain those stats\" (summarize latest performance & coefficients)\n"
+)
+
 def chat_step(file, user_msg, history, state):
-    # No CSV yet → short LLM
+    # If no CSV yet → brief guidance + no LLM
     if not os.path.exists("inputs/presence_points.csv"):
-        fb = [{"role":"system","content":FALLBACK_PROMPT},{"role":"user","content":user_msg}]
-        reply = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=fb, temperature=0.7
-        ).choices[0].message.content
+        reply = "Please upload your presence CSV to begin."
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":reply}])
         return history, create_map(), state
 
-    # Reset
-    if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
-        clear_all()
-        new_hist = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
-        return new_hist, create_map(), state
-
-    # Help / layers menu
-    if re.search(r"\b(help|layers|what can i (?:fetch|get|use)|available layers|what layers)\b", user_msg, re.I):
-        history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":layers_help_text()}])
-        return history, create_map(), state
-
-    # Layer explainer
-    if re.search(r"\b(what\s+is|what\s+does|where\s+does|which\s+dataset|source of)\b", user_msg, re.I) and re.search(
-        r"(bio\s*[-_ ]?\d{1,2}|ndvi|elevation|slope|aspect|landcover|layers?)", user_msg, re.I
-    ):
-        ans = explain_layers_from_text(user_msg)
+    # Local intercepts
+    ans = maybe_answer_layer_info(user_msg)
+    if ans:
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":ans}])
         return history, create_map(), state
 
-    # Explain stats
-    if re.search(r"\b(explain|interpret|help me understand|summarize)\b", user_msg, re.I) and re.search(
-        r"\b(stats?|results?|model|performance|coefficients?)\b", user_msg, re.I
-    ):
-        ans = explain_latest_stats()
-        history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":ans}])
-        return history, create_map(), state
-    if re.fullmatch(r"\s*explain those stats\s*", user_msg, re.I):
+    if is_explain_stats_query(user_msg):
         ans = explain_latest_stats()
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":ans}])
         return history, create_map(), state
 
-    # Tool routing via LLM
-    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
-    resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=msgs, temperature=0.0
-    ).choices[0].message.content
-
-    try:
-        call = json.loads(resp)
-        tool = call.get("tool")
-    except Exception:
-        tool = None
+    # Route with LLM
+    call = llm_route(user_msg, history)
+    tool = call.get("tool")
 
     if tool == "fetch":
         m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
-        assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
+        assistant_txt = status
+
     elif tool == "run_model":
-        m_out, status, perf_df, coef_df = run_model()
-        if perf_df is None:
-            assistant_txt = status
-        else:
-            perf = pd.read_csv("outputs/performance_metrics.csv")
-            first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
-            perf_md = (
-                "**Model Performance (1 of 2):**\n\n" + first.to_markdown(index=False)
-                + "\n\n**Model Performance (2 of 2):**\n\n" + second.to_markdown(index=False)
-            )
-            coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
-            coef_md = coef.to_markdown(index=False)
-            assistant_txt = f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n**Predictor Coefficients:**\n\n{coef_md}"
+        m_out, status = run_model()
+        assistant_txt = status
+
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
-        assistant_txt = "✅ ZIP is downloading…"
+        assistant_txt = "✅ Preparing ZIP… Click **Download Results**."
+
+    elif tool == "explain_stats":
+        m_out, assistant_txt = create_map(), explain_latest_stats()
+
+    elif tool == "text":
+        # Non-tool reply from router → show its text (short)
+        m_out, assistant_txt = create_map(), call.get("text", "I'm here to help!")
+
     else:
-        # General fallback
-        try:
-            n_pts = len(pd.read_csv("inputs/presence_points.csv"))
-        except Exception:
-            n_pts = 0
-        rasdir = "predictor_rasters/wgs84"
-        if os.path.isdir(rasdir):
-            fetched = sorted(os.path.splitext(f)[0] for f in os.listdir(rasdir) if f.endswith(".tif"))
-        else:
-            fetched = []
-        perf_table = ""
-        if os.path.exists("outputs/performance_metrics.csv"):
-            perf_table = pd.read_csv("outputs/performance_metrics.csv").to_markdown(index=False)
-        coef_table = ""
-        if os.path.exists("outputs/coefficients.csv"):
-            coef_table = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all').to_markdown(index=False)
-        summary = (
-            f"- Presence points: {n_pts}\n"
-            f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
-            "**Performance Metrics**\n"
-            f"{perf_table or '*none*'}\n\n"
-            "**Predictor Coefficients**\n"
-            f"{coef_table or '*none*'}"
-        )
-        explain_sys = {
-            "role":"system",
-            "content":"You are SpatChat, an expert in species distribution modeling. Use ALL of the context below to answer clearly."
-        }
-        msgs = [explain_sys, {"role":"system","content":"Data summary:\n" + summary}, {"role":"user","content":user_msg}]
-        assistant_txt = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=msgs, temperature=0.7
-        ).choices[0].message.content
-        m_out = create_map()
+        m_out, assistant_txt = create_map(), "I can fetch layers (e.g., 'I want bio1, ndvi') or **run model**."
 
     history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
     return history, m_out, state
 
-# ------------------------- Upload & CRS confirm -------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Upload & CRS confirm
+# ──────────────────────────────────────────────────────────────────────────────
 def on_upload(f, history, state):
     history2 = history.copy()
     clear_all()
+
     if f and hasattr(f, "name"):
         shutil.copy(f.name, "inputs/presence_points.csv")
         df = pd.read_csv("inputs/presence_points.csv")
@@ -625,16 +540,15 @@ def on_upload(f, history, state):
             df = df.rename(columns={lat: "latitude", lon: "longitude"})
             df.to_csv("inputs/presence_points.csv", index=False)
             history2.append({"role":"assistant","content":(
-                "✅ Sweet! I found your `latitude` and `longitude` columns.\n\n"
-                "Now say things like **\"I want bio1, ndvi, elevation\"** to fetch layers, "
-                "or **\"run model\"** to train & predict.\n\n"
-                + layers_help_text()
+                "✅ I found your **latitude** and **longitude** columns.\n\n" + LONG_HELP
             )})
             return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
         else:
             history2.append({"role":"assistant","content":"I couldn't detect coordinate columns. Please select them and enter CRS below."})
             cols = list(df.columns)
             return history2, create_map(), state, gr.update(choices=cols, visible=True), gr.update(choices=cols, visible=True), gr.update(visible=True), gr.update(visible=True)
+
+    history2.append({"role":"assistant","content":"Please upload a presence CSV to begin."})
     return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
 def confirm_coords(lat_col, lon_col, crs_raw, history, state):
@@ -642,89 +556,57 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
     try:
         src_epsg = resolve_crs(crs_raw) if crs_raw else 4326
     except Exception:
-        history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Could you try another format?"})
+        history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Please try another format (e.g., 32610, 'UTM zone 10N')."})
         return history, create_map(), state, gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
-    src_crs = RioCRS.from_epsg(src_epsg)
+
+    src_crs = RioCRS.from_epsg(int(src_epsg))
     dst_crs = RioCRS.from_epsg(4326)
     lon_vals, lat_vals = rio_transform(src_crs, dst_crs, df[lon_col].tolist(), df[lat_col].tolist())
     df['latitude'], df['longitude'] = lat_vals, lon_vals
     df.to_csv("inputs/presence_points.csv", index=False)
-    history.append({
-        "role": "assistant",
-        "content": (
-            "✅ Coordinates set! You're doing awesome!\n\n"
-            "Now say things like **\"I want bio1, ndvi, elevation\"** to fetch layers, "
-            "or **\"run model\"** to train & predict.\n\n"
-            + layers_help_text()
-        )
-    })
+
+    history.append({"role":"assistant","content":"✅ Coordinates set!\n\n" + LONG_HELP})
     return history, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
-# ------------------------- UI -------------------------
-WELCOME_MD = (
-    "👋 Hello, I'm **SpatChat (SDM)**! Upload a presence CSV to begin.\n\n"
-    "Now say things like **\"I want bio1, ndvi, elevation\"** to fetch layers, or **\"run model\"** to train & predict.\n\n"
-    + layers_help_text()
-)
-
-with gr.Blocks() as demo:
-    gr.Image(
-        value="logo_long1.png",
-        show_label=False,
-        show_download_button=False,
-        show_share_button=False,
-        type="filepath",
-        elem_id="logo-img"
-    )
+# ──────────────────────────────────────────────────────────────────────────────
+# UI
+# ──────────────────────────────────────────────────────────────────────────────
+with gr.Blocks(title="SpatChat: SDM") as demo:
+    gr.Image(value="logo_long1.png", show_label=False, show_download_button=False, show_share_button=False, type="filepath", elem_id="logo-img")
     gr.HTML("""
     <style>
-    #logo-img img {
-        height: 90px;
-        margin: 10px 50px 10px 10px;
-        border-radius: 6px;
-    }
+    #logo-img img { height: 90px; margin: 10px 50px 10px 10px; border-radius: 6px; }
     </style>
     """)
     gr.Markdown("## 🗺️ SpatChat: Species Distribution Model {sdm}  🐢🐍🦅🦋🦉🦊🐞 ")
-    gr.HTML("""
-    <div style="margin-top: -10px; margin-bottom: 15px;">
-      <input type="text" value="https://spatchat.org/browse/?room=sdm" id="shareLink" readonly style="width: 50%; padding: 5px; background-color: #f8f8f8; color: #222; font-weight: 500; border: 1px solid #ccc; border-radius: 4px;">
-      <button onclick="navigator.clipboard.writeText(document.getElementById('shareLink').value)" style="padding: 5px 10px; background-color: #007BFF; color: white; border: none; border-radius: 4px; cursor: pointer;">📋 Copy Share Link</button>
-      <div style="margin-top: 10px; font-size: 14px;">
-        <b>Share:</b>
-        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=sdm" target="_blank">🐦 Twitter</a> |
-        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=sdm" target="_blank">📘 Facebook</a>
-      </div>
-    </div>
-    """)
-    gr.Markdown("""
-                <div style="font-size: 14px;">
-                © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
-                If you use Spatchat in research, please cite:<br>
-                <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Species Distribution Model.</i>
-                </div>
-                """)
-    state = gr.State({"stage": "await_upload"})
+
+    state = gr.State({"stage":"await_upload"})
+
     with gr.Row():
         with gr.Column(scale=1):
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
             download_btn = gr.DownloadButton("📥 Download Results", zip_results)
         with gr.Column(scale=1):
-            chat = gr.Chatbot(value=[{"role":"assistant","content":WELCOME_MD}], type="messages", label="💬 Chat", height=400)
-            user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
+            chat = gr.Chatbot(
+                value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat (SDM)! Upload a presence CSV to begin."}],
+                type="messages", label="💬 Chat", height=430
+            )
+            user_in = gr.Textbox(label="Ask SpatChat", placeholder='e.g., "I want bio1, ndvi, elevation" or "run model" or "explain those stats"')
+
             file_input = gr.File(label="📄 Upload Presence CSV", type="filepath", file_types=[".csv"])
             lat_dropdown = gr.Dropdown(choices=[], label="Latitude column", visible=False)
             lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
-            crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
+            crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N", visible=False)
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
-    file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
-    confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
-    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state])
+
+    file_input.change(on_upload, inputs=[file_input, chat, state],
+                      outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
+    confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state],
+                      outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
+
+    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state],
+                   outputs=[chat, map_out, state])
     user_in.submit(lambda: "", None, user_in)
 
 if __name__ == "__main__":
-    try:
-        # Gradio 5.x: queue() has no concurrency_count kwarg on Spaces;
-        demo.queue(max_size=32).launch(ssr_mode=False)
-    except TypeError:
-        demo.launch(ssr_mode=False)
+    demo.launch(ssr_mode=False)
