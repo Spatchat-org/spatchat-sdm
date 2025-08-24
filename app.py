@@ -10,7 +10,7 @@ import difflib
 import sys
 
 import gradio as gr
-import geemap.foliumap as foliumap  # noqa: F401 (kept for future map features)
+import geemap.foliumap as foliumap  # kept for future map features
 import folium
 import html as html_lib
 import pandas as pd
@@ -27,10 +27,16 @@ from dotenv import load_dotenv
 from rasterio.crs import CRS as RioCRS
 from rasterio.warp import transform as rio_transform
 
-print("Starting SpatChat SDM (with layer explainer + stats interpreter)")
+print("Starting SpatChat SDM (layer catalog wired to WorldClim v1, SRTMGL1 v003, MODIS 061)")
 
-# ------------------------- Layer catalog (no LLM needed) -------------------------
-# Short, safe, vendor-neutral summaries. You can customize sources in scripts/fetch_predictors.py.
+# ------------------------- Layer catalog (now matches fetch_predictors.py) -------------------------
+# Earth Engine sources used in scripts/fetch_predictors.py:
+# - Bioclim: WORLDCLIM/V1/BIO (bio1..bio19) ~1 km
+# - Elevation: USGS/SRTMGL1_003 (30 m)
+# - Slope/Aspect: ee.Terrain.products(USGS/SRTMGL1_003) (30 m)
+# - NDVI: MODIS/061/MOD13Q1, NDVI band, mean(2022-01-01 .. 2024-01-01) (250 m)
+# - Landcover: MODIS/061/MCD12Q1, LC_Type1 (IGBP classes) (500 m)
+
 BIO_DEFS = {
     "bio1": "Annual mean temperature",
     "bio2": "Mean diurnal range (mean of monthly (max temp − min temp))",
@@ -52,64 +58,51 @@ BIO_DEFS = {
     "bio18": "Precipitation of warmest quarter",
     "bio19": "Precipitation of coldest quarter",
 }
+
 LAYER_CATALOG = {
     "bioclim": {
-        "name": "Bioclim variables (Bio1–Bio19)",
-        "source": (
-            "Climatology normals (temperature & precipitation–derived variables). "
-            "Commonly distributed as WorldClim v2 or CHELSA; your Space fetches them via Earth Engine "
-            "(see scripts/fetch_predictors.py for the exact dataset/version)."
-        ),
-        "resolution": "Typically ~1 km (depends on dataset/version)",
-        "notes": "Use names bio1 … bio19. Examples: bio1=annual mean temp, bio12=annual precip.",
+        "name": "Bioclim variables (BIO1–BIO19)",
+        "source": "WorldClim v1 bioclim normals via Earth Engine: WORLDCLIM/V1/BIO",
+        "resolution": "~1 km",
+        "notes": "Use names bio1 … bio19. Examples: bio1=annual mean temperature, bio12=annual precipitation.",
     },
     "elevation": {
-        "name": "Elevation",
-        "source": (
-            "Global DEM via Earth Engine (e.g., SRTM or NASA DEM). "
-            "Your exact DEM is defined in scripts/fetch_predictors.py."
-        ),
-        "resolution": "30–90 m (dataset dependent)",
-        "notes": "Slope and aspect are derived from elevation.",
+        "name": "Elevation (DEM)",
+        "source": "USGS/SRTMGL1_003 via Earth Engine",
+        "resolution": "30 m",
+        "notes": "Slope and aspect are derived from SRTM.",
     },
     "slope": {
-        "name": "Slope (derived)",
-        "source": "Derived from the selected DEM in Earth Engine.",
-        "resolution": "Same as elevation",
-        "notes": "Units usually degrees.",
+        "name": "Slope (derived from SRTM)",
+        "source": "ee.Terrain.products(USGS/SRTMGL1_003)",
+        "resolution": "30 m",
+        "notes": "Units in degrees.",
     },
     "aspect": {
-        "name": "Aspect (derived)",
-        "source": "Derived from the selected DEM in Earth Engine.",
-        "resolution": "Same as elevation",
+        "name": "Aspect (derived from SRTM)",
+        "source": "ee.Terrain.products(USGS/SRTMGL1_003)",
+        "resolution": "30 m",
         "notes": "Degrees clockwise from North (0–360).",
     },
     "ndvi": {
         "name": "NDVI (vegetation greenness)",
-        "source": (
-            "Normalized Difference Vegetation Index derived from satellite reflectance "
-            "(commonly MODIS or Sentinel/Landsat composites). "
-            "See scripts/fetch_predictors.py for which collection is used."
-        ),
-        "resolution": "250 m – 10 m (sensor dependent)",
+        "source": "MODIS/061/MOD13Q1 NDVI mean (2022-01-01 to 2024-01-01)",
+        "resolution": "250 m",
         "notes": "Range ~ −1 to 1; higher = greener vegetation.",
     },
     "landcover": {
-        "name": "Land cover classes",
-        "source": (
-            "MODIS MCD12Q1 (IGBP scheme) is commonly used. "
-            "Class list matches the IGBP categories."
-        ),
-        "resolution": "500 m (for MODIS MCD12Q1)",
-        "notes": "Use snake_case class names, e.g., water, urban_and_built_up, croplands, etc.",
+        "name": "Land cover (IGBP classes)",
+        "source": "MODIS/061/MCD12Q1 LC_Type1",
+        "resolution": "500 m",
+        "notes": "Snake_case names (e.g., water, urban_and_built_up, croplands…).",
     },
 }
 
-# --- Which top-level predictors we support (all lower-case) ---
+# Which top-level predictors the UI supports (lower-case)
 PREDICTOR_CHOICES = ([f"bio{i}" for i in range(1, 20)] + ["elevation", "slope", "aspect", "ndvi", "landcover"])
 VALID_LAYERS = {p.lower() for p in PREDICTOR_CHOICES}
 
-# All available MODIS landcover classes
+# MODIS landcover classes (IGBP)
 LANDCOVER_CLASSES = {
     c.lower() for c in (
         "water", "evergreen_needleleaf_forest", "evergreen_broadleaf_forest",
@@ -120,7 +113,7 @@ LANDCOVER_CLASSES = {
     )
 }
 
-# --- Pre-render colorbar → base64 ---
+# --- Pre-render colorbar → base64 (for map legend) ---
 fig, ax = plt.subplots(figsize=(4, 0.5))
 norm = Normalize(vmin=0, vmax=1)
 plt.colorbar(ScalarMappable(norm=norm, cmap="viridis"), cax=ax, orientation="horizontal").set_ticks([])
@@ -138,46 +131,50 @@ svc = json.loads(os.environ.get("GEE_SERVICE_ACCOUNT", "{}"))
 creds = ee.ServiceAccountCredentials(svc.get("client_email"), key_data=json.dumps(svc))
 ee.Initialize(creds)
 
-# --- LLM client (primary: Together) ---
+# --- LLM client (Together primary) ---
 client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
-# ------------------------- Utility: layer help & info -------------------------
+# ------------------------- Helper: layer menu text -------------------------
 def layers_help_text() -> str:
     return (
-        "### 📦 Available layers\n"
-        "- **Bioclim**: **bio1–bio19** (e.g., bio1=Annual Mean Temp, bio12=Annual Precip)\n"
-        "- **Topography**: **elevation**, **slope**, **aspect**\n"
-        "- **Remote sensing**: **ndvi**\n"
-        "- **Landcover** (MODIS IGBP): "
-        "water, urban_and_built_up, croplands, grasslands, evergreen_broadleaf_forest, "
-        "evergreen_needleleaf_forest, deciduous_broadleaf_forest, deciduous_needleleaf_forest, "
-        "mixed_forest, closed_shrublands, open_shrublands, woody_savannas, savannas, "
-        "permanent_wetlands, cropland_natural_vegetation_mosaic, snow_and_ice, barren_or_sparsely_vegetated\n"
+        "### 📦 Available layers (exact datasets)\n"
+        f"- **Bioclim**: **bio1–bio19** — {LAYER_CATALOG['bioclim']['source']} ({LAYER_CATALOG['bioclim']['resolution']})\n"
+        f"- **Topography**: **elevation**, **slope**, **aspect** — {LAYER_CATALOG['elevation']['source']} (30 m)\n"
+        f"- **Remote sensing**: **ndvi** — {LAYER_CATALOG['ndvi']['source']} (250 m)\n"
+        f"- **Landcover**: **MODIS IGBP classes** — {LAYER_CATALOG['landcover']['source']} (500 m)\n"
         "\n"
         "### 💬 Say it like this\n"
         "• **\"I want bio1, ndvi, elevation\"** (fetch layers)\n"
         "• **\"Fetch bio5, bio12 and slope\"**\n"
         "• **\"Add landcover water and urban_and_built_up\"**\n"
         "• **\"Run model\"** (train & predict)\n"
-        "• **\"What is bio5?\"** or **\"Where does landcover come from?\"**\n"
+        "• **\"What is bio5?\"**, **\"Where does landcover come from?\"**\n"
         "• **\"Explain those stats\"** (summarize latest performance & coefficients)\n"
     )
 
 def describe_layer_token(tok: str) -> str:
     t = tok.strip().lower()
     if t in BIO_DEFS:
-        return f"**{t.upper()}** — {BIO_DEFS[t]}\n• Source: {LAYER_CATALOG['bioclim']['source']}\n• Notes: {LAYER_CATALOG['bioclim']['notes']}"
+        return (
+            f"**{t.upper()}** — {BIO_DEFS[t]}\n"
+            f"• Source: {LAYER_CATALOG['bioclim']['source']} ({LAYER_CATALOG['bioclim']['resolution']})\n"
+            f"• Notes: {LAYER_CATALOG['bioclim']['notes']}"
+        )
     if t in ("elevation", "slope", "aspect"):
         info = LAYER_CATALOG[t]
-        return f"**{info['name']}**\n• Source: {info['source']}\n• Resolution: {info['resolution']}\n• Notes: {info['notes']}"
+        return f"**{info['name']}**\n• Source: {info['source']} ({info['resolution']})\n• Notes: {info['notes']}"
     if t == "ndvi":
         info = LAYER_CATALOG["ndvi"]
-        return f"**{info['name']}**\n• Source: {info['source']}\n• Resolution: {info['resolution']}\n• Notes: {info['notes']}"
+        return f"**{info['name']}**\n• Source: {info['source']} ({info['resolution']})\n• Notes: {info['notes']}"
     if t == "landcover":
         info = LAYER_CATALOG["landcover"]
         cats = ", ".join(sorted(list(LANDCOVER_CLASSES))[:10]) + ", …"
-        return f"**{info['name']}**\n• Source: {info['source']}\n• Resolution: {info['resolution']}\n• Notes: {info['notes']}\n• Example classes: {cats}"
-    # Try to interpret "bio 5" or "Bio-5"
+        return (
+            f"**{info['name']}**\n"
+            f"• Source: {info['source']} ({info['resolution']})\n"
+            f"• Notes: {info['notes']}\n"
+            f"• Example classes: {cats}"
+        )
     m = re.match(r"bio\s*[-_ ]?(\d{1,2})$", t)
     if m:
         key = f"bio{int(m.group(1))}"
@@ -186,16 +183,14 @@ def describe_layer_token(tok: str) -> str:
     return f"Sorry — I don’t recognize **{tok}** as a fetchable layer."
 
 def explain_layers_from_text(user_msg: str) -> str:
-    # Pull all tokens we might explain
     toks = re.findall(r"(bio\s*[-_ ]?\d{1,2}|ndvi|elevation|slope|aspect|landcover)", user_msg, flags=re.I)
     if not toks:
-        # general layer explainer
         parts = [
             "### ℹ️ Data sources (summary)",
-            f"**Bioclim** — {LAYER_CATALOG['bioclim']['source']}",
-            f"**Elevation/Slope/Aspect** — {LAYER_CATALOG['elevation']['source']}",
-            f"**NDVI** — {LAYER_CATALOG['ndvi']['source']}",
-            f"**Landcover** — {LAYER_CATALOG['landcover']['source']}",
+            f"**Bioclim** — {LAYER_CATALOG['bioclim']['source']} ({LAYER_CATALOG['bioclim']['resolution']})",
+            f"**Elevation/Slope/Aspect** — {LAYER_CATALOG['elevation']['source']} (30 m)",
+            f"**NDVI** — {LAYER_CATALOG['ndvi']['source']} (250 m)",
+            f"**Landcover** — {LAYER_CATALOG['landcover']['source']} (500 m)",
             "",
             layers_help_text()
         ]
@@ -211,7 +206,6 @@ def explain_layers_from_text(user_msg: str) -> str:
 
 # ------------------------- Stats explanation (no LLM) -------------------------
 def explain_latest_stats() -> str:
-    """Summarize latest outputs/performance_metrics.csv and outputs/coefficients.csv in human language."""
     perf_fp = "outputs/performance_metrics.csv"
     coef_fp = "outputs/coefficients.csv"
     lines = []
@@ -222,8 +216,7 @@ def explain_latest_stats() -> str:
             perf = pd.read_csv(perf_fp)
             if not perf.empty:
                 had_any = True
-                row = perf.iloc[0]  # take first row (or only)
-                # pick common metrics if present
+                row = perf.iloc[0]
                 metrics = []
                 def pick(name):
                     for c in perf.columns:
@@ -257,12 +250,10 @@ def explain_latest_stats() -> str:
     if os.path.exists(coef_fp):
         try:
             coef = pd.read_csv(coef_fp).dropna(axis=1, how="all")
-            # try to find coefficient columns
             term_col = next((c for c in coef.columns if c.lower() in ("term", "feature", "variable", "predictor")), None)
             val_col = next((c for c in coef.columns if c.lower() in ("coef", "coefficient", "estimate", "beta", "weight")), None)
             if term_col and val_col and not coef.empty:
                 had_any = True
-                # drop intercept-ish rows
                 mask = ~coef[term_col].str.lower().str.contains(r"^intercept$|^const$", regex=True, na=False)
                 slim = coef.loc[mask, [term_col, val_col]].copy()
                 slim["abs"] = slim[val_col].abs()
@@ -278,22 +269,16 @@ def explain_latest_stats() -> str:
                 else:
                     lines.append("(Couldn’t rank predictors.)")
             else:
-                # still show the table size
-                if not os.path.exists(coef_fp):
-                    pass
-                else:
-                    lines.append("### 🧠 Coefficients")
-                    lines.append("(Coefficients file present, but couldn’t detect ‘term/coef’ columns.)")
+                lines.append("### 🧠 Coefficients\n(Coefficients file present, but couldn’t detect ‘term/coef’ columns.)")
         except Exception as e:
             lines.append(f"⚠️ Couldn’t parse coefficients.csv: {e}")
 
     if not had_any:
         return "I couldn’t find any model outputs yet. Try **run model**, then say **explain those stats**."
-    # Friendly closer
     lines.append("\nTip: If any metric is unclear, ask e.g. “What does AUC mean?”")
     return "\n".join(lines)
 
-# ------------------------- App state & file housekeeping -------------------------
+# ------------------------- App state & housekeeping -------------------------
 def clear_all():
     for d in ("predictor_rasters", "outputs", "inputs"):
         shutil.rmtree(d, ignore_errors=True)
@@ -411,14 +396,25 @@ def create_map():
                 vmin, vmax = np.nanmin(arr), np.nanmax(arr)
                 if not np.isnan(vmin) and vmin!=vmax:
                     rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
-                    folium.raster_layers.ImageOverlay(rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]], opacity=1.0, name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})").add_to(m)
+                    folium.raster_layers.ImageOverlay(
+                        rgba,
+                        bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
+                        opacity=1.0,  # predictors shown opaque
+                        name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
+                    ).add_to(m)
     sf = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(sf):
         with rasterio.open(sf) as src:
             arr = src.read(1); bnd = src.bounds
         vmin, vmax = np.nanmin(arr), np.nanmax(arr)
         rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
-        folium.raster_layers.ImageOverlay(rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]], opacity=0.7, name="🎯 Suitability").add_to(m)
+        # 👉 Make suitability NOT semi-transparent (opacity = 1.0)
+        folium.raster_layers.ImageOverlay(
+            rgba,
+            bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
+            opacity=1.0,   # was 0.7 before
+            name="🎯 Suitability"
+        ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     img_html = f'<img src="data:image/png;base64,{COLORBAR_BASE64}" style="position:absolute; bottom:20px; right:10px; width:200px; height:30px; z-index:1000;"/>'
     m.get_root().html.add_child(Element(img_html))
@@ -464,7 +460,6 @@ def run_fetch(sl, lc):
         ).choices[0].message.content
         return create_map(), clar
 
-    # Validate landcover subclasses
     bad_codes = [c for c in lc if c not in LANDCOVER_CLASSES]
     if bad_codes:
         suggestions = []
@@ -508,7 +503,7 @@ def run_model():
 
 # ------------------------- Chat loop -------------------------
 def chat_step(file, user_msg, history, state):
-    # 0) If no CSV yet, fallback to conversational LLM
+    # No CSV yet → short LLM
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [{"role":"system","content":FALLBACK_PROMPT},{"role":"user","content":user_msg}]
         reply = client.chat.completions.create(
@@ -517,18 +512,18 @@ def chat_step(file, user_msg, history, state):
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":reply}])
         return history, create_map(), state
 
-    # 1) Reset
+    # Reset
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
         new_hist = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
         return new_hist, create_map(), state
 
-    # 2) Quick “help / layers” menu
+    # Help / layers menu
     if re.search(r"\b(help|layers|what can i (?:fetch|get|use)|available layers|what layers)\b", user_msg, re.I):
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":layers_help_text()}])
         return history, create_map(), state
 
-    # 3) Layer explainer (no LLM): “what is bio5?”, “where does landcover come from?”
+    # Layer explainer
     if re.search(r"\b(what\s+is|what\s+does|where\s+does|which\s+dataset|source of)\b", user_msg, re.I) and re.search(
         r"(bio\s*[-_ ]?\d{1,2}|ndvi|elevation|slope|aspect|landcover|layers?)", user_msg, re.I
     ):
@@ -536,7 +531,7 @@ def chat_step(file, user_msg, history, state):
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":ans}])
         return history, create_map(), state
 
-    # 4) Explain stats (no LLM): “explain those stats”, “interpret the results”
+    # Explain stats
     if re.search(r"\b(explain|interpret|help me understand|summarize)\b", user_msg, re.I) and re.search(
         r"\b(stats?|results?|model|performance|coefficients?)\b", user_msg, re.I
     ):
@@ -548,7 +543,7 @@ def chat_step(file, user_msg, history, state):
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":ans}])
         return history, create_map(), state
 
-    # 5) Build the JSON-tool prompt and dispatch
+    # Tool routing via LLM
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", messages=msgs, temperature=0.0
@@ -581,7 +576,7 @@ def chat_step(file, user_msg, history, state):
         m_out, _ = create_map(), zip_results()
         assistant_txt = "✅ ZIP is downloading…"
     else:
-        # Non-tool general conversation (fallback)
+        # General fallback
         try:
             n_pts = len(pd.read_csv("inputs/presence_points.csv"))
         except Exception:
@@ -728,8 +723,8 @@ with gr.Blocks() as demo:
     user_in.submit(lambda: "", None, user_in)
 
 if __name__ == "__main__":
-    # On Gradio 5.x, queue() has no concurrency_count param; HF Spaces handles scaling
     try:
+        # Gradio 5.x: queue() has no concurrency_count kwarg on Spaces;
         demo.queue(max_size=32).launch(ssr_mode=False)
     except TypeError:
         demo.launch(ssr_mode=False)
