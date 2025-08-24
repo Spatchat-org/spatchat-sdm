@@ -72,6 +72,48 @@ creds = ee.ServiceAccountCredentials(svc.get("client_email"), key_data=json.dump
 ee.Initialize(creds)
 
 # ──────────────────────────────────────────────────────────────
+# Helpers for LLM response parsing (HF + Together)
+# ──────────────────────────────────────────────────────────────
+
+def _choice_content(choice):
+    """
+    Works for HF InferenceClient and Together pydantic objects.
+    - choice.message.content may be str or list of content parts.
+    """
+    msg = getattr(choice, "message", None)
+    if msg is None and isinstance(choice, dict):
+        msg = choice.get("message")
+
+    # get content (str or list)
+    content = None
+    if msg is not None:
+        if isinstance(msg, dict):
+            content = msg.get("content")
+        else:
+            content = getattr(msg, "content", None)
+
+    # If content is a list (HF can return structured parts), join text pieces.
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        content = "".join(parts)
+
+    if content is None:
+        content = ""
+    return content
+
+def _delta_text(delta):
+    # HF stream delta text accessor
+    if isinstance(delta, dict):
+        return delta.get("content", "")
+    return getattr(delta, "content", "")
+
+# ──────────────────────────────────────────────────────────────
 # LLM: HF primary, Together fallback with pacing for 0.6 QPM
 # ──────────────────────────────────────────────────────────────
 
@@ -101,17 +143,19 @@ class UnifiedLLM:
     """
     def __init__(self):
         # HF: model can be a model id OR an endpoint URL
-        hf_model_or_url = os.getenv("HF_ENDPOINT_URL", HF_MODEL_DEFAULT)
+        hf_model_or_url = (os.getenv("HF_ENDPOINT_URL") or HF_MODEL_DEFAULT).strip()
+        hf_token = (os.getenv("HF_TOKEN") or "").strip()
+
         self.hf_client = InferenceClient(
             model=hf_model_or_url,
-            token=os.getenv("HF_TOKEN"),
+            token=hf_token,
             timeout=300,
         )
 
         # Together fallback (optional)
         self.together = None
-        self.together_model = os.getenv("TOGETHER_MODEL", TOGETHER_MODEL_DEFAULT)
-        tg_key = os.getenv("TOGETHER_API_KEY")
+        self.together_model = (os.getenv("TOGETHER_MODEL") or TOGETHER_MODEL_DEFAULT).strip()
+        tg_key = (os.getenv("TOGETHER_API_KEY") or "").strip()
         if tg_key:
             self.together = Together(api_key=tg_key)
             # 0.6 QPM ≈ 100s between requests
@@ -131,9 +175,9 @@ class UnifiedLLM:
                         stream=stream,
                     )
                     if stream:
-                        text = "".join(ch.choices[0].delta.get("content", "") for ch in resp)
+                        text = "".join(_delta_text(ch.choices[0].delta) for ch in resp)
                     else:
-                        text = resp.choices[0].message.get("content", "")
+                        text = _choice_content(resp.choices[0])
                     return text
                 else:
                     # fallback to text_generation if model lacks chat endpoint
@@ -193,7 +237,7 @@ class UnifiedLLM:
                         max_tokens=max_tokens,
                         stream=stream,
                     )
-                    return resp.choices[0].message.get("content", "")
+                    return _choice_content(resp.choices[0])
                 except (RateLimitError, ServiceUnavailableError) as e:
                     if attempt == 3:
                         raise
@@ -725,7 +769,7 @@ with gr.Blocks() as demo:
             crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
 
-    # Serialize execution to avoid concurrent LLM calls from UI events
+    # Older Gradio compatibility: only pass max_size
     demo.queue(max_size=16)
 
     file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
