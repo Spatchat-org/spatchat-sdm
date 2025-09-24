@@ -184,7 +184,7 @@ class UnifiedLLM:
                     prompt = self._messages_to_prompt(messages)
                     text = self.hf_client.text_generation(
                         prompt,
-                        max_new_tokens=max_tokens,
+                        max_new_tokens=512,
                         temperature=temperature,
                         stream=False,
                         return_full_text=False,
@@ -266,7 +266,7 @@ def clear_all():
 
 clear_all()
 
-# --- Utility to clear specific dirs (added) ---
+# --- Utility to clear specific dirs ---
 def _clean_dir(path: str):
     shutil.rmtree(path, ignore_errors=True)
     os.makedirs(path, exist_ok=True)
@@ -416,6 +416,10 @@ def run_fetch(sl, lc):
     _clean_dir("predictor_rasters")
     _clean_dir("predictor_rasters/wgs84")
 
+    # normalize inputs to lower-case
+    sl = [s.lower() for s in sl]
+    lc = [c.lower() for c in lc]
+
     # 1) Build the list of requested predictors
     layers = list(sl)
     if lc:
@@ -486,33 +490,23 @@ def run_fetch(sl, lc):
         return create_map(), clar
 
     # 5) All inputs valid → proceed with fetch
-    # —————————————————————————————————————————————
-    #  a) Echo what we're about to do
     print(f"🧪 [run_fetch] SL={sl!r}   LC={lc!r}", file=sys.stdout)
 
-    #  b) Set the SAME python executable and unbuffered mode
     os.environ["SELECTED_LAYERS"] = ",".join(sl)
-
-    # pass the snake_case labels directly
     os.environ["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
+
     cmd = [
         sys.executable,
-        "-u",  # unbuffered: so stdout appears as it’s printed
+        "-u",
         os.path.join("scripts", "fetch_predictors.py")
     ]
 
-    #  c) Run and capture *both* stdout and stderr
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    # capture everything
     logs = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     if proc.returncode != 0:
         return create_map(), f"❌ Fetch failed:\n```\n{logs}\n```"
     else:
-        # show you the full export log on success
         return create_map(), f"✅ Predictors fetched.\n\n```bash\n{logs}\n```"
-
-    # d) Success
-    return create_map(), "✅ Predictors fetched."
 
 def run_model():
     # clear previous outputs so we only ship fresh results
@@ -528,8 +522,44 @@ def run_model():
     zip_results()
 
     return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
-    
+
 def chat_step(file, user_msg, history, state):
+    # --- TOOL INTENT FIRST (so "I want bio3" triggers fetch even pre-CSV) ---
+    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
+    resp = llm.chat(msgs, temperature=0.0, max_tokens=256, stream=False)
+
+    try:
+        call = json.loads(resp)
+        tool = call.get("tool")
+    except Exception:
+        tool = None
+
+    if tool == "fetch":
+        m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
+        assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
+        history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
+        return history, m_out, state
+    elif tool == "run_model":
+        m_out, status, perf_df, coef_df = run_model()
+        if perf_df is None:
+            assistant_txt = status
+        else:
+            perf = pd.read_csv("outputs/performance_metrics.csv")
+            first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
+            perf_md = (
+                "**Model Performance (1 of 2):**\n\n" + first.to_markdown(index=False)
+                + "\n\n**Model Performance (2 of 2):**\n\n" + second.to_markdown(index=False)
+            )
+            coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
+            coef_md = coef.to_markdown(index=False)
+            assistant_txt = (
+                f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n"
+                f"**Predictor Coefficients:**\n\n{coef_md}"
+            )
+        history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
+        return history, m_out, state
+
+    # --- If no tool was detected, proceed with the original logic ---
     # 0a) If no CSV yet, fallback to conversational LLM
     if not os.path.exists("inputs/presence_points.csv"):
         fb = [
@@ -544,10 +574,9 @@ def chat_step(file, user_msg, history, state):
         )
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
         return history, create_map(), state
-    
+
     # 0b) “run model” shortcut (also catch “model” or “run” alone)
     if re.fullmatch(r"\s*(?:run\s+)?model\s*$", user_msg, re.I):
-        # invoke model directly
         m_out, status, perf_df, coef_df = run_model()
         if perf_df is not None:
             perf = pd.read_csv("outputs/performance_metrics.csv")
@@ -574,7 +603,7 @@ def chat_step(file, user_msg, history, state):
         new_hist = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
         return new_hist, create_map(), state
 
-    # 2) Build the JSON-tool prompt
+    # 2) Build the JSON-tool prompt (legacy order kept for non-tool Q&A)
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
     resp = llm.chat(
         msgs,
@@ -583,14 +612,12 @@ def chat_step(file, user_msg, history, state):
         stream=False
     )
 
-    # 3) Parse and dispatch
     try:
         call = json.loads(resp)
         tool = call.get("tool")
     except Exception:
         tool = None
 
-    # 4) Execute tools
     if tool == "fetch":
         m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
@@ -615,7 +642,7 @@ def chat_step(file, user_msg, history, state):
         m_out, _ = create_map(), zip_results()
         assistant_txt = "✅ ZIP is downloading…"
     else:
-        # summary block remains unchanged
+        # summary block
         try:
             n_pts = len(pd.read_csv("inputs/presence_points.csv"))
         except:
@@ -659,7 +686,6 @@ def chat_step(file, user_msg, history, state):
         )
         m_out = create_map()
 
-    # 5) record everything
     history.extend([
         {"role":"user","content":user_msg},
         {"role":"assistant","content":assistant_txt}
