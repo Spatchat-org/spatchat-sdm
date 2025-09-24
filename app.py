@@ -771,7 +771,8 @@ with gr.Blocks() as demo:
     with gr.Row():
         with gr.Column(scale=1):
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
-            download_btn = gr.DownloadButton("📥 Download Results", zip_results)
+            # CHANGED: build ZIP on click, not at startup
+            download_btn = gr.DownloadButton(label="📥 Download Results")
         with gr.Column(scale=1):
             chat = gr.Chatbot(value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}], type="messages", label="💬 Chat", height=400)
             user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
@@ -780,6 +781,9 @@ with gr.Blocks() as demo:
             lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
             crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
+
+    # Wire the click to generate a fresh ZIP at click-time
+    download_btn.click(fn=zip_results, outputs=download_btn)
 
     # Older Gradio compatibility: only pass max_size
     demo.queue(max_size=16)
