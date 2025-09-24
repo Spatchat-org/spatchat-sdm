@@ -304,17 +304,50 @@ def detect_coords(df, fuzz_threshold=80):
     return None, None
 
 
-# --- CRS parsing helpers ---
-def parse_epsg_code(s):
-    m = re.match(r"^(\d{4,5})$", s.strip())
+# --- CRS parsing helpers (UPDATED to handle 'UTM 10T') ---
+def parse_epsg_code(s: str):
+    # Accept "32610", "EPSG:32610", "epsg 32610", etc.
+    m = re.search(r'(?:^|\b)epsg\s*:\s*(\d{4,5})\b', s, re.I)
+    if not m:
+        m = re.match(r'^\s*(\d{4,5})\s*$', s.strip())
     return int(m.group(1)) if m else None
 
-def parse_utm_crs(s):
-    m = re.search(r"utm\s*zone\s*(\d+)\s*([NS])", s, re.I)
-    if m:
-        zone, hemi = int(m.group(1)), m.group(2).upper()
-        return (32600 if hemi=='N' else 32700) + zone
-    return None
+def parse_utm_crs(s: str):
+    """
+    Parse things like:
+      "UTM 10T", "10T", "UTM zone 10N", "zone 10 N", etc.
+    - If letter is N/S, use that directly.
+    - If letter is a latitude band (C–X, no I/O), infer hemisphere:
+        bands N–X => Northern; C–M => Southern.
+    """
+    txt = s.strip()
+
+    patterns = [
+        r'\butm\b[^0-9]*?(\d{1,2})\s*([A-Za-z])?',   # "UTM 10T", "UTM 10N"
+        r'\bzone\s*(\d{1,2})\s*([A-Za-z])?',        # "zone 10T", "zone 10N"
+        r'\b(\d{1,2})\s*([C-HJ-NP-X])\b',           # "10T" (band letters)
+        r'\b(\d{1,2})\s*([NS])\b',                  # "10N"/"10S"
+    ]
+    m = None
+    for p in patterns:
+        m = re.search(p, txt, re.I)
+        if m:
+            break
+    if not m:
+        return None
+
+    zone = int(m.group(1))
+    letter = (m.group(2) or '').upper()
+
+    if letter in ('N', 'S'):
+        hemi = 'N' if letter == 'N' else 'S'
+    elif letter:
+        # Latitude band letters: C–M south, N–X north (I and O are not used)
+        hemi = 'N' if letter >= 'N' else 'S'
+    else:
+        hemi = 'N'  # default if unspecified
+
+    return (32600 if hemi == 'N' else 32700) + zone
 
 def llm_parse_crs(raw):
     system = {"role":"system","content":"You're a GIS expert. Given a CRS description, respond with only JSON {\"epsg\": ###} or {\"epsg\": null}."}
@@ -393,7 +426,7 @@ def create_map():
         with rasterio.open(sf) as src:
             arr = src.read(1); bnd = src.bounds
         vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-        rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
+        rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmax))
         folium.raster_layers.ImageOverlay(rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]], opacity=0.7, name="🎯 Suitability").add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     img_html = f'<img src="data:image/png;base64,{COLORBAR_BASE64}" style="position:absolute; bottom:20px; right:10px; width:200px; height:30px; z-index:1000;"/>'
@@ -699,7 +732,7 @@ def chat_step(file, user_msg, history, state):
     ])
     return history, m_out, state, dl_update
 
-# --- Upload callback ---
+# --- Upload callback (UPDATED returns to toggle pickers) ---
 def on_upload(f, history, state):
     history2 = history.copy()
     clear_all()
@@ -723,45 +756,56 @@ def on_upload(f, history, state):
                 "• aspect\n"
                 "• NDVI\n"
                 "• landcover (e.g. water, urban, cropland, etc.)\n\n"
-                "Feel free to ask me what each Bio1–Bio19 variable represents or which landcover classes you can use.\n"
                 "When you’re ready, just say **'I want elevation, ndvi, bio1'** to grab those layers."
             )})
-            return history2, create_map(), state, gr.update()
+            # hide pickers when auto-detected
+            return (history2, create_map(), state, gr.update(),
+                    gr.update(choices=[], visible=False),
+                    gr.update(choices=[], visible=False),
+                    gr.update(visible=False),
+                    gr.update(visible=False))
         else:
-            history2.append({"role":"assistant","content":"I couldn't detect coordinate columns. Please select them and enter CRS below."})
+            history2.append({"role":"assistant","content":"I couldn't detect coordinate columns. Please select them and enter CRS below (e.g., `UTM 10T` or `32610`)."})
             cols = list(df.columns)
-            return history2, create_map(), state, gr.update()
-    return history2, create_map(), state, gr.update()
+            # show pickers when needed
+            return (history2, create_map(), state, gr.update(),
+                    gr.update(choices=cols, visible=True, value=None),
+                    gr.update(choices=cols, visible=True, value=None),
+                    gr.update(visible=True, value="UTM 10T"),
+                    gr.update(visible=True))
+    # default: keep hidden
+    return (history2, create_map(), state, gr.update(),
+            gr.update(visible=False), gr.update(visible=False),
+            gr.update(visible=False), gr.update(visible=False))
 
-# --- CRS confirm callback ---
+# --- CRS confirm callback (UPDATED returns to toggle pickers) ---
 def confirm_coords(lat_col, lon_col, crs_raw, history, state):
     df = pd.read_csv("inputs/presence_points.csv")
     try:
         src_epsg = resolve_crs(crs_raw) if crs_raw else 4326
     except:
-        history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Could you try another format?"})
-        return history, create_map(), state, gr.update()
+        history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Try formats like `32610`, `EPSG:32610`, or `UTM 10T`."})
+        # keep inputs visible for another try
+        return (history, create_map(), state, gr.update(),
+                gr.update(visible=True), gr.update(visible=True),
+                gr.update(visible=True), gr.update(visible=True))
     src_crs = RioCRS.from_epsg(src_epsg)
     dst_crs = RioCRS.from_epsg(4326)
+    # Note: inputs are x=easting (lon_col) and y=northing (lat_col) in source CRS.
     lon_vals, lat_vals = rio_transform(src_crs, dst_crs, df[lon_col].tolist(), df[lat_col].tolist())
     df['latitude'], df['longitude'] = lat_vals, lon_vals
     df.to_csv("inputs/presence_points.csv", index=False)
     history.append({
         "role": "assistant",
         "content": (
-            "✅ Coordinates set! You're doing awesome!\n\n"
-            "Now you can pick from these predictors:\n"
-            "• bio1–bio19\n"
-            "• elevation\n"
-            "• slope\n"
-            "• aspect\n"
-            "• NDVI\n"
-            "• landcover (e.g. water, urban, cropland, etc.)\n\n"
-            "Feel free to ask me what each Bio1–Bio19 variable represents or which landcover classes you can use.\n"
-            "When you’re ready, just say **'I want elevation, ndvi, bio1'** to grab those layers."
+            f"✅ Coordinates transformed from EPSG:{src_epsg} to WGS84 (lat/lon). "
+            "You can now fetch predictors or run the model."
         )
     })
-    return history, create_map(), state, gr.update()
+    # hide after success
+    return (history, create_map(), state, gr.update(),
+            gr.update(visible=False), gr.update(visible=False),
+            gr.update(visible=False), gr.update(visible=False))
 
 # --- Gradio UI ---
 with gr.Blocks() as demo:
@@ -821,8 +865,17 @@ with gr.Blocks() as demo:
     # Older Gradio compatibility: only pass max_size
     demo.queue(max_size=16)
 
-    file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, download_btn])
-    confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, download_btn])
+    # UPDATED: include picker visibility outputs
+    file_input.change(on_upload,
+        inputs=[file_input, chat, state],
+        outputs=[chat, map_out, state, download_btn,
+                 lat_dropdown, lon_dropdown, crs_input, confirm_btn]
+    )
+    confirm_btn.click(confirm_coords,
+        inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state],
+        outputs=[chat, map_out, state, download_btn,
+                 lat_dropdown, lon_dropdown, crs_input, confirm_btn]
+    )
     user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state, download_btn])
     user_in.submit(lambda: "", None, user_in)
     demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=True)
