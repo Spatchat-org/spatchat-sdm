@@ -514,14 +514,14 @@ def run_model():
 
     proc = subprocess.run([sys.executable, "-u", os.path.join("scripts","run_logistic_sdm.py")], capture_output=True, text=True)
     if proc.returncode!=0:
-        return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
+        return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None, None
     perf_df = pd.read_csv("outputs/performance_metrics.csv")
     coef_df = pd.read_csv("outputs/coefficients.csv")
 
-    # prebuild the zip so first click downloads immediately
-    zip_results()
+    # prebuild the zip and return its path
+    zip_path = zip_results()
 
-    return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
+    return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df, zip_path
 
 def chat_step(file, user_msg, history, state):
     # --- TOOL INTENT FIRST (so "I want bio3" triggers fetch even pre-CSV) ---
@@ -538,11 +538,12 @@ def chat_step(file, user_msg, history, state):
         m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
-        return history, m_out, state
+        return history, m_out, state, gr.update()  # no change to download button
     elif tool == "run_model":
-        m_out, status, perf_df, coef_df = run_model()
+        m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is None:
             assistant_txt = status
+            dl_update = gr.update()
         else:
             perf = pd.read_csv("outputs/performance_metrics.csv")
             first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
@@ -556,8 +557,9 @@ def chat_step(file, user_msg, history, state):
                 f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n"
                 f"**Predictor Coefficients:**\n\n{coef_md}"
             )
+            dl_update = gr.update(value=zip_path)
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
-        return history, m_out, state
+        return history, m_out, state, dl_update
 
     # --- If no tool was detected, proceed with the original logic ---
     # 0a) If no CSV yet, fallback to conversational LLM
@@ -573,11 +575,11 @@ def chat_step(file, user_msg, history, state):
             stream=False
         )
         history.extend([{"role":"user","content":user_msg}, {"role":"assistant","content":reply}])
-        return history, create_map(), state
+        return history, create_map(), state, gr.update()
 
     # 0b) “run model” shortcut (also catch “model” or “run” alone)
     if re.fullmatch(r"\s*(?:run\s+)?model\s*$", user_msg, re.I):
-        m_out, status, perf_df, coef_df = run_model()
+        m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is not None:
             perf = pd.read_csv("outputs/performance_metrics.csv")
             first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
@@ -595,13 +597,13 @@ def chat_step(file, user_msg, history, state):
             {"role":"user","content":user_msg},
             {"role":"assistant","content":assistant_txt}
         ])
-        return history, m_out, state
+        return history, m_out, state, gr.update(value=zip_path)
 
     # 1) Handle reset
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
         clear_all()
         new_hist = [{"role":"assistant","content":"👋 All cleared! Please upload your presence-points CSV to begin."}]
-        return new_hist, create_map(), state
+        return new_hist, create_map(), state, gr.update(value=None)
 
     # 2) Build the JSON-tool prompt (legacy order kept for non-tool Q&A)
     msgs = [{"role":"system","content":SYSTEM_PROMPT}] + history + [{"role":"user","content":user_msg}]
@@ -621,10 +623,12 @@ def chat_step(file, user_msg, history, state):
     if tool == "fetch":
         m_out, status = run_fetch(call.get("layers", []), call.get("landcover", []))
         assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
+        dl_update = gr.update()
     elif tool == "run_model":
-        m_out, status, perf_df, coef_df = run_model()
+        m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is None:
             assistant_txt = status
+            dl_update = gr.update()
         else:
             perf = pd.read_csv("outputs/performance_metrics.csv")
             first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
@@ -638,9 +642,11 @@ def chat_step(file, user_msg, history, state):
                 f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n"
                 f"**Predictor Coefficients:**\n\n{coef_md}"
             )
+            dl_update = gr.update(value=zip_path)
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
         assistant_txt = "✅ ZIP is downloading…"
+        dl_update = gr.update(value="spatchat_results.zip")
     else:
         # summary block
         try:
@@ -685,12 +691,13 @@ def chat_step(file, user_msg, history, state):
             stream=False
         )
         m_out = create_map()
+        dl_update = gr.update()
 
     history.extend([
         {"role":"user","content":user_msg},
         {"role":"assistant","content":assistant_txt}
     ])
-    return history, m_out, state
+    return history, m_out, state, dl_update
 
 # --- Upload callback ---
 def on_upload(f, history, state):
@@ -719,12 +726,12 @@ def on_upload(f, history, state):
                 "Feel free to ask me what each Bio1–Bio19 variable represents or which landcover classes you can use.\n"
                 "When you’re ready, just say **'I want elevation, ndvi, bio1'** to grab those layers."
             )})
-            return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+            return history2, create_map(), state, gr.update()
         else:
             history2.append({"role":"assistant","content":"I couldn't detect coordinate columns. Please select them and enter CRS below."})
             cols = list(df.columns)
-            return history2, create_map(), state, gr.update(choices=cols, visible=True), gr.update(choices=cols, visible=True), gr.update(visible=True), gr.update(visible=True)
-    return history2, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+            return history2, create_map(), state, gr.update()
+    return history2, create_map(), state, gr.update()
 
 # --- CRS confirm callback ---
 def confirm_coords(lat_col, lon_col, crs_raw, history, state):
@@ -733,7 +740,7 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
         src_epsg = resolve_crs(crs_raw) if crs_raw else 4326
     except:
         history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Could you try another format?"})
-        return history, create_map(), state, gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
+        return history, create_map(), state, gr.update()
     src_crs = RioCRS.from_epsg(src_epsg)
     dst_crs = RioCRS.from_epsg(4326)
     lon_vals, lat_vals = rio_transform(src_crs, dst_crs, df[lon_col].tolist(), df[lat_col].tolist())
@@ -754,7 +761,7 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
             "When you’re ready, just say **'I want elevation, ndvi, bio1'** to grab those layers."
         )
     })
-    return history, create_map(), state, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+    return history, create_map(), state, gr.update()
 
 # --- Gradio UI ---
 with gr.Blocks() as demo:
@@ -800,8 +807,8 @@ with gr.Blocks() as demo:
     with gr.Row():
         with gr.Column(scale=1):
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
-            # one-click download; file is (re)built at end of run_model()
-            download_btn = gr.DownloadButton("📥 Download Results", value="spatchat_results.zip")
+            # value is set dynamically after model finishes
+            download_btn = gr.DownloadButton("📥 Download Results")
         with gr.Column(scale=1):
             chat = gr.Chatbot(value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}], type="messages", label="💬 Chat", height=400)
             user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
@@ -814,8 +821,8 @@ with gr.Blocks() as demo:
     # Older Gradio compatibility: only pass max_size
     demo.queue(max_size=16)
 
-    file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
-    confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, lat_dropdown, lon_dropdown, crs_input, confirm_btn])
-    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state])
+    file_input.change(on_upload, inputs=[file_input, chat, state], outputs=[chat, map_out, state, download_btn])
+    confirm_btn.click(confirm_coords, inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state], outputs=[chat, map_out, state, download_btn])
+    user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state, download_btn])
     user_in.submit(lambda: "", None, user_in)
     demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=True)
