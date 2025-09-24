@@ -412,7 +412,7 @@ def zip_results():
     return archive
 
 def run_fetch(sl, lc):
-    # NEW: ensure a clean predictor set for this fetch
+    # ensure a clean predictor set for this fetch
     _clean_dir("predictor_rasters")
     _clean_dir("predictor_rasters/wgs84")
 
@@ -515,7 +515,7 @@ def run_fetch(sl, lc):
     return create_map(), "✅ Predictors fetched."
 
 def run_model():
-    # NEW: clear previous outputs so we only ship fresh results
+    # clear previous outputs so we only ship fresh results
     _clean_dir("outputs")
 
     proc = subprocess.run([sys.executable, "-u", os.path.join("scripts","run_logistic_sdm.py")], capture_output=True, text=True)
@@ -523,7 +523,10 @@ def run_model():
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
     perf_df = pd.read_csv("outputs/performance_metrics.csv")
     coef_df = pd.read_csv("outputs/coefficients.csv")
-    # IMPORTANT: do NOT pre-build the zip here; Download button will call zip_results()
+
+    # prebuild the zip so first click downloads immediately
+    zip_results()
+
     return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
     
 def chat_step(file, user_msg, history, state):
@@ -771,8 +774,8 @@ with gr.Blocks() as demo:
     with gr.Row():
         with gr.Column(scale=1):
             map_out = gr.HTML(create_map(), label="🗺️ Map Preview")
-            # CHANGED: build ZIP on click, not at startup
-            download_btn = gr.DownloadButton(label="📥 Download Results")
+            # one-click download; file is (re)built at end of run_model()
+            download_btn = gr.DownloadButton("📥 Download Results", value="spatchat_results.zip")
         with gr.Column(scale=1):
             chat = gr.Chatbot(value=[{"role":"assistant","content":"👋 Hello, I'm SpatChat, your SDM assistant! I'm here to help you build your species distribution model. Please upload your presence CSV to begin."}], type="messages", label="💬 Chat", height=400)
             user_in = gr.Textbox(label="Ask SpatChat", placeholder="Type commands…")
@@ -781,9 +784,6 @@ with gr.Blocks() as demo:
             lon_dropdown = gr.Dropdown(choices=[], label="Longitude column", visible=False)
             crs_input = gr.Textbox(label="Input CRS (code, zone, or name)", placeholder="e.g. 32610, UTM zone 10N, LCC…", visible=False)
             confirm_btn = gr.Button("Confirm Coordinates", visible=False)
-
-    # Wire the click to generate a fresh ZIP at click-time
-    download_btn.click(fn=zip_results, outputs=download_btn)
 
     # Older Gradio compatibility: only pass max_size
     demo.queue(max_size=16)
