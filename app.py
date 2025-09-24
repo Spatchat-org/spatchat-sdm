@@ -266,6 +266,11 @@ def clear_all():
 
 clear_all()
 
+# --- Utility to clear specific dirs (added) ---
+def _clean_dir(path: str):
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+
 # --- Detection helpers ---
 def detect_coords(df, fuzz_threshold=80):
     cols = list(df.columns)
@@ -407,6 +412,10 @@ def zip_results():
     return archive
 
 def run_fetch(sl, lc):
+    # NEW: ensure a clean predictor set for this fetch
+    _clean_dir("predictor_rasters")
+    _clean_dir("predictor_rasters/wgs84")
+
     # 1) Build the list of requested predictors
     layers = list(sl)
     if lc:
@@ -506,12 +515,15 @@ def run_fetch(sl, lc):
     return create_map(), "✅ Predictors fetched."
 
 def run_model():
-    proc = subprocess.run(["python","scripts/run_logistic_sdm.py"], capture_output=True, text=True)
+    # NEW: clear previous outputs so we only ship fresh results
+    _clean_dir("outputs")
+
+    proc = subprocess.run([sys.executable, "-u", os.path.join("scripts","run_logistic_sdm.py")], capture_output=True, text=True)
     if proc.returncode!=0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None
     perf_df = pd.read_csv("outputs/performance_metrics.csv")
     coef_df = pd.read_csv("outputs/coefficients.csv")
-    zip_results()
+    # IMPORTANT: do NOT pre-build the zip here; Download button will call zip_results()
     return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df
     
 def chat_step(file, user_msg, history, state):
