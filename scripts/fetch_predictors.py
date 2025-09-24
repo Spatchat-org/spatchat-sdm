@@ -757,39 +757,39 @@ def on_upload(f, history, state):
     history2 = history.copy()
     clear_all()
     if f and hasattr(f, "name"):
-        # 1. copy original CSV
         shutil.copy(f.name, "inputs/presence_points.csv")
-        # 2. load & detect whatever the user called their coords
         df = pd.read_csv("inputs/presence_points.csv")
         lat, lon = detect_coords(df)
         if lat and lon:
-            # 3. rename to the exact column names fetch_predictors expects
             df = df.rename(columns={lat: "latitude", lon: "longitude"})
             df.to_csv("inputs/presence_points.csv", index=False)
 
-            history2.append({"role":"assistant","content":(
-                "✅ Sweet! I found your `latitude` and `longitude` columns.\n\n"
-                + available_layers_markdown()
-            )})
-            # hide pickers when auto-detected
+            # 1) success message
+            history2.append({"role":"assistant","content":
+                "✅ Sweet! I found your `latitude` and `longitude` columns."
+            })
+            # 2) available layers as a separate message
+            history2.append({"role":"assistant","content": available_layers_markdown()})
+
             return (history2, create_map(), state, gr.update(),
                     gr.update(choices=[], visible=False),
                     gr.update(choices=[], visible=False),
                     gr.update(visible=False),
                     gr.update(visible=False))
         else:
+            # 1) prompt to pick columns/CRS
             history2.append({"role":"assistant","content":
-                "I couldn't detect coordinate columns. Please select them and enter CRS below (e.g., `UTM 10T` or `32610`).\n\n"
-                + available_layers_markdown()
+                "I couldn't detect coordinate columns. Please select them and enter CRS below (e.g., `UTM 10T` or `32610`)."
             })
+            # 2) available layers as a separate message
+            history2.append({"role":"assistant","content": available_layers_markdown()})
+
             cols = list(df.columns)
-            # show pickers when needed
             return (history2, create_map(), state, gr.update(),
                     gr.update(choices=cols, visible=True, value=None),
                     gr.update(choices=cols, visible=True, value=None),
                     gr.update(visible=True, value="UTM 10T"),
                     gr.update(visible=True))
-    # default: keep hidden
     return (history2, create_map(), state, gr.update(),
             gr.update(visible=False), gr.update(visible=False),
             gr.update(visible=False), gr.update(visible=False))
@@ -801,24 +801,23 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
         src_epsg = resolve_crs(crs_raw) if crs_raw else 4326
     except:
         history.append({"role":"assistant","content":"Sorry, I couldn't recognize that CRS. Try formats like `32610`, `EPSG:32610`, or `UTM 10T`."})
-        # keep inputs visible for another try
         return (history, create_map(), state, gr.update(),
                 gr.update(visible=True), gr.update(visible=True),
                 gr.update(visible=True), gr.update(visible=True))
+
     src_crs = RioCRS.from_epsg(src_epsg)
     dst_crs = RioCRS.from_epsg(4326)
-    # Note: inputs are x=easting (lon_col) and y=northing (lat_col) in source CRS.
     lon_vals, lat_vals = rio_transform(src_crs, dst_crs, df[lon_col].tolist(), df[lat_col].tolist())
     df['latitude'], df['longitude'] = lat_vals, lon_vals
     df.to_csv("inputs/presence_points.csv", index=False)
-    history.append({
-        "role": "assistant",
-        "content": (
-            f"✅ Coordinates transformed from EPSG:{src_epsg} to WGS84 (lat/lon).\n\n"
-            + available_layers_markdown()
-        )
+
+    # 1) success message
+    history.append({"role": "assistant",
+        "content": f"✅ Coordinates transformed from EPSG:{src_epsg} to WGS84 (lat/lon)."
     })
-    # hide after success
+    # 2) available layers as a separate message
+    history.append({"role": "assistant", "content": available_layers_markdown()})
+
     return (history, create_map(), state, gr.update(),
             gr.update(visible=False), gr.update(visible=False),
             gr.update(visible=False), gr.update(visible=False))
