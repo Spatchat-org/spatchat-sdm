@@ -747,16 +747,17 @@ def on_upload(f, history, state):
             df = df.rename(columns={lat: "latitude", lon: "longitude"})
             df.to_csv("inputs/presence_points.csv", index=False)
 
+            # Single message that ALWAYS includes the available layers
             history2.append({"role":"assistant","content":(
-                "✅ Sweet! I found your `latitude` and `longitude` columns.\n"
-                "You can now pick from these predictors:\n"
+                "✅ Sweet! I found your `latitude` and `longitude` columns.\n\n"
+                "You can fetch these predictors:\n"
                 "• bio1–bio19\n"
                 "• elevation\n"
                 "• slope\n"
                 "• aspect\n"
                 "• NDVI\n"
-                "• landcover (e.g. water, urban, cropland, etc.)\n\n"
-                "When you’re ready, just say **'I want elevation, ndvi, bio1'** to grab those layers."
+                "• landcover (e.g. " + ", ".join(sorted(LANDCOVER_CLASSES)) + ")\n\n"
+                "Example: **I want elevation, ndvi, bio1**"
             )})
             # hide pickers when auto-detected
             return (history2, create_map(), state, gr.update(),
@@ -765,7 +766,18 @@ def on_upload(f, history, state):
                     gr.update(visible=False),
                     gr.update(visible=False))
         else:
-            history2.append({"role":"assistant","content":"I couldn't detect coordinate columns. Please select them and enter CRS below (e.g., `UTM 10T` or `32610`)."})
+            # Single message that asks for CRS AND shows the available layers
+            history2.append({"role":"assistant","content":
+                "I couldn't detect coordinate columns. Please select them and enter CRS below (e.g., `UTM 10T` or `32610`).\n\n"
+                "You can fetch these predictors:\n"
+                "• bio1–bio19\n"
+                "• elevation\n"
+                "• slope\n"
+                "• aspect\n"
+                "• NDVI\n"
+                "• landcover (e.g. " + ", ".join(sorted(LANDCOVER_CLASSES)) + ")\n\n"
+                "Example: **I want elevation, ndvi, bio1**"
+            })
             cols = list(df.columns)
             # show pickers when needed
             return (history2, create_map(), state, gr.update(),
@@ -789,17 +801,27 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
         return (history, create_map(), state, gr.update(),
                 gr.update(visible=True), gr.update(visible=True),
                 gr.update(visible=True), gr.update(visible=True))
+
     src_crs = RioCRS.from_epsg(src_epsg)
     dst_crs = RioCRS.from_epsg(4326)
     # Note: inputs are x=easting (lon_col) and y=northing (lat_col) in source CRS.
     lon_vals, lat_vals = rio_transform(src_crs, dst_crs, df[lon_col].tolist(), df[lat_col].tolist())
     df['latitude'], df['longitude'] = lat_vals, lon_vals
     df.to_csv("inputs/presence_points.csv", index=False)
+
+    # Single message: success + available layers
     history.append({
         "role": "assistant",
         "content": (
-            f"✅ Coordinates transformed from EPSG:{src_epsg} to WGS84 (lat/lon). "
-            "You can now fetch predictors or run the model."
+            f"✅ Coordinates transformed from EPSG:{src_epsg} to WGS84 (lat/lon).\n\n"
+            "You can fetch these predictors:\n"
+            "• bio1–bio19\n"
+            "• elevation\n"
+            "• slope\n"
+            "• aspect\n"
+            "• NDVI\n"
+            "• landcover (e.g. " + ", ".join(sorted(LANDCOVER_CLASSES)) + ")\n\n"
+            "Example: **I want elevation, ndvi, bio1**"
         )
     })
     # hide after success
