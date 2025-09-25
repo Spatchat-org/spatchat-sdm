@@ -337,7 +337,7 @@ def create_map():
                 m.fit_bounds(pts)
                 
     # background/absence points (if available)
-    abs_fp = "outputs/absence_points.csv"
+    abs_fp = "outputs/absence_points_coordinates.csv"
     if os.path.exists(abs_fp):
         df_abs = pd.read_csv(abs_fp)
         if {'latitude','longitude'}.issubset(df_abs.columns):
