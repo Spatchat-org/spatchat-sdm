@@ -710,7 +710,14 @@ def chat_step(file, user_msg, history, state):
                     f"| Spec | {spec_str} |\n"
                     f"| Thr | {thr_str} |\n"
                 )
-        
+        coef_table = ""
+        coef_fp = "outputs/coefficients.csv"
+        if os.path.exists(coef_fp):
+            try:
+                coef = pd.read_csv(coef_fp).dropna(axis=1, how='all')
+                coef_table = coef.to_markdown(index=False)
+            except Exception:
+                coef_table = ""
         summary = (
             f"- Presence points: {n_pts}\n"
             f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
