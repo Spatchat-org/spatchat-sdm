@@ -499,7 +499,7 @@ def run_model():
                           capture_output=True, text=True)
     if proc.returncode!=0:
         return create_map(), f"❌ Model run failed:\n{proc.stderr}", None, None, None
-    perf_df = pd.read_csv("outputs/performance_metrics.csv")
+    perf_df = pd.read_csv("outputs/performance_metrics_cv.csv")
     coef_df = pd.read_csv("outputs/coefficients.csv")
     zip_path = zip_results()
     return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df, zip_path
@@ -537,13 +537,23 @@ def chat_step(file, user_msg, history, state):
         if perf_df is None:
             assistant_txt = status; dl_update = gr.update()
         else:
-            perf = pd.read_csv("outputs/performance_metrics.csv")
-            first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
-            perf_md = ("**Model Performance (1 of 2):**\n\n" + first.to_markdown(index=False)
-                       + "\n\n**Model Performance (2 of 2):**\n\n" + second.to_markdown(index=False))
+            cv = pd.read_csv("outputs/performance_metrics_cv.csv")
+            folds = 0
+            if not cv.empty and "n_folds" in cv.columns and pd.notna(cv.loc[0, "n_folds"]):
+                try:
+                    folds = int(cv.loc[0, "n_folds"])
+                except Exception:
+                    folds = 0
+            perf_md = cv.to_markdown(index=False)
+            
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
             coef_md = coef.to_markdown(index=False)
-            assistant_txt = f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n**Predictor Coefficients:**\n\n{coef_md}"
+            
+            assistant_txt = (
+                f"{status}\n\n"
+                f"**Cross-validated Performance (spatial blocks; n_folds={folds})**\n\n{perf_md}\n\n"
+                f"**Predictor Coefficients:**\n\n{coef_md}"
+            )
             dl_update = gr.update(value=zip_path)
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
         return history, m_out, state, dl_update
@@ -559,12 +569,17 @@ def chat_step(file, user_msg, history, state):
     if re.fullmatch(r"\s*(?:run\s+)?model\s*$", user_msg, re.I):
         m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is not None:
-            perf = pd.read_csv("outputs/performance_metrics.csv")
-            first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
-            perf_md = ("**Model Performance (1 of 2):**\n\n" + first.to_markdown(index=False)
-                       + "\n\n**Model Performance (2 of 2):**\n\n" + second.to_markdown(index=False))
+            cv = pd.read_csv("outputs/performance_metrics_cv.csv")
+            folds = 0
+            if not cv.empty and "n_folds" in cv.columns and pd.notna(cv.loc[0, "n_folds"]):
+                try:
+                    folds = int(cv.loc[0, "n_folds"])
+                except Exception:
+                    folds = 0
+            perf_md = cv.to_markdown(index=False)
+            
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
-            status += "\n\n**Model Performance:**\n\n" + perf_md
+            status += "\n\n**Cross-validated Performance (spatial blocks; n_folds=" + str(folds) + ")**\n\n" + perf_md
             status += "\n\n**Predictor Coefficients:**\n\n" + coef.to_markdown(index=False)
         assistant_txt = status
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
@@ -616,9 +631,16 @@ def chat_step(file, user_msg, history, state):
         else:
             fetched = []
         perf_table = ""
-        perf_fp = "outputs/performance_metrics.csv"
+        perf_fp = "outputs/performance_metrics_cv.csv"
+        folds_txt = ""
         if os.path.exists(perf_fp):
-            perf = pd.read_csv(perf_fp); perf_table = perf.to_markdown(index=False)
+            perf = pd.read_csv(perf_fp)
+            if not perf.empty and "n_folds" in perf.columns and pd.notna(perf.loc[0, "n_folds"]):
+                try:
+                    folds_txt = f" (n_folds={int(perf.loc[0, 'n_folds'])})"
+                except Exception:
+                    folds_txt = ""
+            perf_table = perf.to_markdown(index=False)
         coef_table = ""
         coef_fp = "outputs/coefficients.csv"
         if os.path.exists(coef_fp):
@@ -626,7 +648,7 @@ def chat_step(file, user_msg, history, state):
         summary = (
             f"- Presence points: {n_pts}\n"
             f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
-            "**Performance Metrics**\n"
+            "**Cross-validated Performance (spatial blocks" + folds_txt + ")**\n"
             f"{perf_table or '*none*'}\n\n"
             "**Predictor Coefficients**\n"
             f"{coef_table or '*none*'}"
