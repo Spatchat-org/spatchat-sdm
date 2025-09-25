@@ -673,53 +673,52 @@ def chat_step(file, user_msg, history, state):
             fetched = sorted(os.path.splitext(f)[0] for f in os.listdir(rasdir) if f.endswith(".tif"))
         else:
             fetched = []
-        perf_table = ""
-            perf_fp = "outputs/performance_metrics_cv.csv"
-            folds_txt = ""
-            perf_md = "*none*"
-            if os.path.exists(perf_fp):
-                cv = pd.read_csv(perf_fp)
-                if not cv.empty:
-                    row = cv.iloc[0]
-            
-                    def getv(k):
-                        return row[k] if (k in row and pd.notna(row[k])) else np.nan
-                    def fmt(x):
-                        return "—" if pd.isna(x) else f"{float(x):.3f}"
-                    def fmt_pm(mu, sd):
-                        if pd.isna(mu): return "—"
-                        return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
-            
-                    nfolds = getv("n_folds")
-                    if not pd.isna(nfolds):
-                        folds_txt = f" (n_folds={int(nfolds)})"
-            
-                    auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
-                    tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
-                    kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
-                    sens_str = fmt(getv("Sensitivity_mean"))
-                    spec_str = fmt(getv("Specificity_mean"))
-                    thr_str  = fmt(getv("Threshold_mean"))
-            
-                    perf_md = (
-                        "| Metric | Value |\n"
-                        "|---|---:|\n"
-                        f"| AUC | {auc_str} |\n"
-                        f"| TSS | {tss_str} |\n"
-                        f"| Kappa | {kap_str} |\n"
-                        f"| Sens | {sens_str} |\n"
-                        f"| Spec | {spec_str} |\n"
-                        f"| Thr | {thr_str} |\n"
-                    )
-            
-            summary = (
-                f"- Presence points: {n_pts}\n"
-                f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
-                "**Cross-validated Performance (spatial blocks" + folds_txt + ")**\n"
-                f"{perf_md}\n\n"
-                "**Predictor Coefficients**\n"
-                f"{coef_table or '*none*'}"
-            )
+        perf_fp = "outputs/performance_metrics_cv.csv"
+        folds_txt = ""
+        perf_md = "*none*"
+        if os.path.exists(perf_fp):
+            cv = pd.read_csv(perf_fp)
+            if not cv.empty:
+                row = cv.iloc[0]
+        
+                def getv(k):
+                    return row[k] if (k in row and pd.notna(row[k])) else np.nan
+                def fmt(x):
+                    return "—" if pd.isna(x) else f"{float(x):.3f}"
+                def fmt_pm(mu, sd):
+                    if pd.isna(mu): return "—"
+                    return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
+        
+                nfolds = getv("n_folds")
+                if not pd.isna(nfolds):
+                    folds_txt = f" (n_folds={int(nfolds)})"
+        
+                auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
+                tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
+                kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
+                sens_str = fmt(getv("Sensitivity_mean"))
+                spec_str = fmt(getv("Specificity_mean"))
+                thr_str  = fmt(getv("Threshold_mean"))
+        
+                perf_md = (
+                    "| Metric | Value |\n"
+                    "|---|---:|\n"
+                    f"| AUC | {auc_str} |\n"
+                    f"| TSS | {tss_str} |\n"
+                    f"| Kappa | {kap_str} |\n"
+                    f"| Sens | {sens_str} |\n"
+                    f"| Spec | {spec_str} |\n"
+                    f"| Thr | {thr_str} |\n"
+                )
+        
+        summary = (
+            f"- Presence points: {n_pts}\n"
+            f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
+            "**Cross-validated Performance (spatial blocks" + folds_txt + ")**\n"
+            f"{perf_md}\n\n"
+            "**Predictor Coefficients**\n"
+            f"{coef_table or '*none*'}"
+        )
         explain_sys = {
             "role":"system",
             "content":"You are SpatChat, an expert in species distribution modeling. Use ALL of the context below to answer the user's question as clearly as possible."
