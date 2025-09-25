@@ -538,13 +538,31 @@ def chat_step(file, user_msg, history, state):
             assistant_txt = status; dl_update = gr.update()
         else:
             cv = pd.read_csv("outputs/performance_metrics_cv.csv")
-            folds = 0
-            if not cv.empty and "n_folds" in cv.columns and pd.notna(cv.loc[0, "n_folds"]):
-                try:
-                    folds = int(cv.loc[0, "n_folds"])
-                except Exception:
-                    folds = 0
-            perf_md = cv.to_markdown(index=False)
+            row = cv.iloc[0] if not cv.empty else pd.Series({})
+            
+            def getv(k):
+                return row[k] if (k in row and pd.notna(row[k])) else np.nan
+            
+            def fmt(x):
+                return "—" if pd.isna(x) else f"{float(x):.3f}"
+            
+            def fmt_pm(mu, sd):
+                if pd.isna(mu): return "—"
+                return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
+            
+            folds = int(getv("n_folds")) if not pd.isna(getv("n_folds")) else 0
+            auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
+            tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
+            kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
+            sens_str = fmt(getv("Sensitivity_mean"))
+            spec_str = fmt(getv("Specificity_mean"))
+            thr_str  = fmt(getv("Threshold_mean"))
+            
+            perf_md = (
+                "| n_folds | AUC | TSS | Kappa | Sens | Spec | Thr |\n"
+                "|---:|---:|---:|---:|---:|---:|---:|\n"
+                f"| {folds} | {auc_str} | {tss_str} | {kap_str} | {sens_str} | {spec_str} | {thr_str} |\n"
+            )
             
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
             coef_md = coef.to_markdown(index=False)
@@ -570,13 +588,31 @@ def chat_step(file, user_msg, history, state):
         m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is not None:
             cv = pd.read_csv("outputs/performance_metrics_cv.csv")
-            folds = 0
-            if not cv.empty and "n_folds" in cv.columns and pd.notna(cv.loc[0, "n_folds"]):
-                try:
-                    folds = int(cv.loc[0, "n_folds"])
-                except Exception:
-                    folds = 0
-            perf_md = cv.to_markdown(index=False)
+            row = cv.iloc[0] if not cv.empty else pd.Series({})
+            
+            def getv(k):
+                return row[k] if (k in row and pd.notna(row[k])) else np.nan
+            
+            def fmt(x):
+                return "—" if pd.isna(x) else f"{float(x):.3f}"
+            
+            def fmt_pm(mu, sd):
+                if pd.isna(mu): return "—"
+                return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
+            
+            folds = int(getv("n_folds")) if not pd.isna(getv("n_folds")) else 0
+            auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
+            tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
+            kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
+            sens_str = fmt(getv("Sensitivity_mean"))
+            spec_str = fmt(getv("Specificity_mean"))
+            thr_str  = fmt(getv("Threshold_mean"))
+            
+            perf_md = (
+                "| n_folds | AUC | TSS | Kappa | Sens | Spec | Thr |\n"
+                "|---:|---:|---:|---:|---:|---:|---:|\n"
+                f"| {folds} | {auc_str} | {tss_str} | {kap_str} | {sens_str} | {spec_str} | {thr_str} |\n"
+            )
             
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
             status += "\n\n**Cross-validated Performance (spatial blocks; n_folds=" + str(folds) + ")**\n\n" + perf_md
