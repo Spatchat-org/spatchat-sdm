@@ -15,7 +15,8 @@ from sklearn.preprocessing import StandardScaler
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
 raster_dir  = "predictor_rasters/wgs84"
-perf_csv    = "outputs/performance_metrics.csv"
+perf_cv_csv = "outputs/performance_metrics_cv.csv"
+perf_fit_csv= "outputs/performance_metrics_fitted.csv"
 coef_csv    = "outputs/coefficients.csv"
 scaler_pkl  = "outputs/standard_scaler.pkl"
 output_map  = "outputs/suitability_map_wgs84.tif"
@@ -94,7 +95,7 @@ y = np.concatenate([
     np.ones(len(presence_samples), dtype=int),
     np.zeros(len(background_samples), dtype=int)
 ])
-# presence/background sampled above avoid NaNs by construction, but keep this guard:
+# Guard (should already be clean):
 mask = ~np.any(np.isnan(X), axis=1)
 Xc, yc = X[mask], y[mask]
 print(f"🔀 Training samples: {X.shape} → after NaN removal: {Xc.shape}")
@@ -127,6 +128,8 @@ print(f"🗺️ Absence coordinates saved to {absences_csv}")
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
 cv_aucs, cv_tsses, cv_kappas = [], [], []
+cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
+
 if n_blocks >= 2:
     # KMeans to create spatial blocks for presences
     blocks = KMeans(n_clusters=n_blocks, random_state=42).fit_predict(coords)
@@ -168,15 +171,41 @@ if n_blocks >= 2:
         spec = tn/(tn+fp) if (tn+fp) else 0.0
         tss_cv = sens + spec - 1
         kapp = cohen_kappa_score(y_te, yhat)
-        cv_aucs.append(auc_cv); cv_tsses.append(tss_cv); cv_kappas.append(kapp)
 
-    print(f"📐 Spatial CV AUC: {np.mean(cv_aucs):.3f} ± {np.std(cv_aucs):.3f}")
-    print(f"📐 Spatial CV TSS: {np.mean(cv_tsses):.3f} ± {np.std(cv_tsses):.3f}")
-    print(f"📐 Spatial CV Kappa: {np.mean(cv_kappas):.3f} ± {np.std(cv_kappas):.3f}")
+        cv_aucs.append(auc_cv)
+        cv_tsses.append(tss_cv)
+        cv_kappas.append(kapp)
+        cv_thresholds.append(bt)
+        cv_sensitivities.append(sens)
+        cv_specificities.append(spec)
+
+    # Save CV summary (means & sds)
+    cv_summary = pd.DataFrame([{
+        "n_folds": n_blocks,
+        "AUC_mean":   float(np.mean(cv_aucs)),  "AUC_sd":   float(np.std(cv_aucs)),
+        "TSS_mean":   float(np.mean(cv_tsses)), "TSS_sd":   float(np.std(cv_tsses)),
+        "Kappa_mean": float(np.mean(cv_kappas)),"Kappa_sd": float(np.std(cv_kappas)),
+        # Threshold/Sens/Spec vary per fold; include means for reference
+        "Threshold_mean":   float(np.mean(cv_thresholds)),
+        "Sensitivity_mean": float(np.mean(cv_sensitivities)),
+        "Specificity_mean": float(np.mean(cv_specificities)),
+    }])
+    cv_summary.to_csv(perf_cv_csv, index=False)
+    print(f"📊 Cross-validated metrics saved to {perf_cv_csv}")
 else:
-    print("⚠️ Not enough presence points for spatial CV (need ≥ 2 blocks). Skipping CV.")
+    cv_summary = pd.DataFrame([{
+        "n_folds": 0,
+        "AUC_mean": np.nan, "AUC_sd": np.nan,
+        "TSS_mean": np.nan, "TSS_sd": np.nan,
+        "Kappa_mean": np.nan, "Kappa_sd": np.nan,
+        "Threshold_mean": np.nan,
+        "Sensitivity_mean": np.nan,
+        "Specificity_mean": np.nan,
+    }])
+    cv_summary.to_csv(perf_cv_csv, index=False)
+    print("⚠️ Not enough presence points for spatial CV (need ≥ 2 blocks). Wrote NaNs to CV metrics.")
 
-# --- Final scaler & model on all filtered samples ---
+# --- Final scaler & model on all filtered samples (scale everything) ---
 scaler = StandardScaler().fit(Xc)
 Xc_s = scaler.transform(Xc)
 model = LogisticRegression(max_iter=1000).fit(Xc_s, yc)
@@ -184,7 +213,6 @@ joblib.dump(scaler, scaler_pkl)
 print(f"💾 Saved scaler to {scaler_pkl}")
 
 # --- Export extracted samples: STANDARDIZED values ---
-# Apply the final scaler to the *raw* sample matrices
 presence_std = scaler.transform(presence_samples) if len(presence_samples) else presence_samples
 absence_std  = scaler.transform(background_samples) if len(background_samples) else background_samples
 
@@ -203,7 +231,7 @@ std_csv = "outputs/sdm_point_samples_standardized.csv"
 samples_df_std.to_csv(std_csv, index=False)
 print(f"📄 Point samples (STANDARDIZED) saved to {std_csv}")
 
-# --- Final metrics on standardized training data ---
+# --- Fitted (in-sample) metrics on standardized training data ---
 y_prob = model.predict_proba(Xc_s)[:, 1]
 auc    = roc_auc_score(yc, y_prob)
 fpr, tpr, thr = roc_curve(yc, y_prob)
@@ -215,26 +243,22 @@ spec  = tn/(tn+fp) if (tn+fp) else 0.0
 tss   = sens + spec - 1
 kappa = cohen_kappa_score(yc, yhat)
 
-# --- Write out performance and coefficients ---
-perf_df = pd.DataFrame([{
-    'AUC':          auc,
-    'Threshold':    best_thr,
-    'Sensitivity':  sens,
-    'Specificity':  spec,
-    'TSS':          tss,
-    'Kappa':        kappa
+fitted_df = pd.DataFrame([{
+    'AUC_fitted':       auc,
+    'Threshold_fitted': best_thr,
+    'Sensitivity_fitted':  sens,
+    'Specificity_fitted':  spec,
+    'TSS_fitted':         tss,
+    'Kappa_fitted':       kappa
 }])
-perf_df.to_csv(perf_csv, index=False)
-print(f"📊 Performance metrics saved to {perf_csv}")
+fitted_df.to_csv(perf_fit_csv, index=False)
+print(f"📊 Fitted (in-sample) metrics saved to {perf_fit_csv}")
 
+# --- Write out coefficients ---
 intercept = model.intercept_[0]
 coef_vals = np.concatenate([[intercept], model.coef_.flatten()])
 predictors = ['Intercept'] + names
-
-coef_df = pd.DataFrame({
-    'predictor':   predictors,
-    'coefficient': coef_vals
-})
+coef_df = pd.DataFrame({'predictor': predictors, 'coefficient': coef_vals})
 coef_df.to_csv(coef_csv, index=False)
 print(f"📊 Coefficients saved to {coef_csv}")
 
