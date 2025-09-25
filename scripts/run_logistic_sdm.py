@@ -5,18 +5,19 @@ import rasterio
 import joblib
 
 from rasterio.enums import Resampling
-from rasterio.crs import CRS
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              cohen_kappa_score)
 from sklearn.model_selection import GroupKFold
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 # --- Paths ---
 csv_path    = "inputs/presence_points.csv"
 raster_dir  = "predictor_rasters/wgs84"
 perf_csv    = "outputs/performance_metrics.csv"
 coef_csv    = "outputs/coefficients.csv"
+scaler_pkl  = "outputs/standard_scaler.pkl"
 output_map  = "outputs/suitability_map_wgs84.tif"
 os.makedirs("outputs", exist_ok=True)
 
@@ -29,7 +30,7 @@ print(f"📍 Loaded {len(df)} presence points.")
 # --- Reference grid ---
 rasters = sorted([os.path.join(raster_dir, f)
                   for f in os.listdir(raster_dir)
-                  if f.endswith(".tif")])
+                  if f.endswith('.tif')])
 if not rasters:
     raise RuntimeError(f"No .tif found in {raster_dir}")
 with rasterio.open(rasters[0]) as ref:
@@ -55,7 +56,7 @@ print(f"🗺️ Stacked predictor shape: {stack.shape}")
 # --- Extract presence samples (only where predictors are all valid) ---
 inv = ~ref_transform
 presence_samples = []
-kept_coords = []  # (lat, lon) for points that landed on valid pixels
+kept_coords = []  # (lat, lon) that landed on valid pixels
 for lat, lon in zip(lats, lons):
     col, row = inv * (lon, lat)
     row, col = int(row), int(col)
@@ -75,8 +76,7 @@ valid_mask = ~np.any(np.isnan(flat), axis=1)
 valid_idx  = np.flatnonzero(valid_mask)
 pool       = flat[valid_mask]
 n_bg       = 5 * max(1, len(presence_samples))
-if n_bg > len(pool):
-    n_bg = len(pool)
+n_bg       = min(n_bg, len(pool))  # cap at available pool size
 bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)
 background_samples = pool[bg_indices]
 print(f"🌎 Background samples: {background_samples.shape}")
@@ -94,35 +94,36 @@ y = np.concatenate([
     np.ones(len(presence_samples), dtype=int),
     np.zeros(len(background_samples), dtype=int)
 ])
+# presence/background sampled above avoid NaNs by construction, but keep this guard:
 mask = ~np.any(np.isnan(X), axis=1)
 Xc, yc = X[mask], y[mask]
 print(f"🔀 Training samples: {X.shape} → after NaN removal: {Xc.shape}")
 
-# --- Export extracted samples (points × predictors) ---
+# --- Export extracted samples: RAW values ---
 pres_lats = kept_coords[:, 0] if kept_coords.size else np.array([])
 pres_lons = kept_coords[:, 1] if kept_coords.size else np.array([])
 
-presence_df = pd.DataFrame(presence_samples, columns=names)
-presence_df.insert(0, 'latitude',  pres_lats)
-presence_df.insert(1, 'longitude', pres_lons)
-presence_df.insert(2, 'label', 1)
+presence_df_raw = pd.DataFrame(presence_samples, columns=names)
+presence_df_raw.insert(0, 'latitude',  pres_lats)
+presence_df_raw.insert(1, 'longitude', pres_lons)
+presence_df_raw.insert(2, 'label', 1)
 
-absence_df = pd.DataFrame(background_samples, columns=names)
-absence_df.insert(0, 'latitude',  bg_lats)
-absence_df.insert(1, 'longitude', bg_lons)
-absence_df.insert(2, 'label', 0)
+absence_df_raw = pd.DataFrame(background_samples, columns=names)
+absence_df_raw.insert(0, 'latitude',  bg_lats)
+absence_df_raw.insert(1, 'longitude', bg_lons)
+absence_df_raw.insert(2, 'label', 0)
 
-samples_df = pd.concat([presence_df, absence_df], ignore_index=True)
-samples_csv = "outputs/sdm_point_samples.csv"
-samples_df.to_csv(samples_csv, index=False)
-print(f"📄 Point samples (presence+background) saved to {samples_csv}")
+samples_df_raw = pd.concat([presence_df_raw, absence_df_raw], ignore_index=True)
+raw_csv = "outputs/sdm_point_samples_raw.csv"
+samples_df_raw.to_csv(raw_csv, index=False)
+print(f"📄 Point samples (RAW) saved to {raw_csv}")
 
 # Small helper CSV solely for mapping background/absence points
-absences_csv = "outputs/absence_points.csv"
-absence_df[['latitude', 'longitude']].to_csv(absences_csv, index=False)
+absences_csv = "outputs/absence_points_coordinates.csv"
+absence_df_raw[['latitude', 'longitude']].to_csv(absences_csv, index=False)
 print(f"🗺️ Absence coordinates saved to {absences_csv}")
 
-# --- Spatial cross-validation (block-based) ---
+# --- Spatial cross-validation (block-based, with scaling per-fold) ---
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
 cv_aucs, cv_tsses, cv_kappas = [], [], []
@@ -131,8 +132,6 @@ if n_blocks >= 2:
     blocks = KMeans(n_clusters=n_blocks, random_state=42).fit_predict(coords)
 
     gkf = GroupKFold(n_splits=n_blocks)
-    # Note: yc contains labels for Xc (after NaN filtering). For CV, we operate
-    # directly on the raw presence/background sets to avoid any misalignment.
     for train_idx, test_idx in gkf.split(presence_samples,
                                          np.ones(len(presence_samples), dtype=int),
                                          groups=blocks):
@@ -141,18 +140,25 @@ if n_blocks >= 2:
         # background for train/test (fresh draws per fold)
         n_bt  = min(5 * len(train_idx), len(pool))
         n_bt2 = min(5 * len(test_idx),  len(pool))
-        bt_idx  = np.random.choice(len(pool), size=n_bt, replace=False)
+        bt_idx  = np.random.choice(len(pool), size=n_bt,  replace=False)
         bt_idx2 = np.random.choice(len(pool), size=n_bt2, replace=False)
         Xb_tr = pool[bt_idx]
         Xb_te = pool[bt_idx2]
+
         # combine
         X_tr = np.vstack([Xp_tr, Xb_tr])
         y_tr = np.concatenate([np.ones(len(Xp_tr)), np.zeros(len(Xb_tr))])
         X_te = np.vstack([Xp_te, Xb_te])
         y_te = np.concatenate([np.ones(len(Xp_te)), np.zeros(len(Xb_te))])
+
+        # scale per fold (fit on train, apply to train & test)
+        scaler_cv = StandardScaler().fit(X_tr)
+        X_tr_s = scaler_cv.transform(X_tr)
+        X_te_s = scaler_cv.transform(X_te)
+
         # fit & eval
-        clf = LogisticRegression(max_iter=1000).fit(X_tr, y_tr)
-        p_te = clf.predict_proba(X_te)[:, 1]
+        clf = LogisticRegression(max_iter=1000).fit(X_tr_s, y_tr)
+        p_te = clf.predict_proba(X_te_s)[:, 1]
         auc_cv = roc_auc_score(y_te, p_te)
         fpr_cv, tpr_cv, thr = roc_curve(y_te, p_te)
         bt = thr[np.argmax(tpr_cv - fpr_cv)]
@@ -170,10 +176,35 @@ if n_blocks >= 2:
 else:
     print("⚠️ Not enough presence points for spatial CV (need ≥ 2 blocks). Skipping CV.")
 
-# --- Final model fit & stats ---
-model = LogisticRegression(max_iter=1000).fit(Xc, yc)
-joblib.dump(model, "outputs/logistic_model_full.pkl")
-y_prob = model.predict_proba(Xc)[:, 1]
+# --- Final scaler & model on all filtered samples ---
+scaler = StandardScaler().fit(Xc)
+Xc_s = scaler.transform(Xc)
+model = LogisticRegression(max_iter=1000).fit(Xc_s, yc)
+joblib.dump(scaler, scaler_pkl)
+print(f"💾 Saved scaler to {scaler_pkl}")
+
+# --- Export extracted samples: STANDARDIZED values ---
+# Apply the final scaler to the *raw* sample matrices
+presence_std = scaler.transform(presence_samples) if len(presence_samples) else presence_samples
+absence_std  = scaler.transform(background_samples) if len(background_samples) else background_samples
+
+presence_df_std = pd.DataFrame(presence_std, columns=names)
+presence_df_std.insert(0, 'latitude',  pres_lats)
+presence_df_std.insert(1, 'longitude', pres_lons)
+presence_df_std.insert(2, 'label', 1)
+
+absence_df_std = pd.DataFrame(absence_std, columns=names)
+absence_df_std.insert(0, 'latitude',  bg_lats)
+absence_df_std.insert(1, 'longitude', bg_lons)
+absence_df_std.insert(2, 'label', 0)
+
+samples_df_std = pd.concat([presence_df_std, absence_df_std], ignore_index=True)
+std_csv = "outputs/sdm_point_samples_standardized.csv"
+samples_df_std.to_csv(std_csv, index=False)
+print(f"📄 Point samples (STANDARDIZED) saved to {std_csv}")
+
+# --- Final metrics on standardized training data ---
+y_prob = model.predict_proba(Xc_s)[:, 1]
 auc    = roc_auc_score(yc, y_prob)
 fpr, tpr, thr = roc_curve(yc, y_prob)
 best_thr = thr[np.argmax(tpr - fpr)]
@@ -196,7 +227,6 @@ perf_df = pd.DataFrame([{
 perf_df.to_csv(perf_csv, index=False)
 print(f"📊 Performance metrics saved to {perf_csv}")
 
-# --- Write out coefficients (no statsmodels) ---
 intercept = model.intercept_[0]
 coef_vals = np.concatenate([[intercept], model.coef_.flatten()])
 predictors = ['Intercept'] + names
@@ -208,9 +238,10 @@ coef_df = pd.DataFrame({
 coef_df.to_csv(coef_csv, index=False)
 print(f"📊 Coefficients saved to {coef_csv}")
 
-# --- Save final suitability map ---
+# --- Save final suitability map (using scaled raster pixels) ---
 pred_flat = np.full(flat.shape[0], np.nan, dtype=np.float32)
-pred_flat[valid_mask] = model.predict_proba(pool)[:, 1].astype(np.float32)
+pool_s = scaler.transform(pool)
+pred_flat[valid_mask] = model.predict_proba(pool_s)[:, 1].astype(np.float32)
 pred_map = pred_flat.reshape((height, width))
 profile = {
     'driver': 'GTiff', 'height': height, 'width': width,
