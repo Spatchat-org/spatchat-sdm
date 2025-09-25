@@ -335,6 +335,19 @@ def create_map():
                     folium.CircleMarker(location=[lat, lon], radius=5, color="blue", fill=True, fill_opacity=0.8).add_to(fg)
                 fg.add_to(m)
                 m.fit_bounds(pts)
+                
+    # background/absence points (if available)
+    abs_fp = "outputs/absence_points.csv"
+    if os.path.exists(abs_fp):
+        df_abs = pd.read_csv(abs_fp)
+        if {'latitude','longitude'}.issubset(df_abs.columns):
+            fg_abs = folium.FeatureGroup(name="🟥 Background / Absence Points")
+            for lat, lon in df_abs[['latitude','longitude']].dropna().values.tolist():
+                folium.CircleMarker(
+                    location=[lat, lon], radius=3, color="red", fill=True, fill_opacity=0.6
+                ).add_to(fg_abs)
+            fg_abs.add_to(m)
+
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
         for fn in sorted(os.listdir(rasdir)):
