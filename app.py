@@ -356,7 +356,7 @@ def create_map():
         rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
         folium.raster_layers.ImageOverlay(
             rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
-            opacity=0.7, name="🎯 Suitability"
+            opacity=1.0, name="🎯 Suitability"
         ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     img_html = f'<img src="data:image/png;base64,{COLORBAR_BASE64}" style="position:absolute; bottom:20px; right:10px; width:200px; height:30px; z-index:1000;"/>'
