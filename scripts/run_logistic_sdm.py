@@ -1,4 +1,5 @@
-# scripts/run_logostic_sdm.py
+#!/usr/bin/env python3
+# scripts/run_logistic_sdm.py
 
 import os
 import numpy as np
@@ -21,6 +22,7 @@ csv_path     = "inputs/presence_points.csv"
 raster_dir   = "predictor_rasters/wgs84"
 perf_cv_csv  = "outputs/performance_metrics_cv.csv"
 perf_fit_csv = "outputs/performance_metrics_fitted.csv"
+compat_perf  = "outputs/performance_metrics.csv"  # also in ZIP
 coef_csv     = "outputs/coefficients.csv"
 scaler_pkl   = "outputs/standard_scaler.pkl"
 output_map   = "outputs/suitability_map_wgs84.tif"
@@ -55,13 +57,16 @@ with rasterio.open(rasters[0]) as ref:
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
 
 # --- Stack predictors (reproject/align every layer to reference grid) ---
+def _is_categorical(name: str) -> bool:
+    n = name.lower()
+    return ("landcover" in n) or n.endswith("_onehot") or ("class" in n)
+
 layers, names = [], []
 for path in rasters:
     name = os.path.splitext(os.path.basename(path))[0]
     with rasterio.open(path) as src:
         dst = np.full((height, width), np.nan, dtype=np.float32)
-        # Use nearest for categorical-like layers (heuristic: name contains 'landcover')
-        resamp = WarpResampling.nearest if "landcover" in name.lower() else WarpResampling.bilinear
+        resamp = WarpResampling.nearest if _is_categorical(name) else WarpResampling.bilinear
         reproject(
             source=rasterio.band(src, 1),
             destination=dst,
@@ -123,7 +128,7 @@ y = np.concatenate([
     np.ones(len(presence_samples), dtype=int),
     np.zeros(len(background_samples), dtype=int)
 ])
-# Guard (should already be clean):
+# Guard:
 mask = ~np.any(np.isnan(X), axis=1)
 Xc, yc = X[mask], y[mask]
 print(f"🔀 Training samples: {X.shape} → after NaN removal: {Xc.shape}")
@@ -152,13 +157,13 @@ absences_csv = "outputs/absence_points_coordinates.csv"
 absence_df_raw[['latitude', 'longitude']].to_csv(absences_csv, index=False)
 print(f"🗺️ Absence coordinates saved to {absences_csv}")
 
-# --- Spatial cross-validation (block-based, with scaling per-fold), with *blocked backgrounds* ---
+# --- Spatial cross-validation (blocked backgrounds, threshold chosen on TRAIN fold) ---
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
 cv_aucs, cv_tsses, cv_kappas = [], [], []
 cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
 
-# Build lon/lat for *all* valid pixels in the pool (for assigning blocks)
+# Build lon/lat for ALL valid pixels in the pool (for assigning blocks)
 pool_rows = valid_idx // width
 pool_cols = valid_idx %  width
 pool_xs, pool_ys = rasterio.transform.xy(ref_transform, pool_rows, pool_cols, offset='center')
@@ -185,8 +190,8 @@ if n_blocks >= 2:
         mask_te_pool = np.isin(pool_blocks, list(test_blocks))
 
         # background for train/test (draw only from their respective blocks)
-        n_bt  = min(5 * len(train_idx), mask_tr_pool.sum())
-        n_bt2 = min(5 * len(test_idx),  mask_te_pool.sum())
+        n_bt  = min(5 * len(train_idx), int(mask_tr_pool.sum()))
+        n_bt2 = min(5 * len(test_idx),  int(mask_te_pool.sum()))
 
         # fallbacks if a block is tiny
         if n_bt < 1 or n_bt2 < 1:
@@ -203,45 +208,50 @@ if n_blocks >= 2:
 
         # combine
         X_tr = np.vstack([Xp_tr, Xb_tr])
-        y_tr = np.concatenate([np.ones(len(Xp_tr)), np.zeros(len(Xb_tr))])
+        y_tr = np.concatenate([np.ones(len(Xp_tr), dtype=int), np.zeros(len(Xb_tr), dtype=int)])
         X_te = np.vstack([Xp_te, Xb_te])
-        y_te = np.concatenate([np.ones(len(Xp_te)), np.zeros(len(Xb_te))])
+        y_te = np.concatenate([np.ones(len(Xp_te), dtype=int), np.zeros(len(Xb_te), dtype=int)])
 
         # scale per fold (fit on train, apply to train & test)
         scaler_cv = StandardScaler().fit(X_tr)
         X_tr_s = scaler_cv.transform(X_tr)
         X_te_s = scaler_cv.transform(X_te)
 
-        # fit & eval
+        # fit
         clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
+
+        # TRAIN-SET threshold (no peeking)
+        p_tr = clf.predict_proba(X_tr_s)[:, 1]
+        fpr_tr, tpr_tr, thr_tr = roc_curve(y_tr, p_tr)
+        bt = thr_tr[np.argmax(tpr_tr - fpr_tr)]  # Youden's J on TRAIN
+
+        # Test predictions & metrics using that fixed threshold
         p_te = clf.predict_proba(X_te_s)[:, 1]
         auc_cv = roc_auc_score(y_te, p_te)
-        fpr_cv, tpr_cv, thr = roc_curve(y_te, p_te)
-        bt = thr[np.argmax(tpr_cv - fpr_cv)]
         yhat = (p_te >= bt).astype(int)
-        tn, fp, fn, tp = confusion_matrix(y_te, yhat).ravel()
+
+        tn, fp, fn, tp = confusion_matrix(y_te, yhat, labels=[0, 1]).ravel()
         sens = tp/(tp+fn) if (tp+fn) else 0.0
         spec = tn/(tn+fp) if (tn+fp) else 0.0
         tss_cv = sens + spec - 1
         kapp = cohen_kappa_score(y_te, yhat)
 
-        cv_aucs.append(auc_cv)
-        cv_tsses.append(tss_cv)
-        cv_kappas.append(kapp)
-        cv_thresholds.append(bt)
-        cv_sensitivities.append(sens)
-        cv_specificities.append(spec)
+        cv_aucs.append(float(auc_cv))
+        cv_tsses.append(float(tss_cv))
+        cv_kappas.append(float(kapp))
+        cv_thresholds.append(float(bt))
+        cv_sensitivities.append(float(sens))
+        cv_specificities.append(float(spec))
 
     # Save CV summary (means & sds)
     cv_summary = pd.DataFrame([{
         "n_folds": n_blocks,
-        "AUC_mean":   float(np.mean(cv_aucs)),  "AUC_sd":   float(np.std(cv_aucs)),
-        "TSS_mean":   float(np.mean(cv_tsses)), "TSS_sd":   float(np.std(cv_tsses)),
-        "Kappa_mean": float(np.mean(cv_kappas)),"Kappa_sd": float(np.std(cv_kappas)),
-        # Threshold/Sens/Spec vary per fold; include means for reference
-        "Threshold_mean":   float(np.mean(cv_thresholds)),
-        "Sensitivity_mean": float(np.mean(cv_sensitivities)),
-        "Specificity_mean": float(np.mean(cv_specificities)),
+        "AUC_mean":   float(np.mean(cv_aucs)),           "AUC_sd":   float(np.std(cv_aucs)),
+        "TSS_mean":   float(np.mean(cv_tsses)),          "TSS_sd":   float(np.std(cv_tsses)),
+        "Kappa_mean": float(np.mean(cv_kappas)),         "Kappa_sd": float(np.std(cv_kappas)),
+        "Threshold_mean":   float(np.mean(cv_thresholds)),"Threshold_sd":   float(np.std(cv_thresholds)),
+        "Sensitivity_mean": float(np.mean(cv_sensitivities)), "Sensitivity_sd": float(np.std(cv_sensitivities)),
+        "Specificity_mean": float(np.mean(cv_specificities)), "Specificity_sd": float(np.std(cv_specificities)),
     }])
     cv_summary.to_csv(perf_cv_csv, index=False)
     print(f"📊 Cross-validated metrics saved to {perf_cv_csv}")
@@ -251,9 +261,9 @@ else:
         "AUC_mean": np.nan, "AUC_sd": np.nan,
         "TSS_mean": np.nan, "TSS_sd": np.nan,
         "Kappa_mean": np.nan, "Kappa_sd": np.nan,
-        "Threshold_mean": np.nan,
-        "Sensitivity_mean": np.nan,
-        "Specificity_mean": np.nan,
+        "Threshold_mean": np.nan, "Threshold_sd": np.nan,
+        "Sensitivity_mean": np.nan, "Sensitivity_sd": np.nan,
+        "Specificity_mean": np.nan, "Specificity_sd": np.nan,
     }])
     cv_summary.to_csv(perf_cv_csv, index=False)
     print("⚠️ Not enough presence points for spatial CV (need ≥ 2 blocks). Wrote NaNs to CV metrics.")
@@ -290,7 +300,7 @@ auc    = roc_auc_score(yc, y_prob)
 fpr, tpr, thr = roc_curve(yc, y_prob)
 best_thr = thr[np.argmax(tpr - fpr)]
 yhat = (y_prob >= best_thr).astype(int)
-tn, fp, fn, tp = confusion_matrix(yc, yhat).ravel()
+tn, fp, fn, tp = confusion_matrix(yc, yhat, labels=[0, 1]).ravel()
 sens  = tp/(tp+fn) if (tp+fn) else 0.0
 spec  = tn/(tn+fp) if (tn+fp) else 0.0
 tss   = sens + spec - 1
@@ -308,9 +318,8 @@ fitted_df.to_csv(perf_fit_csv, index=False)
 print(f"📊 Fitted (in-sample) metrics saved to {perf_fit_csv}")
 
 # Also save a compatibility file for ZIP / legacy readers
-perf_csv_compat = "outputs/performance_metrics.csv"
-fitted_df.to_csv(perf_csv_compat, index=False)
-print(f"📊 Fitted (compat) metrics saved to {perf_csv_compat}")
+fitted_df.to_csv(compat_perf, index=False)
+print(f"📊 Fitted (compat) metrics saved to {compat_perf}")
 
 # --- Write out coefficients ---
 intercept = model.intercept_[0]
