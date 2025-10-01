@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # scripts/run_logistic_sdm.py
 
 import os
@@ -236,6 +235,12 @@ if n_blocks >= 2:
         tss_cv = sens + spec - 1
         kapp = cohen_kappa_score(y_te, yhat)
 
+        print(
+            f"[CV] fold={len(cv_aucs)+1} "
+            f"test presences={np.sum(y_te==1)} backgrounds={np.sum(y_te==0)} "
+            f"auc={auc_cv:.3f} thr={bt:.3f} sens={sens:.3f} spec={spec:.3f}"
+        )
+        
         cv_aucs.append(float(auc_cv))
         cv_tsses.append(float(tss_cv))
         cv_kappas.append(float(kapp))
@@ -274,6 +279,18 @@ Xc_s = scaler.transform(Xc)
 model = LogisticRegression(max_iter=1000, class_weight="balanced").fit(Xc_s, yc)
 joblib.dump(scaler, scaler_pkl)
 print(f"💾 Saved scaler to {scaler_pkl}")
+
+# --- Export standardization stats (training samples: presence+background after NaN filter) ---
+stats_csv = "outputs/standardization_stats.csv"
+stats_df = pd.DataFrame({
+    "predictor": names,
+    "mean":  scaler.mean_.astype(float),
+    "std":   scaler.scale_.astype(float),
+})
+# If any feature ended up constant, std can be 0; make that explicit instead of infs downstream
+stats_df.replace({np.inf: np.nan, -np.inf: np.nan}, inplace=True)
+stats_df.to_csv(stats_csv, index=False)
+print(f"📄 Standardization stats saved to {stats_csv}")
 
 # --- Export extracted samples: STANDARDIZED values ---
 presence_std = scaler.transform(presence_samples) if len(presence_samples) else presence_samples
