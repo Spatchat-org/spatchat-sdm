@@ -1,10 +1,14 @@
+# scripts/run_logostic_sdm.py
+
 import os
 import numpy as np
 import pandas as pd
 import rasterio
 import joblib
 
-from rasterio.enums import Resampling
+from rasterio.enums import Resampling  # kept for consistency; not used in reprojection
+from rasterio.transform import rowcol
+from rasterio.warp import reproject, Resampling as WarpResampling
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              cohen_kappa_score)
@@ -13,13 +17,14 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 # --- Paths ---
-csv_path    = "inputs/presence_points.csv"
-raster_dir  = "predictor_rasters/wgs84"
-perf_cv_csv = "outputs/performance_metrics_cv.csv"
-perf_fit_csv= "outputs/performance_metrics_fitted.csv"
-coef_csv    = "outputs/coefficients.csv"
-scaler_pkl  = "outputs/standard_scaler.pkl"
-output_map  = "outputs/suitability_map_wgs84.tif"
+csv_path     = "inputs/presence_points.csv"
+raster_dir   = "predictor_rasters/wgs84"
+perf_cv_csv  = "outputs/performance_metrics_cv.csv"
+perf_fit_csv = "outputs/performance_metrics_fitted.csv"
+coef_csv     = "outputs/coefficients.csv"
+scaler_pkl   = "outputs/standard_scaler.pkl"
+output_map   = "outputs/suitability_map_wgs84.tif"
+std_ras_dir  = "outputs/standardized_rasters_wgs84"
 os.makedirs("outputs", exist_ok=True)
 
 # --- Load presence points ---
@@ -38,51 +43,74 @@ with rasterio.open(rasters[0]) as ref:
     ref_crs       = ref.crs
     ref_transform = ref.transform
     height, width = ref.height, ref.width
+    profile = {
+        'driver': 'GTiff',
+        'height': height,
+        'width': width,
+        'count': 1,
+        'dtype': rasterio.float32,
+        'crs': ref_crs,
+        'transform': ref_transform
+    }
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
 
-# --- Stack predictors ---
+# --- Stack predictors (reproject/align every layer to reference grid) ---
 layers, names = [], []
 for path in rasters:
     name = os.path.splitext(os.path.basename(path))[0]
     with rasterio.open(path) as src:
-        arr = src.read(1,
-                       out_shape=(height, width),
-                       resampling=Resampling.nearest)
-    print(f"🧪 {name}.tif → NaN%: {np.isnan(arr).mean()*100:.2f}")
-    layers.append(arr)
+        dst = np.full((height, width), np.nan, dtype=np.float32)
+        # Use nearest for categorical-like layers (heuristic: name contains 'landcover')
+        resamp = WarpResampling.nearest if "landcover" in name.lower() else WarpResampling.bilinear
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dst,
+            src_transform=src.transform, src_crs=src.crs,
+            dst_transform=ref_transform, dst_crs=ref_crs,
+            resampling=resamp, dst_nodata=np.nan
+        )
+    nan_pct = float(np.isnan(dst).mean() * 100.0)
+    print(f"🧪 {name}.tif → NaN%: {nan_pct:.2f}")
+    layers.append(dst)
     names.append(name)
+
 stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract presence samples (only where predictors are all valid) ---
-inv = ~ref_transform
 presence_samples = []
 kept_coords = []  # (lat, lon) that landed on valid pixels
 for lat, lon in zip(lats, lons):
-    col, row = inv * (lon, lat)
-    row, col = int(row), int(col)
-    if 0 <= row < height and 0 <= col < width:
-        vals = stack[row, col, :]
+    try:
+        r, c = rowcol(ref_transform, lon, lat, op=round)
+    except Exception:
+        continue
+    if 0 <= r < height and 0 <= c < width:
+        vals = stack[r, c, :]
         if not np.any(np.isnan(vals)):
             presence_samples.append(vals)
             kept_coords.append((lat, lon))
+
 presence_samples = np.array(presence_samples)
 kept_coords = np.array(kept_coords) if len(kept_coords) else np.empty((0, 2))
 print(f"📍 Presence samples: {presence_samples.shape}")
 
-# --- Background sampling ---
-np.random.seed(42)
-flat       = stack.reshape(-1, stack.shape[-1])
+# --- Background sampling pool (all valid pixels) ---
+flat       = stack.reshape(-1, stack.shape[-1]).astype(np.float32)
 valid_mask = ~np.any(np.isnan(flat), axis=1)
 valid_idx  = np.flatnonzero(valid_mask)
 pool       = flat[valid_mask]
+print(f"✅ Valid pixel pool: {len(pool)}")
+
+# Choose background for the *raw sample table* (map plotting, not CV)
+np.random.seed(42)
 n_bg       = 5 * max(1, len(presence_samples))
 n_bg       = min(n_bg, len(pool))  # cap at available pool size
 bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)
 background_samples = pool[bg_indices]
-print(f"🌎 Background samples: {background_samples.shape}")
+print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
-# Convert chosen background indices back to row/col → lon/lat
+# Convert chosen background indices back to row/col → lon/lat (for export)
 bg_linear  = valid_idx[bg_indices]
 bg_rows    = bg_linear // width
 bg_cols    = bg_linear %  width
@@ -124,15 +152,24 @@ absences_csv = "outputs/absence_points_coordinates.csv"
 absence_df_raw[['latitude', 'longitude']].to_csv(absences_csv, index=False)
 print(f"🗺️ Absence coordinates saved to {absences_csv}")
 
-# --- Spatial cross-validation (block-based, with scaling per-fold) ---
+# --- Spatial cross-validation (block-based, with scaling per-fold), with *blocked backgrounds* ---
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
 cv_aucs, cv_tsses, cv_kappas = [], [], []
 cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
 
+# Build lon/lat for *all* valid pixels in the pool (for assigning blocks)
+pool_rows = valid_idx // width
+pool_cols = valid_idx %  width
+pool_xs, pool_ys = rasterio.transform.xy(ref_transform, pool_rows, pool_cols, offset='center')
+pool_lons_all = np.array(pool_xs); pool_lats_all = np.array(pool_ys)
+
 if n_blocks >= 2:
     # KMeans to create spatial blocks for presences
-    blocks = KMeans(n_clusters=n_blocks, random_state=42).fit_predict(coords)
+    kmeans = KMeans(n_clusters=n_blocks, random_state=42).fit(coords)
+    blocks = kmeans.labels_  # presences' block labels
+    # Assign every valid pixel in the pool to a block
+    pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
 
     gkf = GroupKFold(n_splits=n_blocks)
     for train_idx, test_idx in gkf.split(presence_samples,
@@ -140,11 +177,27 @@ if n_blocks >= 2:
                                          groups=blocks):
         # split presence
         Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
-        # background for train/test (fresh draws per fold)
-        n_bt  = min(5 * len(train_idx), len(pool))
-        n_bt2 = min(5 * len(test_idx),  len(pool))
-        bt_idx  = np.random.choice(len(pool), size=n_bt,  replace=False)
-        bt_idx2 = np.random.choice(len(pool), size=n_bt2, replace=False)
+        test_blocks = set(blocks[test_idx])
+        train_blocks = [b for b in range(n_blocks) if b not in test_blocks]
+
+        # masks for pool by block
+        mask_tr_pool = np.isin(pool_blocks, train_blocks)
+        mask_te_pool = np.isin(pool_blocks, list(test_blocks))
+
+        # background for train/test (draw only from their respective blocks)
+        n_bt  = min(5 * len(train_idx), mask_tr_pool.sum())
+        n_bt2 = min(5 * len(test_idx),  mask_te_pool.sum())
+
+        # fallbacks if a block is tiny
+        if n_bt < 1 or n_bt2 < 1:
+            bt_idx  = np.random.choice(len(pool), size=max(1, 5*len(train_idx)), replace=False)
+            bt_idx2 = np.random.choice(len(pool), size=max(1, 5*len(test_idx)),  replace=False)
+        else:
+            tr_inds = np.flatnonzero(mask_tr_pool)
+            te_inds = np.flatnonzero(mask_te_pool)
+            bt_idx  = np.random.choice(tr_inds, size=n_bt,  replace=False)
+            bt_idx2 = np.random.choice(te_inds, size=n_bt2, replace=False)
+
         Xb_tr = pool[bt_idx]
         Xb_te = pool[bt_idx2]
 
@@ -160,7 +213,7 @@ if n_blocks >= 2:
         X_te_s = scaler_cv.transform(X_te)
 
         # fit & eval
-        clf = LogisticRegression(max_iter=1000).fit(X_tr_s, y_tr)
+        clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
         p_te = clf.predict_proba(X_te_s)[:, 1]
         auc_cv = roc_auc_score(y_te, p_te)
         fpr_cv, tpr_cv, thr = roc_curve(y_te, p_te)
@@ -208,7 +261,7 @@ else:
 # --- Final scaler & model on all filtered samples (scale everything) ---
 scaler = StandardScaler().fit(Xc)
 Xc_s = scaler.transform(Xc)
-model = LogisticRegression(max_iter=1000).fit(Xc_s, yc)
+model = LogisticRegression(max_iter=1000, class_weight="balanced").fit(Xc_s, yc)
 joblib.dump(scaler, scaler_pkl)
 print(f"💾 Saved scaler to {scaler_pkl}")
 
@@ -244,15 +297,20 @@ tss   = sens + spec - 1
 kappa = cohen_kappa_score(yc, yhat)
 
 fitted_df = pd.DataFrame([{
-    'AUC_fitted':       auc,
-    'Threshold_fitted': best_thr,
-    'Sensitivity_fitted':  sens,
-    'Specificity_fitted':  spec,
-    'TSS_fitted':         tss,
-    'Kappa_fitted':       kappa
+    'AUC_fitted':         float(auc),
+    'Threshold_fitted':   float(best_thr),
+    'Sensitivity_fitted': float(sens),
+    'Specificity_fitted': float(spec),
+    'TSS_fitted':         float(tss),
+    'Kappa_fitted':       float(kappa)
 }])
 fitted_df.to_csv(perf_fit_csv, index=False)
 print(f"📊 Fitted (in-sample) metrics saved to {perf_fit_csv}")
+
+# Also save a compatibility file for ZIP / legacy readers
+perf_csv_compat = "outputs/performance_metrics.csv"
+fitted_df.to_csv(perf_csv_compat, index=False)
+print(f"📊 Fitted (compat) metrics saved to {perf_csv_compat}")
 
 # --- Write out coefficients ---
 intercept = model.intercept_[0]
@@ -267,11 +325,18 @@ pred_flat = np.full(flat.shape[0], np.nan, dtype=np.float32)
 pool_s = scaler.transform(pool)
 pred_flat[valid_mask] = model.predict_proba(pool_s)[:, 1].astype(np.float32)
 pred_map = pred_flat.reshape((height, width))
-profile = {
-    'driver': 'GTiff', 'height': height, 'width': width,
-    'count': 1, 'dtype': rasterio.float32,
-    'crs': ref_crs, 'transform': ref_transform
-}
 with rasterio.open(output_map, "w", **profile) as dst:
     dst.write(pred_map, 1)
 print(f"🎯 Final suitability map saved to {output_map}")
+
+# --- Export standardized rasters (z-scored with the same scaler used for the model) ---
+os.makedirs(std_ras_dir, exist_ok=True)
+print(f"💾 Writing standardized rasters to {std_ras_dir}")
+for j, name in enumerate(names):
+    band_flat = np.full(flat.shape[0], np.float32(np.nan), dtype=np.float32)
+    band_flat[valid_mask] = pool_s[:, j].astype(np.float32)
+    band = band_flat.reshape((height, width))
+    out_path = os.path.join(std_ras_dir, f"{name}_z.tif")
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(band, 1)
+    print(f"    • {name}_z.tif")
