@@ -216,8 +216,6 @@ def clear_all():
     if os.path.exists("spatchat_results.zip"):
         os.remove("spatchat_results.zip")
 
-clear_all()
-
 def _clean_dir(path: str):
     shutil.rmtree(path, ignore_errors=True)
     os.makedirs(path, exist_ok=True)
@@ -335,7 +333,6 @@ def create_map():
                     folium.CircleMarker(location=[lat, lon], radius=5, color="blue", fill=True, fill_opacity=0.8).add_to(fg)
                 fg.add_to(m)
                 m.fit_bounds(pts)
-                
     # background/absence points (if available)
     abs_fp = "outputs/absence_points_coordinates.csv"
     if os.path.exists(abs_fp):
@@ -647,17 +644,40 @@ def chat_step(file, user_msg, history, state):
         assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
         dl_update = gr.update()
     elif tool == "run_model":
+        # Keep this fallback path, but show CV metrics (not fitted)
         m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is None:
             assistant_txt = status; dl_update = gr.update()
         else:
-            perf = pd.read_csv("outputs/performance_metrics.csv")
-            first, second = perf.iloc[:, :3], perf.iloc[:, 3:]
-            perf_md = ("**Model Performance (1 of 2):**\n\n" + first.to_markdown(index=False)
-                       + "\n\n**Model Performance (2 of 2):**\n\n" + second.to_markdown(index=False))
+            cv = pd.read_csv("outputs/performance_metrics_cv.csv")
+            row = cv.iloc[0] if not cv.empty else pd.Series({})
+            def getv(k): return row[k] if (k in row and pd.notna(row[k])) else np.nan
+            def fmt(x): return "—" if pd.isna(x) else f"{float(x):.3f}"
+            def fmt_pm(mu, sd):
+                if pd.isna(mu): return "—"
+                return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
+            folds = int(getv("n_folds")) if not pd.isna(getv("n_folds")) else 0
+            auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
+            tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
+            kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
+            sens_str = fmt(getv("Sensitivity_mean"))
+            spec_str = fmt(getv("Specificity_mean"))
+            thr_str  = fmt(getv("Threshold_mean"))
+            perf_md = (
+                "**Cross-validated Performance (spatial blocks; n_folds="
+                + str(folds) + ")**\n\n"
+                "| Metric | Value |\n"
+                "|---|---:|\n"
+                f"| AUC | {auc_str} |\n"
+                f"| TSS | {tss_str} |\n"
+                f"| Kappa | {kap_str} |\n"
+                f"| Sens | {sens_str} |\n"
+                f"| Spec | {spec_str} |\n"
+                f"| Thr | {thr_str} |\n"
+            )
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
             coef_md = coef.to_markdown(index=False)
-            assistant_txt = f"{status}\n\n**Model Performance:**\n\n{perf_md}\n\n**Predictor Coefficients:**\n\n{coef_md}"
+            assistant_txt = f"{status}\n\n{perf_md}\n\n**Predictor Coefficients:**\n\n{coef_md}"
             dl_update = gr.update(value=zip_path)
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
@@ -804,6 +824,9 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
     return (history, create_map(), state, gr.update(),
             gr.update(visible=False), gr.update(visible=False),
             gr.update(visible=False), gr.update(visible=False))
+
+# UI
+
 
 with gr.Blocks() as demo:
     gr.Image(
