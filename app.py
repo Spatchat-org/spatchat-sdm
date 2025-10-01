@@ -602,9 +602,9 @@ def chat_step(file, user_msg, history, state):
             auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
             tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
             kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
-            sens_str = fmt(getv("Sensitivity_mean"))
-            spec_str = fmt(getv("Specificity_mean"))
-            thr_str  = fmt(getv("Threshold_mean"))
+            sens_str = fmt_pm(getv("Sensitivity_mean"), getv("Sensitivity_sd"))
+            spec_str = fmt_pm(getv("Specificity_mean"), getv("Specificity_sd"))
+            thr_str  = fmt_pm(getv("Threshold_mean"),   getv("Threshold_sd"))
             
             perf_md = (
                 "| Metric | Value |\n"
