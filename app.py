@@ -612,9 +612,9 @@ def chat_step(file, user_msg, history, state):
                 f"| AUC | {auc_str} |\n"
                 f"| TSS | {tss_str} |\n"
                 f"| Kappa | {kap_str} |\n"
-                f"| Sens | {sens_str} |\n"
-                f"| Spec | {spec_str} |\n"
-                f"| Thr | {thr_str} |\n"
+                f"| Sensitivity | {sens_str} |\n"
+                f"| Specificity | {spec_str} |\n"
+                f"| Threshold | {thr_str} |\n"
             )
             
             coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
