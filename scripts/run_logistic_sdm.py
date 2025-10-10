@@ -1,4 +1,4 @@
-# scripts/run_logistic_sdm.py
+# scripts/run_logistic_sdm.py  (patched for constant-feature handling)
 
 import os
 import numpy as np
@@ -95,8 +95,8 @@ for lat, lon in zip(lats, lons):
             presence_samples.append(vals)
             kept_coords.append((lat, lon))
 
-presence_samples = np.array(presence_samples)
-kept_coords = np.array(kept_coords) if len(kept_coords) else np.empty((0, 2))
+presence_samples = np.array(presence_samples, dtype=np.float32)
+kept_coords = np.array(kept_coords, dtype=np.float32) if len(kept_coords) else np.empty((0, 2), dtype=np.float32)
 print(f"📍 Presence samples: {presence_samples.shape}")
 
 # --- Background sampling pool (all valid pixels) ---
@@ -111,7 +111,7 @@ np.random.seed(42)
 n_bg       = 5 * max(1, len(presence_samples))
 n_bg       = min(n_bg, len(pool))  # cap at available pool size
 bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)
-background_samples = pool[bg_indices]
+background_samples = pool[bg_indices].astype(np.float32)
 print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
 # Convert chosen background indices back to row/col → lon/lat (for export)
@@ -127,23 +127,48 @@ y = np.concatenate([
     np.ones(len(presence_samples), dtype=int),
     np.zeros(len(background_samples), dtype=int)
 ])
-# Guard:
-mask = ~np.any(np.isnan(X), axis=1)
-Xc, yc = X[mask], y[mask]
-print(f"🔀 Training samples: {X.shape} → after NaN removal: {Xc.shape}")
+
+# Guard rows: require finite values (this also excludes NaNs and infs)
+finite_mask = np.all(np.isfinite(X), axis=1)
+Xc, yc = X[finite_mask], y[finite_mask]
+print(f"🔀 Training samples: {X.shape} → after finite filter: {Xc.shape}; positives={int((yc==1).sum())}, negatives={int((yc==0).sum())}")
+
+if Xc.shape[0] == 0:
+    raise RuntimeError("No usable training rows after filtering. Check predictor coverage & presence coordinates.")
+
+if len(np.unique(yc)) < 2:
+    raise RuntimeError("Only one class present in training data (either no presences or no backgrounds after filtering).")
+
+# --- Drop constant predictors based on presence+background combined (Xc) ---
+EPS = 1e-8
+col_std = np.nanstd(Xc, axis=0)
+keep_mask = col_std > EPS
+dropped = [n for n, k in zip(names, keep_mask) if not k]
+used    = [n for n, k in zip(names, keep_mask) if k]
+if not np.any(keep_mask):
+    raise RuntimeError("All predictors are constant over training data. Add at least one varying layer.")
+
+if dropped:
+    print(f"⚠️ Dropping constant predictors (std≈0 on training rows): {', '.join(dropped)}")
+
+# Slice for modeling/scaling
+Xc_model = Xc[:, keep_mask]
+names_model = used
+used_idx = np.flatnonzero(keep_mask)
+drop_idx = np.flatnonzero(~keep_mask)
 
 # --- Export extracted samples: RAW values ---
-pres_lats = kept_coords[:, 0] if kept_coords.size else np.array([])
-pres_lons = kept_coords[:, 1] if kept_coords.size else np.array([])
+pres_lats = kept_coords[:, 0] if kept_coords.size else np.array([], dtype=np.float32)
+pres_lons = kept_coords[:, 1] if kept_coords.size else np.array([], dtype=np.float32)
 
 presence_df_raw = pd.DataFrame(presence_samples, columns=names)
-presence_df_raw.insert(0, 'latitude',  pres_lats)
-presence_df_raw.insert(1, 'longitude', pres_lons)
+presence_df_raw.insert(0, 'latitude',  pres_lats[:len(presence_df_raw)])
+presence_df_raw.insert(1, 'longitude', pres_lons[:len(presence_df_raw)])
 presence_df_raw.insert(2, 'label', 1)
 
 absence_df_raw = pd.DataFrame(background_samples, columns=names)
-absence_df_raw.insert(0, 'latitude',  bg_lats)
-absence_df_raw.insert(1, 'longitude', bg_lons)
+absence_df_raw.insert(0, 'latitude',  bg_lats[:len(absence_df_raw)])
+absence_df_raw.insert(1, 'longitude', bg_lons[:len(absence_df_raw)])
 absence_df_raw.insert(2, 'label', 0)
 
 samples_df_raw = pd.concat([presence_df_raw, absence_df_raw], ignore_index=True)
@@ -169,97 +194,120 @@ pool_xs, pool_ys = rasterio.transform.xy(ref_transform, pool_rows, pool_cols, of
 pool_lons_all = np.array(pool_xs); pool_lats_all = np.array(pool_ys)
 
 if n_blocks >= 2:
-    # KMeans to create spatial blocks for presences
-    kmeans = KMeans(n_clusters=n_blocks, random_state=42).fit(coords)
-    blocks = kmeans.labels_  # presences' block labels
-    # Assign every valid pixel in the pool to a block
-    pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
+    try:
+        kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init="auto").fit(coords)
+        blocks = kmeans.labels_  # presences' block labels
+        # Assign every valid pixel in the pool to a block
+        pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
 
-    gkf = GroupKFold(n_splits=n_blocks)
-    for train_idx, test_idx in gkf.split(presence_samples,
-                                         np.ones(len(presence_samples), dtype=int),
-                                         groups=blocks):
-        # split presence
-        Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
-        test_blocks = set(blocks[test_idx])
-        train_blocks = [b for b in range(n_blocks) if b not in test_blocks]
+        gkf = GroupKFold(n_splits=n_blocks)
+        for train_idx, test_idx in gkf.split(presence_samples,
+                                             np.ones(len(presence_samples), dtype=int),
+                                             groups=blocks):
+            # split presence
+            Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
+            test_blocks = set(blocks[test_idx])
+            train_blocks = [b for b in range(n_blocks) if b not in test_blocks]
 
-        # masks for pool by block
-        mask_tr_pool = np.isin(pool_blocks, train_blocks)
-        mask_te_pool = np.isin(pool_blocks, list(test_blocks))
+            # masks for pool by block
+            mask_tr_pool = np.isin(pool_blocks, train_blocks)
+            mask_te_pool = np.isin(pool_blocks, list(test_blocks))
 
-        # background for train/test (draw only from their respective blocks)
-        n_bt  = min(5 * len(train_idx), int(mask_tr_pool.sum()))
-        n_bt2 = min(5 * len(test_idx),  int(mask_te_pool.sum()))
+            # background for train/test (draw only from their respective blocks)
+            n_bt  = min(5 * len(train_idx), int(mask_tr_pool.sum()))
+            n_bt2 = min(5 * len(test_idx),  int(mask_te_pool.sum()))
 
-        # fallbacks if a block is tiny
-        if n_bt < 1 or n_bt2 < 1:
-            bt_idx  = np.random.choice(len(pool), size=max(1, 5*len(train_idx)), replace=False)
-            bt_idx2 = np.random.choice(len(pool), size=max(1, 5*len(test_idx)),  replace=False)
-        else:
-            tr_inds = np.flatnonzero(mask_tr_pool)
-            te_inds = np.flatnonzero(mask_te_pool)
-            bt_idx  = np.random.choice(tr_inds, size=n_bt,  replace=False)
-            bt_idx2 = np.random.choice(te_inds, size=n_bt2, replace=False)
+            # fallbacks if a block is tiny
+            if n_bt < 1 or n_bt2 < 1:
+                bt_idx  = np.random.choice(len(pool), size=max(1, 5*len(train_idx)), replace=False)
+                bt_idx2 = np.random.choice(len(pool), size=max(1, 5*len(test_idx)),  replace=False)
+            else:
+                tr_inds = np.flatnonzero(mask_tr_pool)
+                te_inds = np.flatnonzero(mask_te_pool)
+                bt_idx  = np.random.choice(tr_inds, size=n_bt,  replace=False)
+                bt_idx2 = np.random.choice(te_inds, size=n_bt2, replace=False)
 
-        Xb_tr = pool[bt_idx]
-        Xb_te = pool[bt_idx2]
+            Xb_tr = pool[bt_idx]
+            Xb_te = pool[bt_idx2]
 
-        # combine
-        X_tr = np.vstack([Xp_tr, Xb_tr])
-        y_tr = np.concatenate([np.ones(len(Xp_tr), dtype=int), np.zeros(len(Xb_tr), dtype=int)])
-        X_te = np.vstack([Xp_te, Xb_te])
-        y_te = np.concatenate([np.ones(len(Xp_te), dtype=int), np.zeros(len(Xb_te), dtype=int)])
+            # combine (NOTE: CV uses raw features; scaling per fold below)
+            X_tr = np.vstack([Xp_tr, Xb_tr])
+            y_tr = np.concatenate([np.ones(len(Xp_tr), dtype=int), np.zeros(len(Xb_tr), dtype=int)])
+            X_te = np.vstack([Xp_te, Xb_te])
+            y_te = np.concatenate([np.ones(len(Xp_te), dtype=int), np.zeros(len(Xb_te), dtype=int)])
 
-        # scale per fold (fit on train, apply to train & test)
-        scaler_cv = StandardScaler().fit(X_tr)
-        X_tr_s = scaler_cv.transform(X_tr)
-        X_te_s = scaler_cv.transform(X_te)
+            # Filter finite rows
+            mtr = np.all(np.isfinite(X_tr), axis=1)
+            mte = np.all(np.isfinite(X_te), axis=1)
+            X_tr, y_tr = X_tr[mtr], y_tr[mtr]
+            X_te, y_te = X_te[mte], y_te[mte]
 
-        # fit
-        clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
+            # Drop constant columns per our *global* keep_mask to ensure consistency
+            X_tr_model = X_tr[:, keep_mask]
+            X_te_model = X_te[:, keep_mask]
 
-        # TRAIN-SET threshold (no peeking)
-        p_tr = clf.predict_proba(X_tr_s)[:, 1]
-        fpr_tr, tpr_tr, thr_tr = roc_curve(y_tr, p_tr)
-        bt = thr_tr[np.argmax(tpr_tr - fpr_tr)]  # Youden's J on TRAIN
+            # scale per fold (fit on train, apply to train & test)
+            scaler_cv = StandardScaler().fit(X_tr_model)
+            X_tr_s = scaler_cv.transform(X_tr_model)
+            X_te_s = scaler_cv.transform(X_te_model)
 
-        # Test predictions & metrics using that fixed threshold
-        p_te = clf.predict_proba(X_te_s)[:, 1]
-        auc_cv = roc_auc_score(y_te, p_te)
-        yhat = (p_te >= bt).astype(int)
+            # fit
+            clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
 
-        tn, fp, fn, tp = confusion_matrix(y_te, yhat, labels=[0, 1]).ravel()
-        sens = tp/(tp+fn) if (tp+fn) else 0.0
-        spec = tn/(tn+fp) if (tn+fp) else 0.0
-        tss_cv = sens + spec - 1
-        kapp = cohen_kappa_score(y_te, yhat)
+            # TRAIN-SET threshold (no peeking)
+            p_tr = clf.predict_proba(X_tr_s)[:, 1]
+            fpr_tr, tpr_tr, thr_tr = roc_curve(y_tr, p_tr)
+            bt = thr_tr[np.argmax(tpr_tr - fpr_tr)]  # Youden's J on TRAIN
 
-        print(
-            f"[CV] fold={len(cv_aucs)+1} "
-            f"test presences={np.sum(y_te==1)} backgrounds={np.sum(y_te==0)} "
-            f"auc={auc_cv:.3f} thr={bt:.3f} sens={sens:.3f} spec={spec:.3f}"
-        )
-        
-        cv_aucs.append(float(auc_cv))
-        cv_tsses.append(float(tss_cv))
-        cv_kappas.append(float(kapp))
-        cv_thresholds.append(float(bt))
-        cv_sensitivities.append(float(sens))
-        cv_specificities.append(float(spec))
+            # Test predictions & metrics using that fixed threshold
+            p_te = clf.predict_proba(X_te_s)[:, 1]
+            auc_cv = roc_auc_score(y_te, p_te)
+            yhat = (p_te >= bt).astype(int)
 
-    # Save CV summary (means & sds)
-    cv_summary = pd.DataFrame([{
-        "n_folds": n_blocks,
-        "AUC_mean":   float(np.mean(cv_aucs)),           "AUC_sd":   float(np.std(cv_aucs)),
-        "TSS_mean":   float(np.mean(cv_tsses)),          "TSS_sd":   float(np.std(cv_tsses)),
-        "Kappa_mean": float(np.mean(cv_kappas)),         "Kappa_sd": float(np.std(cv_kappas)),
-        "Threshold_mean":   float(np.mean(cv_thresholds)),"Threshold_sd":   float(np.std(cv_thresholds)),
-        "Sensitivity_mean": float(np.mean(cv_sensitivities)), "Sensitivity_sd": float(np.std(cv_sensitivities)),
-        "Specificity_mean": float(np.mean(cv_specificities)), "Specificity_sd": float(np.std(cv_specificities)),
-    }])
-    cv_summary.to_csv(perf_cv_csv, index=False)
-    print(f"📊 Cross-validated metrics saved to {perf_cv_csv}")
+            tn, fp, fn, tp = confusion_matrix(y_te, yhat, labels=[0, 1]).ravel()
+            sens = tp/(tp+fn) if (tp+fn) else 0.0
+            spec = tn/(tn+fp) if (tn+fp) else 0.0
+            tss_cv = sens + spec - 1
+            kapp = cohen_kappa_score(y_te, yhat)
+
+            print(
+                f"[CV] fold={len(cv_aucs)+1} "
+                f"test presences={np.sum(y_te==1)} backgrounds={np.sum(y_te==0)} "
+                f"auc={auc_cv:.3f} thr={bt:.3f} sens={sens:.3f} spec={spec:.3f}"
+            )
+            
+            cv_aucs.append(float(auc_cv))
+            cv_tsses.append(float(tss_cv))
+            cv_kappas.append(float(kapp))
+            cv_thresholds.append(float(bt))
+            cv_sensitivities.append(float(sens))
+            cv_specificities.append(float(spec))
+
+        # Save CV summary (means & sds)
+        cv_summary = pd.DataFrame([{
+            "n_folds": n_blocks,
+            "AUC_mean":   float(np.mean(cv_aucs)),           "AUC_sd":   float(np.std(cv_aucs)),
+            "TSS_mean":   float(np.mean(cv_tsses)),          "TSS_sd":   float(np.std(cv_tsses)),
+            "Kappa_mean": float(np.mean(cv_kappas)),         "Kappa_sd": float(np.std(cv_kappas)),
+            "Threshold_mean":   float(np.mean(cv_thresholds)),"Threshold_sd":   float(np.std(cv_thresholds)),
+            "Sensitivity_mean": float(np.mean(cv_sensitivities)), "Sensitivity_sd": float(np.std(cv_sensitivities)),
+            "Specificity_mean": float(np.mean(cv_specificities)), "Specificity_sd": float(np.std(cv_specificities)),
+        }])
+        cv_summary.to_csv(perf_cv_csv, index=False)
+        print(f"📊 Cross-validated metrics saved to {perf_cv_csv}")
+    except Exception as e:
+        print(f"⚠️ Skipping spatial CV due to issue: {e}")
+        cv_summary = pd.DataFrame([{
+            "n_folds": 0,
+            "AUC_mean": np.nan, "AUC_sd": np.nan,
+            "TSS_mean": np.nan, "TSS_sd": np.nan,
+            "Kappa_mean": np.nan, "Kappa_sd": np.nan,
+            "Threshold_mean": np.nan, "Threshold_sd": np.nan,
+            "Sensitivity_mean": np.nan, "Sensitivity_sd": np.nan,
+            "Specificity_mean": np.nan, "Specificity_sd": np.nan,
+        }])
+        cv_summary.to_csv(perf_cv_csv, index=False)
+        print("⚠️ Wrote NaNs to CV metrics due to CV failure.")
 else:
     cv_summary = pd.DataFrame([{
         "n_folds": 0,
@@ -273,37 +321,53 @@ else:
     cv_summary.to_csv(perf_cv_csv, index=False)
     print("⚠️ Not enough presence points for spatial CV (need ≥ 2 blocks). Wrote NaNs to CV metrics.")
 
-# --- Final scaler & model on all filtered samples (scale everything) ---
-scaler = StandardScaler().fit(Xc)
-Xc_s = scaler.transform(Xc)
+# --- Final scaler & model on all filtered samples (scale everything; only kept cols) ---
+scaler = StandardScaler().fit(Xc_model)
+Xc_s = scaler.transform(Xc_model)
 model = LogisticRegression(max_iter=1000, class_weight="balanced").fit(Xc_s, yc)
 joblib.dump(scaler, scaler_pkl)
 print(f"💾 Saved scaler to {scaler_pkl}")
 
-# --- Export standardization stats (training samples: presence+background after NaN filter) ---
+# --- Export standardization stats (mark dropped constants) ---
+# Map scaler stats back to full predictor list
+mean_full = np.zeros(len(names), dtype=float)
+std_full  = np.zeros(len(names), dtype=float)
+mean_full[used_idx] = scaler.mean_.astype(float)
+std_full[used_idx]  = scaler.scale_.astype(float)
+# Dropped columns remain 0.0 mean/std (z-score defined as 0 downstream)
 stats_csv = "outputs/standardization_stats.csv"
 stats_df = pd.DataFrame({
     "predictor": names,
-    "mean":  scaler.mean_.astype(float),
-    "std":   scaler.scale_.astype(float),
+    "mean":  mean_full,
+    "std":   std_full,
+    "dropped_constant": [not k for k in keep_mask]
 })
-# If any feature ended up constant, std can be 0; make that explicit instead of infs downstream
-stats_df.replace({np.inf: np.nan, -np.inf: np.nan}, inplace=True)
 stats_df.to_csv(stats_csv, index=False)
 print(f"📄 Standardization stats saved to {stats_csv}")
 
-# --- Export extracted samples: STANDARDIZED values ---
-presence_std = scaler.transform(presence_samples) if len(presence_samples) else presence_samples
-absence_std  = scaler.transform(background_samples) if len(background_samples) else background_samples
+# --- Export extracted samples: STANDARDIZED values (reconstruct full columns) ---
+def _std_full_from_model(arr_full: np.ndarray) -> np.ndarray:
+    """Standardize using kept columns then expand back to full width (dropped → 0)."""
+    if arr_full.size == 0:
+        return arr_full.reshape((0, len(names)))
+    arr_kept = arr_full[:, keep_mask]  # safe: rows known finite from earlier extraction
+    arr_kept_s = scaler.transform(arr_kept)
+    out = np.zeros((arr_full.shape[0], len(names)), dtype=np.float32)
+    out[:, used_idx] = arr_kept_s.astype(np.float32)
+    # dropped columns already 0 z-score
+    return out
+
+presence_std = _std_full_from_model(presence_samples)
+absence_std  = _std_full_from_model(background_samples)
 
 presence_df_std = pd.DataFrame(presence_std, columns=names)
-presence_df_std.insert(0, 'latitude',  pres_lats)
-presence_df_std.insert(1, 'longitude', pres_lons)
+presence_df_std.insert(0, 'latitude',  pres_lats[:len(presence_df_std)])
+presence_df_std.insert(1, 'longitude', pres_lons[:len(presence_df_std)])
 presence_df_std.insert(2, 'label', 1)
 
 absence_df_std = pd.DataFrame(absence_std, columns=names)
-absence_df_std.insert(0, 'latitude',  bg_lats)
-absence_df_std.insert(1, 'longitude', bg_lons)
+absence_df_std.insert(0, 'latitude',  bg_lats[:len(absence_df_std)])
+absence_df_std.insert(1, 'longitude', bg_lons[:len(absence_df_std)])
 absence_df_std.insert(2, 'label', 0)
 
 samples_df_std = pd.concat([presence_df_std, absence_df_std], ignore_index=True)
@@ -338,29 +402,37 @@ print(f"📊 Fitted (in-sample) metrics saved to {perf_fit_csv}")
 fitted_df.to_csv(compat_perf, index=False)
 print(f"📊 Fitted (compat) metrics saved to {compat_perf}")
 
-# --- Write out coefficients ---
+# --- Write out coefficients (map back to full feature list; dropped → 0) ---
 intercept = model.intercept_[0]
-coef_vals = np.concatenate([[intercept], model.coef_.flatten()])
+coef_used = model.coef_.flatten()
+full_coef = np.zeros(len(names), dtype=float)
+full_coef[used_idx] = coef_used
 predictors = ['Intercept'] + names
+coef_vals  = np.concatenate([[intercept], full_coef])
 coef_df = pd.DataFrame({'predictor': predictors, 'coefficient': coef_vals})
 coef_df.to_csv(coef_csv, index=False)
 print(f"📊 Coefficients saved to {coef_csv}")
 
-# --- Save final suitability map (using scaled raster pixels) ---
+# --- Save final suitability map (using scaled raster pixels; only kept cols) ---
 pred_flat = np.full(flat.shape[0], np.nan, dtype=np.float32)
-pool_s = scaler.transform(pool)
+pool_model = pool[:, keep_mask]
+pool_s = scaler.transform(pool_model)
 pred_flat[valid_mask] = model.predict_proba(pool_s)[:, 1].astype(np.float32)
 pred_map = pred_flat.reshape((height, width))
 with rasterio.open(output_map, "w", **profile) as dst:
     dst.write(pred_map, 1)
 print(f"🎯 Final suitability map saved to {output_map}")
 
-# --- Export standardized rasters (z-scored with the same scaler used for the model) ---
+# --- Export standardized rasters (z-scored; dropped → 0) ---
 os.makedirs(std_ras_dir, exist_ok=True)
 print(f"💾 Writing standardized rasters to {std_ras_dir}")
+
+pool_s_full = np.zeros((pool.shape[0], len(names)), dtype=np.float32)
+pool_s_full[:, used_idx] = pool_s.astype(np.float32)  # dropped stay at 0
+
 for j, name in enumerate(names):
     band_flat = np.full(flat.shape[0], np.float32(np.nan), dtype=np.float32)
-    band_flat[valid_mask] = pool_s[:, j].astype(np.float32)
+    band_flat[valid_mask] = pool_s_full[:, j].astype(np.float32)
     band = band_flat.reshape((height, width))
     out_path = os.path.join(std_ras_dir, f"{name}_z.tif")
     with rasterio.open(out_path, "w", **profile) as dst:
