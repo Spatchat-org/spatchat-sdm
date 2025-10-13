@@ -1,4 +1,4 @@
-# scripts/run_logistic_sdm.py  (patched for constant-feature handling)
+# scripts/run_logistic_sdm.py  (spatial-blocks CV with K-fold fallback + constant-feature handling)
 
 import os
 import numpy as np
@@ -12,7 +12,7 @@ from rasterio.warp import reproject, Resampling as WarpResampling
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
                              cohen_kappa_score)
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, RepeatedStratifiedKFold
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
@@ -181,7 +181,43 @@ absences_csv = "outputs/absence_points_coordinates.csv"
 absence_df_raw[['latitude', 'longitude']].to_csv(absences_csv, index=False)
 print(f"🗺️ Absence coordinates saved to {absences_csv}")
 
-# --- Spatial cross-validation (blocked backgrounds, threshold chosen on TRAIN fold) ---
+# ---------- Helpers: metric computation ----------
+def _compute_metrics_from_probs(y_true, p, thr):
+    from math import isnan
+    yhat = (p >= thr).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, yhat, labels=[0, 1]).ravel()
+    sens = tp/(tp+fn) if (tp+fn) else 0.0
+    spec = tn/(tn+fp) if (tn+fp) else 0.0
+    tss  = sens + spec - 1
+    kapp = cohen_kappa_score(y_true, yhat)
+    auc  = roc_auc_score(y_true, p)
+    return auc, tss, kapp, sens, spec
+
+def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, spec):
+    df_out = pd.DataFrame([{
+        "n_folds": int(n_folds),
+        "cv_method": method,
+        "cv_note": note or "",
+        "AUC_mean":   float(np.mean(aucs)) if len(aucs) else np.nan,
+        "AUC_sd":     float(np.std(aucs))  if len(aucs) else np.nan,
+        "TSS_mean":   float(np.mean(tsses)) if len(tsses) else np.nan,
+        "TSS_sd":     float(np.std(tsses))  if len(tsses) else np.nan,
+        "Kappa_mean": float(np.mean(kappas)) if len(kappas) else np.nan,
+        "Kappa_sd":   float(np.std(kappas))  if len(kappas) else np.nan,
+        "Threshold_mean":   float(np.mean(thrs)) if len(thrs) else np.nan,
+        "Threshold_sd":     float(np.std(thrs))  if len(thrs) else np.nan,
+        "Sensitivity_mean": float(np.mean(sens)) if len(sens) else np.nan,
+        "Sensitivity_sd":   float(np.std(sens))  if len(sens) else np.nan,
+        "Specificity_mean": float(np.mean(spec)) if len(spec) else np.nan,
+        "Specificity_sd":   float(np.std(spec))  if len(spec) else np.nan,
+    }])
+    # Diagnostics for UI
+    df_out["n_input_presences"] = int(len(df))
+    df_out["n_kept_presences"]  = int(len(presence_samples))
+    df_out["n_predictors_used"] = int(len(used))
+    return df_out
+
+# ---------- Spatial cross-validation (blocked backgrounds; threshold chosen on TRAIN fold) ----------
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
 cv_aucs, cv_tsses, cv_kappas = [], [], []
@@ -193,6 +229,81 @@ pool_cols = valid_idx %  width
 pool_xs, pool_ys = rasterio.transform.xy(ref_transform, pool_rows, pool_cols, offset='center')
 pool_lons_all = np.array(pool_xs); pool_lats_all = np.array(pool_ys)
 
+def _run_repeated_kfold_fallback():
+    """Repeated Stratified K-fold fallback (non-spatial)."""
+    print("ℹ️ Falling back to Repeated Stratified K-fold CV (non-spatial).")
+    Np = len(presence_samples)
+    if Np < 3:
+        note = "Too few presences for K-fold; reporting NaNs."
+        print(f"⚠️ {note}")
+        out = _cv_summary_frame(0, "repeated_kfold", note, [], [], [], [], [], [])
+        out.to_csv(perf_cv_csv, index=False)
+        print(f"📊 Wrote CV fallback (NaNs) to {perf_cv_csv}")
+        return
+
+    # choose splits ~ min(5, Np//5) but at least 3
+    n_splits = max(3, min(5, max(2, Np // 5)))
+    n_repeats = 5 if Np >= 10 else 3  # keep runtime sane on tiny sets
+
+    rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
+    aucs = []; tsses = []; kappas = []; thrs = []; sensv = []; specv = []
+
+    # We re-sample background each fold to keep priors aligned with train/test sizes
+    for fold_i, (tr_idx, te_idx) in enumerate(rskf.split(presence_samples, np.ones(Np, dtype=int)), start=1):
+        Xp_tr = presence_samples[tr_idx]
+        Xp_te = presence_samples[te_idx]
+
+        # global background sampling (non-spatial)
+        rng = np.random.default_rng(1000 + fold_i)
+        n_bt_tr = min(5 * len(tr_idx), len(pool))
+        n_bt_te = min(5 * len(te_idx),  len(pool))
+        bt_idx  = rng.choice(len(pool), size=n_bt_tr, replace=False)
+        bt_idx2 = rng.choice(len(pool), size=n_bt_te, replace=False)
+        Xb_tr = pool[bt_idx]
+        Xb_te = pool[bt_idx2]
+
+        # Combine
+        X_tr = np.vstack([Xp_tr, Xb_tr])
+        y_tr = np.concatenate([np.ones(len(Xp_tr), dtype=int), np.zeros(len(Xb_tr), dtype=int)])
+        X_te = np.vstack([Xp_te, Xb_te])
+        y_te = np.concatenate([np.ones(len(Xp_te), dtype=int), np.zeros(len(Xb_te), dtype=int)])
+
+        # Finite filter
+        mtr = np.all(np.isfinite(X_tr), axis=1)
+        mte = np.all(np.isfinite(X_te), axis=1)
+        X_tr, y_tr = X_tr[mtr], y_tr[mtr]
+        X_te, y_te = X_te[mte], y_te[mte]
+
+        # Drop to kept columns; scale per fold
+        X_tr_model = X_tr[:, keep_mask]
+        X_te_model = X_te[:, keep_mask]
+        scaler_cv = StandardScaler().fit(X_tr_model)
+        X_tr_s = scaler_cv.transform(X_tr_model)
+        X_te_s = scaler_cv.transform(X_te_model)
+
+        # Fit, pick threshold on TRAIN (Youden), score on TEST
+        clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
+        p_tr = clf.predict_proba(X_tr_s)[:, 1]
+        fpr_tr, tpr_tr, thr_tr = roc_curve(y_tr, p_tr)
+        bt = thr_tr[np.argmax(tpr_tr - fpr_tr)]
+
+        p_te = clf.predict_proba(X_te_s)[:, 1]
+        auc, tss, kapp, sens, spec = _compute_metrics_from_probs(y_te, p_te, bt)
+
+        print(f"[Kfold] fold={len(aucs)+1}/{n_splits*n_repeats} "
+              f"test presences={np.sum(y_te==1)} backgrounds={np.sum(y_te==0)} "
+              f"auc={auc:.3f} thr={bt:.3f} sens={sens:.3f} spec={spec:.3f}")
+
+        aucs.append(float(auc)); tsses.append(float(tss)); kappas.append(float(kapp))
+        thrs.append(float(bt));  sensv.append(float(sens)); specv.append(float(spec))
+
+    note = f"Spatial blocking unavailable; used non-spatial Repeated Stratified K-fold (splits={n_splits}, repeats={n_repeats})."
+    out = _cv_summary_frame(n_splits * n_repeats, "repeated_kfold", note, aucs, tsses, kappas, thrs, sensv, specv)
+    out.to_csv(perf_cv_csv, index=False)
+    print(f"📊 Wrote CV fallback (Repeated K-fold) to {perf_cv_csv}")
+
+# ---- Try spatial blocks; else fall back to K-fold ----
+did_spatial = False
 if n_blocks >= 2:
     try:
         kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init="auto").fit(coords)
@@ -275,7 +386,7 @@ if n_blocks >= 2:
                 f"test presences={np.sum(y_te==1)} backgrounds={np.sum(y_te==0)} "
                 f"auc={auc_cv:.3f} thr={bt:.3f} sens={sens:.3f} spec={spec:.3f}"
             )
-            
+
             cv_aucs.append(float(auc_cv))
             cv_tsses.append(float(tss_cv))
             cv_kappas.append(float(kapp))
@@ -283,43 +394,20 @@ if n_blocks >= 2:
             cv_sensitivities.append(float(sens))
             cv_specificities.append(float(spec))
 
-        # Save CV summary (means & sds)
-        cv_summary = pd.DataFrame([{
-            "n_folds": n_blocks,
-            "AUC_mean":   float(np.mean(cv_aucs)),           "AUC_sd":   float(np.std(cv_aucs)),
-            "TSS_mean":   float(np.mean(cv_tsses)),          "TSS_sd":   float(np.std(cv_tsses)),
-            "Kappa_mean": float(np.mean(cv_kappas)),         "Kappa_sd": float(np.std(cv_kappas)),
-            "Threshold_mean":   float(np.mean(cv_thresholds)),"Threshold_sd":   float(np.std(cv_thresholds)),
-            "Sensitivity_mean": float(np.mean(cv_sensitivities)), "Sensitivity_sd": float(np.std(cv_sensitivities)),
-            "Specificity_mean": float(np.mean(cv_specificities)), "Specificity_sd": float(np.std(cv_specificities)),
-        }])
+        did_spatial = True
+        note = ""
+        cv_summary = _cv_summary_frame(n_blocks, "spatial_blocks", note,
+                                       cv_aucs, cv_tsses, cv_kappas,
+                                       cv_thresholds, cv_sensitivities, cv_specificities)
         cv_summary.to_csv(perf_cv_csv, index=False)
-        print(f"📊 Cross-validated metrics saved to {perf_cv_csv}")
+        print(f"📊 Cross-validated (spatial blocks) metrics saved to {perf_cv_csv}")
     except Exception as e:
-        print(f"⚠️ Skipping spatial CV due to issue: {e}")
-        cv_summary = pd.DataFrame([{
-            "n_folds": 0,
-            "AUC_mean": np.nan, "AUC_sd": np.nan,
-            "TSS_mean": np.nan, "TSS_sd": np.nan,
-            "Kappa_mean": np.nan, "Kappa_sd": np.nan,
-            "Threshold_mean": np.nan, "Threshold_sd": np.nan,
-            "Sensitivity_mean": np.nan, "Sensitivity_sd": np.nan,
-            "Specificity_mean": np.nan, "Specificity_sd": np.nan,
-        }])
-        cv_summary.to_csv(perf_cv_csv, index=False)
-        print("⚠️ Wrote NaNs to CV metrics due to CV failure.")
+        import traceback; traceback.print_exc()
+        print(f"⚠️ Spatial CV failed with error: {e}")
+        _run_repeated_kfold_fallback()
 else:
-    cv_summary = pd.DataFrame([{
-        "n_folds": 0,
-        "AUC_mean": np.nan, "AUC_sd": np.nan,
-        "TSS_mean": np.nan, "TSS_sd": np.nan,
-        "Kappa_mean": np.nan, "Kappa_sd": np.nan,
-        "Threshold_mean": np.nan, "Threshold_sd": np.nan,
-        "Sensitivity_mean": np.nan, "Sensitivity_sd": np.nan,
-        "Specificity_mean": np.nan, "Specificity_sd": np.nan,
-    }])
-    cv_summary.to_csv(perf_cv_csv, index=False)
-    print("⚠️ Not enough presence points for spatial CV (need ≥ 2 blocks). Wrote NaNs to CV metrics.")
+    print("ℹ️ Not enough presence points/blocks for spatial CV (need ≥2 blocks).")
+    _run_repeated_kfold_fallback()
 
 # --- Final scaler & model on all filtered samples (scale everything; only kept cols) ---
 scaler = StandardScaler().fit(Xc_model)
