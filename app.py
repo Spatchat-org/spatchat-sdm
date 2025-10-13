@@ -1,4 +1,5 @@
 # app.py — updated to show a clear warning when falling back to non-spatial K-fold CV
+# and fix f-string backslash-in-expression SyntaxError
 
 import os
 import io
@@ -123,7 +124,7 @@ TOGETHER_MODEL_DEFAULT = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
 class _SpacedCallLimiter:
     def __init__(self, min_interval_seconds: float):
         self.min_interval = float(min_interval_seconds)
-        self._lock = threading.Lock()
+               self._lock = threading.Lock()
         self._last = 0.0
     def wait(self):
         with self._lock:
@@ -711,6 +712,7 @@ def chat_step(file, user_msg, history, state):
         perf_md = "*none*"
         warn_md = ""
         cv_label = "spatial blocks"
+        folds = 0
         if os.path.exists(perf_fp):
             cv = pd.read_csv(perf_fp)
             if not cv.empty:
@@ -728,15 +730,21 @@ def chat_step(file, user_msg, history, state):
                 coef_table = coef.to_markdown(index=False)
             except Exception:
                 coef_table = ""
+
+        # --- FIXED: avoid backslashes inside f-string expressions ---
+        warn_block = (warn_md + "\n\n") if warn_md else ""
+        perf_header = f"**Cross-validated Performance ({cv_label}{folds_txt})**\n"
+
         summary = (
             f"- Presence points: {n_pts}\n"
             f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
-            f"{(warn_md + '\n\n') if warn_md else ''}"
-            f"**Cross-validated Performance ({cv_label}" + folds_txt + ")**\n"
+            f"{warn_block}"
+            f"{perf_header}"
             f"{perf_md}\n\n"
             "**Predictor Coefficients**\n"
             f"{coef_table or '*none*'}"
         )
+
         explain_sys = {
             "role":"system",
             "content":"You are SpatChat, an expert in species distribution modeling. Use ALL of the context below to answer the user's question as clearly as possible."
