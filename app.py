@@ -1,3 +1,5 @@
+# app.py — updated to show a clear warning when falling back to non-spatial K-fold CV
+
 import os
 import io
 import json
@@ -318,6 +320,85 @@ Keep your answers short—no more than two sentences—while still being helpful
 Guide the user to next steps: upload data, fetch layers, run model, etc.
 """.strip()
 
+# ──────────────────────────────────────────────────────────────
+# CV formatting + warning helpers
+# ──────────────────────────────────────────────────────────────
+def _getv(row, k):
+    return row[k] if (k in row and pd.notna(row[k])) else np.nan
+
+def _fmt(x):
+    return "—" if pd.isna(x) else f"{float(x):.3f}"
+
+def _fmt_pm(mu, sd):
+    if pd.isna(mu):
+        return "—"
+    return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
+
+def build_cv_section(cv_row, long_names=False):
+    """
+    Returns (perf_md_table:str, folds:int, warning_md:str)
+    Detects cv_method and emits a clear warning if using non-spatial K-fold fallback.
+    """
+    folds = int(_getv(cv_row, "n_folds")) if not pd.isna(_getv(cv_row, "n_folds")) else 0
+    cv_method = _getv(cv_row, "cv_method")
+    cv_method = str(cv_method) if not pd.isna(cv_method) else "spatial_blocks"
+
+    # Optional params that might exist
+    k = _getv(cv_row, "kfold_k")
+    r = _getv(cv_row, "kfold_repeats")
+
+    # Metric strings
+    auc_str  = _fmt_pm(_getv(cv_row, "AUC_mean"),   _getv(cv_row, "AUC_sd"))
+    tss_str  = _fmt_pm(_getv(cv_row, "TSS_mean"),   _getv(cv_row, "TSS_sd"))
+    kap_str  = _fmt_pm(_getv(cv_row, "Kappa_mean"), _getv(cv_row, "Kappa_sd"))
+    if long_names:
+        sens_str = _fmt_pm(_getv(cv_row, "Sensitivity_mean"), _getv(cv_row, "Sensitivity_sd"))
+        spec_str = _fmt_pm(_getv(cv_row, "Specificity_mean"), _getv(cv_row, "Specificity_sd"))
+        thr_str  = _fmt_pm(_getv(cv_row, "Threshold_mean"),   _getv(cv_row, "Threshold_sd"))
+    else:
+        sens_str = _fmt(_getv(cv_row, "Sensitivity_mean"))
+        spec_str = _fmt(_getv(cv_row, "Specificity_mean"))
+        thr_str  = _fmt(_getv(cv_row, "Threshold_mean"))
+
+    headers = ("Sensitivity" if long_names else "Sens",
+               "Specificity" if long_names else "Spec",
+               "Threshold" if long_names else "Thr")
+
+    perf_md = (
+        "| Metric | Value |\n"
+        "|---|---:|\n"
+        f"| AUC | {auc_str} |\n"
+        f"| TSS | {tss_str} |\n"
+        f"| Kappa | {kap_str} |\n"
+        f"| {headers[0]} | {sens_str} |\n"
+        f"| {headers[1]} | {spec_str} |\n"
+        f"| {headers[2]} | {thr_str} |\n"
+    )
+
+    # Warning logic
+    warn = ""
+    if folds == 0:
+        warn = (
+            "> ⚠️ **No cross-validated metrics**. Not enough spatial spread for blocked CV and no fallback succeeded. "
+            "Metrics below will show as em dashes. Consider adding more presences or widening the extent."
+        )
+    elif cv_method.lower() in {"kfold", "repeated_kfold", "nonspatial_kfold"}:
+        details = []
+        if not pd.isna(k): details.append(f"k={int(k)}")
+        if not pd.isna(r): details.append(f"repeats={int(r)}")
+        extra = f" ({', '.join(details)})" if details else ""
+        warn = (
+            f"> ⚠️ **Non-spatial K-fold fallback{extra}** — spatial blocked CV was not feasible with the current points/extent. "
+            "These estimates can be optimistic if nearby points leak information across folds."
+        )
+    elif cv_method.lower() not in {"spatial_blocks", "kmeans_blocks"}:
+        # Any other alternative method gets a gentle note
+        warn = f"> ℹ️ CV method: **{cv_method}**."
+
+    return perf_md, folds, warn
+
+# ──────────────────────────────────────────────────────────────
+
 def create_map():
     m = folium.Map(location=[0,0], zoom_start=2, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -501,6 +582,38 @@ def run_model():
     zip_path = zip_results()
     return create_map(), "✅ Model ran successfully! Download the SDM using the button below the map!", perf_df, coef_df, zip_path
 
+def _compose_status_with_cv_and_coefs(status_prefix: str, long_names: bool = False):
+    """Read CV + coef files and return (assistant_txt, download_update)."""
+    cv_fp = "outputs/performance_metrics_cv.csv"
+    coef_fp = "outputs/coefficients.csv"
+    if not os.path.exists(cv_fp) or not os.path.exists(coef_fp):
+        return status_prefix, gr.update()
+
+    cv = pd.read_csv(cv_fp)
+    if cv.empty:
+        return status_prefix, gr.update()
+
+    row = cv.iloc[0]
+
+    perf_md, folds, warn_md = build_cv_section(row, long_names=long_names)
+    coef = pd.read_csv(coef_fp).dropna(axis=1, how='all')
+    coef_md = coef.to_markdown(index=False)
+
+    # Choose label based on method
+    cv_method = _getv(row, "cv_method")
+    cv_method = str(cv_method) if not pd.isna(cv_method) else "spatial_blocks"
+    cv_label = "spatial blocks" if cv_method in {"spatial_blocks", "kmeans_blocks"} else cv_method
+
+    warning_block = f"\n\n{warn_md}\n" if warn_md else ""
+    assistant_txt = (
+        f"{status_prefix}"
+        f"{warning_block}\n"
+        f"**Cross-validated Performance ({cv_label}; n_folds={folds})**\n\n{perf_md}\n\n"
+        f"**Predictor Coefficients:**\n\n{coef_md}"
+    )
+    dl_update = gr.update(value="spatchat_results.zip" if os.path.exists("spatchat_results.zip") else None)
+    return assistant_txt, dl_update
+
 def chat_step(file, user_msg, history, state):
     # available layers Q&A
     if re.search(r'\b(what|which)\b.*\b(layers|predictors)\b.*\b(available|supported|have)\b', user_msg, re.I) \
@@ -534,45 +647,7 @@ def chat_step(file, user_msg, history, state):
         if perf_df is None:
             assistant_txt = status; dl_update = gr.update()
         else:
-            cv = pd.read_csv("outputs/performance_metrics_cv.csv")
-            row = cv.iloc[0] if not cv.empty else pd.Series({})
-            
-            def getv(k):
-                return row[k] if (k in row and pd.notna(row[k])) else np.nan
-            def fmt(x):
-                return "—" if pd.isna(x) else f"{float(x):.3f}"
-            def fmt_pm(mu, sd):
-                if pd.isna(mu): return "—"
-                return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
-            
-            folds = int(getv("n_folds")) if not pd.isna(getv("n_folds")) else 0
-            auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
-            tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
-            kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
-            sens_str = fmt(getv("Sensitivity_mean"))
-            spec_str = fmt(getv("Specificity_mean"))
-            thr_str  = fmt(getv("Threshold_mean"))
-            
-            perf_md = (
-                "| Metric | Value |\n"
-                "|---|---:|\n"
-                f"| AUC | {auc_str} |\n"
-                f"| TSS | {tss_str} |\n"
-                f"| Kappa | {kap_str} |\n"
-                f"| Sens | {sens_str} |\n"
-                f"| Spec | {spec_str} |\n"
-                f"| Thr | {thr_str} |\n"
-            )
-            
-            coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
-            coef_md = coef.to_markdown(index=False)
-            
-            assistant_txt = (
-                f"{status}\n\n"
-                f"**Cross-validated Performance (spatial blocks; n_folds={folds})**\n\n{perf_md}\n\n"
-                f"**Predictor Coefficients:**\n\n{coef_md}"
-            )
-            dl_update = gr.update(value=zip_path)
+            assistant_txt, dl_update = _compose_status_with_cv_and_coefs(status_prefix=status, long_names=False)
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
         return history, m_out, state, dl_update
 
@@ -587,43 +662,11 @@ def chat_step(file, user_msg, history, state):
     if re.fullmatch(r"\s*(?:run\s+)?model\s*$", user_msg, re.I):
         m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is not None:
-            cv = pd.read_csv("outputs/performance_metrics_cv.csv")
-            row = cv.iloc[0] if not cv.empty else pd.Series({})
-            
-            def getv(k):
-                return row[k] if (k in row and pd.notna(row[k])) else np.nan
-            def fmt(x):
-                return "—" if pd.isna(x) else f"{float(x):.3f}"
-            def fmt_pm(mu, sd):
-                if pd.isna(mu): return "—"
-                return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
-            
-            folds = int(getv("n_folds")) if not pd.isna(getv("n_folds")) else 0
-            auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
-            tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
-            kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
-            sens_str = fmt_pm(getv("Sensitivity_mean"), getv("Sensitivity_sd"))
-            spec_str = fmt_pm(getv("Specificity_mean"), getv("Specificity_sd"))
-            thr_str  = fmt_pm(getv("Threshold_mean"),   getv("Threshold_sd"))
-            
-            perf_md = (
-                "| Metric | Value |\n"
-                "|---|---:|\n"
-                f"| AUC | {auc_str} |\n"
-                f"| TSS | {tss_str} |\n"
-                f"| Kappa | {kap_str} |\n"
-                f"| Sensitivity | {sens_str} |\n"
-                f"| Specificity | {spec_str} |\n"
-                f"| Threshold | {thr_str} |\n"
-            )
-            
-            coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
-            
-            status += "\n\n**Cross-validated Performance (spatial blocks; n_folds=" + str(folds) + ")**\n\n" + perf_md
-            status += "\n\n**Predictor Coefficients:**\n\n" + coef.to_markdown(index=False)
-        assistant_txt = status
+            assistant_txt, dl_update = _compose_status_with_cv_and_coefs(status_prefix=status, long_names=True)
+        else:
+            assistant_txt, dl_update = status, gr.update()
         history.extend([{"role":"user","content":user_msg},{"role":"assistant","content":assistant_txt}])
-        return history, m_out, state, gr.update(value=zip_path)
+        return history, m_out, state, dl_update
 
     # reset
     if re.search(r"\b(start over|restart|clear everything|reset|clear all)\b", user_msg, re.I):
@@ -644,41 +687,11 @@ def chat_step(file, user_msg, history, state):
         assistant_txt = f"{status}\n\nGreat! Now you can run the model or fetch more layers."
         dl_update = gr.update()
     elif tool == "run_model":
-        # Keep this fallback path, but show CV metrics (not fitted)
         m_out, status, perf_df, coef_df, zip_path = run_model()
         if perf_df is None:
             assistant_txt = status; dl_update = gr.update()
         else:
-            cv = pd.read_csv("outputs/performance_metrics_cv.csv")
-            row = cv.iloc[0] if not cv.empty else pd.Series({})
-            def getv(k): return row[k] if (k in row and pd.notna(row[k])) else np.nan
-            def fmt(x): return "—" if pd.isna(x) else f"{float(x):.3f}"
-            def fmt_pm(mu, sd):
-                if pd.isna(mu): return "—"
-                return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
-            folds = int(getv("n_folds")) if not pd.isna(getv("n_folds")) else 0
-            auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
-            tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
-            kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
-            sens_str = fmt(getv("Sensitivity_mean"))
-            spec_str = fmt(getv("Specificity_mean"))
-            thr_str  = fmt(getv("Threshold_mean"))
-            perf_md = (
-                "**Cross-validated Performance (spatial blocks; n_folds="
-                + str(folds) + ")**\n\n"
-                "| Metric | Value |\n"
-                "|---|---:|\n"
-                f"| AUC | {auc_str} |\n"
-                f"| TSS | {tss_str} |\n"
-                f"| Kappa | {kap_str} |\n"
-                f"| Sens | {sens_str} |\n"
-                f"| Spec | {spec_str} |\n"
-                f"| Thr | {thr_str} |\n"
-            )
-            coef = pd.read_csv("outputs/coefficients.csv").dropna(axis=1, how='all')
-            coef_md = coef.to_markdown(index=False)
-            assistant_txt = f"{status}\n\n{perf_md}\n\n**Predictor Coefficients:**\n\n{coef_md}"
-            dl_update = gr.update(value=zip_path)
+            assistant_txt, dl_update = _compose_status_with_cv_and_coefs(status_prefix=status, long_names=False)
     elif tool == "download":
         m_out, _ = create_map(), zip_results()
         assistant_txt = "✅ ZIP is downloading…"
@@ -696,40 +709,17 @@ def chat_step(file, user_msg, history, state):
         perf_fp = "outputs/performance_metrics_cv.csv"
         folds_txt = ""
         perf_md = "*none*"
+        warn_md = ""
+        cv_label = "spatial blocks"
         if os.path.exists(perf_fp):
             cv = pd.read_csv(perf_fp)
             if not cv.empty:
                 row = cv.iloc[0]
-        
-                def getv(k):
-                    return row[k] if (k in row and pd.notna(row[k])) else np.nan
-                def fmt(x):
-                    return "—" if pd.isna(x) else f"{float(x):.3f}"
-                def fmt_pm(mu, sd):
-                    if pd.isna(mu): return "—"
-                    return f"{float(mu):.3f}" + (f" ± {float(sd):.3f}" if not pd.isna(sd) else "")
-        
-                nfolds = getv("n_folds")
-                if not pd.isna(nfolds):
-                    folds_txt = f" (n_folds={int(nfolds)})"
-        
-                auc_str  = fmt_pm(getv("AUC_mean"),   getv("AUC_sd"))
-                tss_str  = fmt_pm(getv("TSS_mean"),   getv("TSS_sd"))
-                kap_str  = fmt_pm(getv("Kappa_mean"), getv("Kappa_sd"))
-                sens_str = fmt(getv("Sensitivity_mean"))
-                spec_str = fmt(getv("Specificity_mean"))
-                thr_str  = fmt(getv("Threshold_mean"))
-        
-                perf_md = (
-                    "| Metric | Value |\n"
-                    "|---|---:|\n"
-                    f"| AUC | {auc_str} |\n"
-                    f"| TSS | {tss_str} |\n"
-                    f"| Kappa | {kap_str} |\n"
-                    f"| Sens | {sens_str} |\n"
-                    f"| Spec | {spec_str} |\n"
-                    f"| Thr | {thr_str} |\n"
-                )
+                perf_md, folds, warn_md = build_cv_section(row, long_names=False)
+                folds_txt = f" (n_folds={folds})"
+                cv_method = _getv(row, "cv_method")
+                cv_label = "spatial blocks" if (isinstance(cv_method, str) and cv_method in {"spatial_blocks","kmeans_blocks"}) else (cv_method if isinstance(cv_method, str) else "spatial blocks")
+
         coef_table = ""
         coef_fp = "outputs/coefficients.csv"
         if os.path.exists(coef_fp):
@@ -741,7 +731,8 @@ def chat_step(file, user_msg, history, state):
         summary = (
             f"- Presence points: {n_pts}\n"
             f"- Layers fetched ({len(fetched)}): {', '.join(fetched) or 'none'}\n\n"
-            "**Cross-validated Performance (spatial blocks" + folds_txt + ")**\n"
+            f"{(warn_md + '\n\n') if warn_md else ''}"
+            f"**Cross-validated Performance ({cv_label}" + folds_txt + ")**\n"
             f"{perf_md}\n\n"
             "**Predictor Coefficients**\n"
             f"{coef_table or '*none*'}"
@@ -826,7 +817,6 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
             gr.update(visible=False), gr.update(visible=False))
 
 # UI
-
 
 with gr.Blocks() as demo:
     gr.Image(
