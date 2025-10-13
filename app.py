@@ -1,5 +1,4 @@
-# app.py — updated to show a clear warning when falling back to non-spatial K-fold CV
-# and fix f-string backslash-in-expression SyntaxError
+# app.py
 
 import os
 import io
@@ -124,7 +123,7 @@ TOGETHER_MODEL_DEFAULT = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
 class _SpacedCallLimiter:
     def __init__(self, min_interval_seconds: float):
         self.min_interval = float(min_interval_seconds)
-               self._lock = threading.Lock()
+        self._lock = threading.Lock()
         self._last = 0.0
     def wait(self):
         with self._lock:
@@ -393,7 +392,6 @@ def build_cv_section(cv_row, long_names=False):
             "These estimates can be optimistic if nearby points leak information across folds."
         )
     elif cv_method.lower() not in {"spatial_blocks", "kmeans_blocks"}:
-        # Any other alternative method gets a gentle note
         warn = f"> ℹ️ CV method: **{cv_method}**."
 
     return perf_md, folds, warn
@@ -731,7 +729,6 @@ def chat_step(file, user_msg, history, state):
             except Exception:
                 coef_table = ""
 
-        # --- FIXED: avoid backslashes inside f-string expressions ---
         warn_block = (warn_md + "\n\n") if warn_md else ""
         perf_header = f"**Cross-validated Performance ({cv_label}{folds_txt})**\n"
 
