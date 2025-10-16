@@ -2,7 +2,7 @@
 # Spatial-blocks CV with K-fold fallback. Standardizes ALL predictors
 # (including binary/categorical). Constant features are dropped globally;
 # per-fold scaling uses an ε-guard to avoid NaNs when a column is constant in a fold.
-# Spatial CV now assigns blocks lazily (batch candidates only), avoiding huge kmeans.predict over the full pool.
+# Spatial CV assigns blocks lazily (batch candidates only), avoiding huge kmeans.predict over the full pool.
 
 import os
 import numpy as np
@@ -82,13 +82,17 @@ def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, sp
     df_out["n_predictors_used"] = int(len(used))
     return df_out
 
-def _lin_to_coords(linear_idx: np.ndarray, width: int, transform):
-    """Vectorized linear index -> (lon, lat) using row/col and raster transform."""
-    rows = np.divide(linear_idx, width, dtype=np.int64)
-    cols = np.mod(linear_idx,  width)
+def _lin_to_coords(linear_idx, width, transform):
+    """Linear index -> (lon, lat) with integer row/col; safe on empty arrays."""
+    linear_idx = np.asarray(linear_idx, dtype=np.int64)
+    if linear_idx.size == 0:
+        return (np.empty((0,), dtype=np.float64),
+                np.empty((0,), dtype=np.float64))
+    rows = linear_idx // width
+    cols = linear_idx %  width
     xs, ys = rasterio.transform.xy(transform, rows, cols, offset='center')
-    # xy returns sequences; convert to numpy
-    return np.asarray(xs), np.asarray(ys)  # lon, lat
+    # ensure numpy arrays
+    return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
 
 def _sample_by_blocks(kmeans: KMeans, blocks_wanted, n_needed, rng, pool_len, valid_idx, width, transform, max_batch=100_000, max_tries=30):
     """
@@ -112,13 +116,11 @@ def _sample_by_blocks(kmeans: KMeans, blocks_wanted, n_needed, rng, pool_len, va
             selected = batch_idx[mask]
             collected.extend(selected.tolist())
         tries += 1
-        # reduce batch after a few tries to avoid hammering memory
         if tries == 10:
             size_per_try = max(10_000, size_per_try // 2)
         if tries == 20:
             size_per_try = max(5_000, size_per_try // 2)
     if len(collected) < n_needed:
-        # fall back to global random if not enough found (keeps CV moving)
         need = n_needed - len(collected)
         fallback = rng.choice(pool_len, size=need, replace=False)
         collected.extend(fallback.tolist())
@@ -230,9 +232,13 @@ background_samples = pool[bg_indices].astype(np.float32)
 print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
 # Convert chosen background indices back to row/col → lon/lat (for export)
-bg_linear  = valid_idx[bg_indices]
-bg_xs, bg_ys = _lin_to_coords(bg_linear, width, ref_transform)  # lon, lat
-bg_lons = np.array(bg_xs); bg_lats = np.array(bg_ys)
+bg_linear = valid_idx[bg_indices]
+if bg_linear.size == 0:
+    bg_lons = np.empty((0,), dtype=np.float64)
+    bg_lats = np.empty((0,), dtype=np.float64)
+else:
+    bg_xs, bg_ys = _lin_to_coords(bg_linear, width, ref_transform)  # lon, lat
+    bg_lons = np.array(bg_xs); bg_lats = np.array(bg_ys)
 
 # --- Prepare data (combined presence + background) ---
 print("[STEP] build-train-table")
@@ -325,10 +331,10 @@ def _run_repeated_kfold_fallback():
 
         # global background sampling (non-spatial)
         rng = np.random.default_rng(1000 + fold_i)
-        n_bt_tr = min(5 * len(tr_idx), len(pool))
-        n_bt_te = min(5 * len(te_idx),  len(pool))
-        bt_idx  = rng.choice(len(pool), size=n_bt_tr, replace=False)
-        bt_idx2 = rng.choice(len(pool), size=n_bt_te, replace=False)
+        n_bt_tr = min(5 * len(tr_idx), pool_len)
+        n_bt_te = min(5 * len(te_idx),  pool_len)
+        bt_idx  = rng.choice(pool_len, size=n_bt_tr, replace=False)
+        bt_idx2 = rng.choice(pool_len, size=n_bt_te, replace=False)
         Xb_tr = pool[bt_idx]
         Xb_te = pool[bt_idx2]
 
