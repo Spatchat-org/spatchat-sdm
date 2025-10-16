@@ -397,57 +397,123 @@ def build_cv_section(cv_row, long_names=False):
     return perf_md, folds, warn
 
 # ──────────────────────────────────────────────────────────────
+# Mapping helpers (robust numeric coercion and WGS84 checks)
+# ──────────────────────────────────────────────────────────────
+
+def _coerce_wgs84_arrays(df, lat_col, lon_col):
+    """
+    Coerce the given lat/lon columns to numeric float arrays and filter to plausible WGS84 ranges.
+    Returns (lats: np.ndarray, lons: np.ndarray) with NaNs/invalids removed.
+    """
+    lat = pd.to_numeric(df[lat_col], errors="coerce")
+    lon = pd.to_numeric(df[lon_col], errors="coerce")
+    arr = np.column_stack([lat.values, lon.values]).astype(float)
+    mask = np.isfinite(arr).all(axis=1)
+    mask &= (arr[:, 0] >= -90) & (arr[:, 0] <= 90) & (arr[:, 1] >= -180) & (arr[:, 1] <= 180)
+    return arr[mask, 0], arr[mask, 1]
 
 def create_map():
-    m = folium.Map(location=[0,0], zoom_start=2, control_scale=True)
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
+
+    # Presence points
     ppath = "inputs/presence_points.csv"
     if os.path.exists(ppath):
         df = pd.read_csv(ppath)
-        lat_col, lon_col = detect_coords(df)
+
+        # Prefer standardized names if present
+        if {"latitude", "longitude"}.issubset(df.columns):
+            lat_col, lon_col = "latitude", "longitude"
+        else:
+            # Fallback: try to detect (this will *not* plot projected coords)
+            lat_col, lon_col = detect_coords(df)
+
         if lat_col and lon_col:
-            pts = df[[lat_col, lon_col]].dropna().values.tolist()
-            if pts:
+            try:
+                lats, lons = _coerce_wgs84_arrays(df, lat_col, lon_col)
+            except Exception:
+                lats, lons = np.array([]), np.array([])
+
+            if lats.size > 0:
                 fg = folium.FeatureGroup(name="🟦 Presence Points")
-                for lat, lon in pts:
-                    folium.CircleMarker(location=[lat, lon], radius=5, color="blue", fill=True, fill_opacity=0.8).add_to(fg)
+                for lat, lon in zip(lats, lons):  # iterate row values
+                    folium.CircleMarker(
+                        location=[float(lat), float(lon)],
+                        radius=5, color="blue", fill=True, fill_opacity=0.8
+                    ).add_to(fg)
                 fg.add_to(m)
-                m.fit_bounds(pts)
+
+                # fit to valid points
+                bounds = [[float(lats.min()), float(lons.min())],
+                          [float(lats.max()), float(lons.max())]]
+                try:
+                    m.fit_bounds(bounds)
+                except Exception:
+                    pass
+            else:
+                # If the file likely contains projected coords, wait until confirm_coords() reprojects.
+                pass
+
     # background/absence points (if available)
     abs_fp = "outputs/absence_points_coordinates.csv"
     if os.path.exists(abs_fp):
         df_abs = pd.read_csv(abs_fp)
-        if {'latitude','longitude'}.issubset(df_abs.columns):
-            fg_abs = folium.FeatureGroup(name="🟥 Background / Absence Points")
-            for lat, lon in df_abs[['latitude','longitude']].dropna().values.tolist():
-                folium.CircleMarker(
-                    location=[lat, lon], radius=3, color="red", fill=True, fill_opacity=0.6
-                ).add_to(fg_abs)
-            fg_abs.add_to(m)
+        if {'latitude', 'longitude'}.issubset(df_abs.columns):
+            try:
+                alats, alons = _coerce_wgs84_arrays(df_abs, "latitude", "longitude")
+            except Exception:
+                alats, alons = np.array([]), np.array([])
+            if alats.size > 0:
+                fg_abs = folium.FeatureGroup(name="🟥 Background / Absence Points")
+                for lat, lon in zip(alats, alons):
+                    folium.CircleMarker(
+                        location=[float(lat), float(lon)],
+                        radius=3, color="red", fill=True, fill_opacity=0.6
+                    ).add_to(fg_abs)
+                fg_abs.add_to(m)
 
+    # Raster overlays (predictors in WGS84)
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
         for fn in sorted(os.listdir(rasdir)):
             if fn.endswith(".tif"):
-                with rasterio.open(os.path.join(rasdir, fn)) as src:
-                    arr = src.read(1); bnd = src.bounds
-                vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-                if not np.isnan(vmin) and vmin!=vmax:
-                    rgba = colormaps["viridis"]((arr-vmin)/(vmax-vmin))
+                fpath = os.path.join(rasdir, fn)
+                try:
+                    with rasterio.open(fpath) as src:
+                        arr = src.read(1)
+                        bnd = src.bounds
+                    vmin = np.nanmin(arr)
+                    vmax = np.nanmax(arr)
+                    if np.isnan(vmin) or vmin == vmax:
+                        continue
+                    rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
                     folium.raster_layers.ImageOverlay(
-                        rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
-                        opacity=1.0, name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
+                        image=rgba,
+                        bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
+                        opacity=1.0,
+                        name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
                     ).add_to(m)
+                except Exception as e:
+                    print(f"[map] Skipped raster {fn}: {e}", file=sys.stderr)
+
+    # Suitability raster
     sf = "outputs/suitability_map_wgs84.tif"
     if os.path.exists(sf):
-        with rasterio.open(sf) as src:
-            arr = src.read(1); bnd = src.bounds
-        vmin, vmax = np.nanmin(arr), np.nanmax(arr)
-        rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
-        folium.raster_layers.ImageOverlay(
-            rgba, bounds=[[bnd.bottom,bnd.left],[bnd.top,bnd.right]],
-            opacity=1.0, name="🎯 Suitability"
-        ).add_to(m)
+        try:
+            with rasterio.open(sf) as src:
+                arr = src.read(1)
+                bnd = src.bounds
+            vmin = np.nanmin(arr); vmax = np.nanmax(arr)
+            if not np.isnan(vmin) and vmin != vmax:
+                rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
+                folium.raster_layers.ImageOverlay(
+                    image=rgba,
+                    bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
+                    opacity=1.0, name="🎯 Suitability"
+                ).add_to(m)
+        except Exception as e:
+            print(f"[map] Skipped suitability raster: {e}", file=sys.stderr)
+
     folium.LayerControl(collapsed=False).add_to(m)
     img_html = f'<img src="data:image/png;base64,{COLORBAR_BASE64}" style="position:absolute; bottom:20px; right:10px; width:200px; height:30px; z-index:1000;"/>'
     m.get_root().html.add_child(Element(img_html))
@@ -765,6 +831,7 @@ def on_upload(f, history, state):
         df = pd.read_csv("inputs/presence_points.csv")
         lat, lon = detect_coords(df)
         if lat and lon:
+            # Rename to canonical columns so mapping/modeling stays simple
             df = df.rename(columns={lat: "latitude", lon: "longitude"})
             df.to_csv("inputs/presence_points.csv", index=False)
             msg = "✅ Sweet! I found your `latitude` and `longitude` columns."
@@ -893,4 +960,4 @@ with gr.Blocks() as demo:
     )
     user_in.submit(chat_step, inputs=[file_input, user_in, chat, state], outputs=[chat, map_out, state, download_btn])
     user_in.submit(lambda: "", None, user_in)
-    demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=True)
+    demo.launch()
