@@ -1,4 +1,7 @@
-# scripts/run_logistic_sdm.py  (spatial-blocks CV with K-fold fallback + constant-feature handling)
+# scripts/run_logistic_sdm.py
+# Spatial-blocks CV with K-fold fallback. Standardizes ALL predictors
+# (including binary/categorical) using StandardScaler on kept columns.
+# Constant features are dropped (recorded in standardization_stats.csv).
 
 import os
 import numpy as np
@@ -6,7 +9,6 @@ import pandas as pd
 import rasterio
 import joblib
 
-from rasterio.enums import Resampling  # kept for consistency; not used in reprojection
 from rasterio.transform import rowcol
 from rasterio.warp import reproject, Resampling as WarpResampling
 from sklearn.linear_model import LogisticRegression
@@ -21,7 +23,7 @@ csv_path     = "inputs/presence_points.csv"
 raster_dir   = "predictor_rasters/wgs84"
 perf_cv_csv  = "outputs/performance_metrics_cv.csv"
 perf_fit_csv = "outputs/performance_metrics_fitted.csv"
-compat_perf  = "outputs/performance_metrics.csv"  # also in ZIP
+compat_perf  = "outputs/performance_metrics.csv"      # legacy/zip
 coef_csv     = "outputs/coefficients.csv"
 scaler_pkl   = "outputs/standard_scaler.pkl"
 output_map   = "outputs/suitability_map_wgs84.tif"
@@ -55,11 +57,12 @@ with rasterio.open(rasters[0]) as ref:
     }
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
 
-# --- Stack predictors (reproject/align every layer to reference grid) ---
+# --- Helper: whether a raster is categorical-like (choose nearest resampling) ---
 def _is_categorical(name: str) -> bool:
     n = name.lower()
     return ("landcover" in n) or n.endswith("_onehot") or ("class" in n)
 
+# --- Stack predictors (align every layer to reference grid) ---
 layers, names = [], []
 for path in rasters:
     name = os.path.splitext(os.path.basename(path))[0]
@@ -83,7 +86,7 @@ print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract presence samples (only where predictors are all valid) ---
 presence_samples = []
-kept_coords = []  # (lat, lon) that landed on valid pixels
+kept_coords = []  # (lat, lon) on valid pixels
 for lat, lon in zip(lats, lons):
     try:
         r, c = rowcol(ref_transform, lon, lat, op=round)
@@ -131,11 +134,11 @@ y = np.concatenate([
 # Guard rows: require finite values (this also excludes NaNs and infs)
 finite_mask = np.all(np.isfinite(X), axis=1)
 Xc, yc = X[finite_mask], y[finite_mask]
-print(f"🔀 Training samples: {X.shape} → after finite filter: {Xc.shape}; positives={int((yc==1).sum())}, negatives={int((yc==0).sum())}")
+print(f"🔀 Training samples: {X.shape} → after finite filter: {Xc.shape}; "
+      f"positives={int((yc==1).sum())}, negatives={int((yc==0).sum())}")
 
 if Xc.shape[0] == 0:
     raise RuntimeError("No usable training rows after filtering. Check predictor coverage & presence coordinates.")
-
 if len(np.unique(yc)) < 2:
     raise RuntimeError("Only one class present in training data (either no presences or no backgrounds after filtering).")
 
@@ -147,7 +150,6 @@ dropped = [n for n, k in zip(names, keep_mask) if not k]
 used    = [n for n, k in zip(names, keep_mask) if k]
 if not np.any(keep_mask):
     raise RuntimeError("All predictors are constant over training data. Add at least one varying layer.")
-
 if dropped:
     print(f"⚠️ Dropping constant predictors (std≈0 on training rows): {', '.join(dropped)}")
 
@@ -183,7 +185,6 @@ print(f"🗺️ Absence coordinates saved to {absences_csv}")
 
 # ---------- Helpers: metric computation ----------
 def _compute_metrics_from_probs(y_true, p, thr):
-    from math import isnan
     yhat = (p >= thr).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, yhat, labels=[0, 1]).ravel()
     sens = tp/(tp+fn) if (tp+fn) else 0.0
@@ -217,7 +218,7 @@ def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, sp
     df_out["n_predictors_used"] = int(len(used))
     return df_out
 
-# ---------- Spatial cross-validation (blocked backgrounds; threshold chosen on TRAIN fold) ----------
+# ---------- Spatial cross-validation (blocked; threshold picked on TRAIN) ----------
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
 cv_aucs, cv_tsses, cv_kappas = [], [], []
@@ -242,8 +243,8 @@ def _run_repeated_kfold_fallback():
         return
 
     # choose splits ~ min(5, Np//5) but at least 3
-    n_splits = max(3, min(5, max(2, Np // 5)))
-    n_repeats = 5 if Np >= 10 else 3  # keep runtime sane on tiny sets
+    n_splits  = max(3, min(5, max(2, Np // 5)))
+    n_repeats = 5 if Np >= 10 else 3
 
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
     aucs = []; tsses = []; kappas = []; thrs = []; sensv = []; specv = []
@@ -274,7 +275,7 @@ def _run_repeated_kfold_fallback():
         X_tr, y_tr = X_tr[mtr], y_tr[mtr]
         X_te, y_te = X_te[mte], y_te[mte]
 
-        # Drop to kept columns; scale per fold
+        # Drop to kept columns; scale per fold (ALL variables, incl. dummies)
         X_tr_model = X_tr[:, keep_mask]
         X_te_model = X_te[:, keep_mask]
         scaler_cv = StandardScaler().fit(X_tr_model)
@@ -304,21 +305,22 @@ def _run_repeated_kfold_fallback():
 
 # ---- Try spatial blocks; else fall back to K-fold ----
 did_spatial = False
-if n_blocks >= 2:
+if len(coords) >= 2:
     try:
-        kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init="auto").fit(coords)
+        # n_init=10 for sklearn<=1.3 compatibility
+        kmeans = KMeans(n_clusters=min(5, len(coords)), random_state=42, n_init=10).fit(coords)
         blocks = kmeans.labels_  # presences' block labels
         # Assign every valid pixel in the pool to a block
         pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
 
-        gkf = GroupKFold(n_splits=n_blocks)
+        gkf = GroupKFold(n_splits=len(np.unique(blocks)))
         for train_idx, test_idx in gkf.split(presence_samples,
                                              np.ones(len(presence_samples), dtype=int),
                                              groups=blocks):
             # split presence
             Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
             test_blocks = set(blocks[test_idx])
-            train_blocks = [b for b in range(n_blocks) if b not in test_blocks]
+            train_blocks = [b for b in np.unique(blocks) if b not in test_blocks]
 
             # masks for pool by block
             mask_tr_pool = np.isin(pool_blocks, train_blocks)
@@ -341,7 +343,7 @@ if n_blocks >= 2:
             Xb_tr = pool[bt_idx]
             Xb_te = pool[bt_idx2]
 
-            # combine (NOTE: CV uses raw features; scaling per fold below)
+            # combine; scaling per fold below
             X_tr = np.vstack([Xp_tr, Xb_tr])
             y_tr = np.concatenate([np.ones(len(Xp_tr), dtype=int), np.zeros(len(Xb_tr), dtype=int)])
             X_te = np.vstack([Xp_te, Xb_te])
@@ -353,11 +355,9 @@ if n_blocks >= 2:
             X_tr, y_tr = X_tr[mtr], y_tr[mtr]
             X_te, y_te = X_te[mte], y_te[mte]
 
-            # Drop constant columns per our *global* keep_mask to ensure consistency
+            # Drop to kept columns; scale per fold (ALL variables, incl. dummies)
             X_tr_model = X_tr[:, keep_mask]
             X_te_model = X_te[:, keep_mask]
-
-            # scale per fold (fit on train, apply to train & test)
             scaler_cv = StandardScaler().fit(X_tr_model)
             X_tr_s = scaler_cv.transform(X_tr_model)
             X_te_s = scaler_cv.transform(X_te_model)
@@ -396,7 +396,7 @@ if n_blocks >= 2:
 
         did_spatial = True
         note = ""
-        cv_summary = _cv_summary_frame(n_blocks, "spatial_blocks", note,
+        cv_summary = _cv_summary_frame(len(np.unique(blocks)), "spatial_blocks", note,
                                        cv_aucs, cv_tsses, cv_kappas,
                                        cv_thresholds, cv_sensitivities, cv_specificities)
         cv_summary.to_csv(perf_cv_csv, index=False)
@@ -417,12 +417,11 @@ joblib.dump(scaler, scaler_pkl)
 print(f"💾 Saved scaler to {scaler_pkl}")
 
 # --- Export standardization stats (mark dropped constants) ---
-# Map scaler stats back to full predictor list
 mean_full = np.zeros(len(names), dtype=float)
 std_full  = np.zeros(len(names), dtype=float)
 mean_full[used_idx] = scaler.mean_.astype(float)
 std_full[used_idx]  = scaler.scale_.astype(float)
-# Dropped columns remain 0.0 mean/std (z-score defined as 0 downstream)
+# Dropped columns remain 0.0 mean/std (their z-scores are 0 downstream)
 stats_csv = "outputs/standardization_stats.csv"
 stats_df = pd.DataFrame({
     "predictor": names,
@@ -435,14 +434,13 @@ print(f"📄 Standardization stats saved to {stats_csv}")
 
 # --- Export extracted samples: STANDARDIZED values (reconstruct full columns) ---
 def _std_full_from_model(arr_full: np.ndarray) -> np.ndarray:
-    """Standardize using kept columns then expand back to full width (dropped → 0)."""
+    """Standardize kept columns using fitted scaler, expand back to full width (dropped → 0)."""
     if arr_full.size == 0:
         return arr_full.reshape((0, len(names)))
-    arr_kept = arr_full[:, keep_mask]  # safe: rows known finite from earlier extraction
+    arr_kept = arr_full[:, keep_mask]  # rows known finite from earlier extraction
     arr_kept_s = scaler.transform(arr_kept)
     out = np.zeros((arr_full.shape[0], len(names)), dtype=np.float32)
     out[:, used_idx] = arr_kept_s.astype(np.float32)
-    # dropped columns already 0 z-score
     return out
 
 presence_std = _std_full_from_model(presence_samples)
@@ -458,9 +456,8 @@ absence_df_std.insert(0, 'latitude',  bg_lats[:len(absence_df_std)])
 absence_df_std.insert(1, 'longitude', bg_lons[:len(absence_df_std)])
 absence_df_std.insert(2, 'label', 0)
 
-samples_df_std = pd.concat([presence_df_std, absence_df_std], ignore_index=True)
 std_csv = "outputs/sdm_point_samples_standardized.csv"
-samples_df_std.to_csv(std_csv, index=False)
+pd.concat([presence_df_std, absence_df_std], ignore_index=True).to_csv(std_csv, index=False)
 print(f"📄 Point samples (STANDARDIZED) saved to {std_csv}")
 
 # --- Fitted (in-sample) metrics on standardized training data ---
