@@ -7,7 +7,6 @@
 
 import os
 import numpy as np
-import pd as _pd_alias  # placeholder to catch accidental 'pd' typo
 import pandas as pd
 import rasterio
 import joblib
