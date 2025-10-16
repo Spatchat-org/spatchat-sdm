@@ -1,7 +1,7 @@
 # scripts/run_logistic_sdm.py
 # Spatial-blocks CV with K-fold fallback. Standardizes ALL predictors
-# (including binary/categorical) using StandardScaler on kept columns.
-# Constant features are dropped (recorded in standardization_stats.csv).
+# (including binary/categorical). Constant features are dropped globally;
+# per-fold scaling uses an ε-guard to avoid NaNs when a column is constant in a fold.
 
 import os
 import numpy as np
@@ -30,6 +30,57 @@ output_map   = "outputs/suitability_map_wgs84.tif"
 std_ras_dir  = "outputs/standardized_rasters_wgs84"
 os.makedirs("outputs", exist_ok=True)
 
+# ---------- Constants & helpers ----------
+EPS = 1e-8  # small value for zero-variance checks
+
+def _is_categorical(name: str) -> bool:
+    n = name.lower()
+    return ("landcover" in n) or n.endswith("_onehot") or ("class" in n)
+
+def _zscore_train_test(X_tr, X_te):
+    """
+    Fit z-score on TRAIN; clamp tiny std to 1.0; apply to TRAIN/TEST.
+    Returns X_tr_s, X_te_s, mu, sd
+    """
+    mu = np.nanmean(X_tr, axis=0)
+    sd = np.nanstd(X_tr, axis=0)
+    sd = np.where(sd < EPS, 1.0, sd)  # avoid divide-by-zero
+    return (X_tr - mu) / sd, (X_te - mu) / sd, mu, sd
+
+def _compute_metrics_from_probs(y_true, p, thr):
+    yhat = (p >= thr).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, yhat, labels=[0, 1]).ravel()
+    sens = tp/(tp+fn) if (tp+fn) else 0.0
+    spec = tn/(tn+fp) if (tn+fp) else 0.0
+    tss  = sens + spec - 1
+    kapp = cohen_kappa_score(y_true, yhat)
+    auc  = roc_auc_score(y_true, p)
+    return auc, tss, kapp, sens, spec
+
+def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, spec):
+    df_out = pd.DataFrame([{
+        "n_folds": int(n_folds),
+        "cv_method": method,
+        "cv_note": note or "",
+        "AUC_mean":   float(np.mean(aucs)) if len(aucs) else np.nan,
+        "AUC_sd":     float(np.std(aucs))  if len(aucs) else np.nan,
+        "TSS_mean":   float(np.mean(tsses)) if len(tsses) else np.nan,
+        "TSS_sd":     float(np.std(tsses))  if len(tsses) else np.nan,
+        "Kappa_mean": float(np.mean(kappas)) if len(kappas) else np.nan,
+        "Kappa_sd":   float(np.std(kappas))  if len(kappas) else np.nan,
+        "Threshold_mean":   float(np.mean(thrs)) if len(thrs) else np.nan,
+        "Threshold_sd":     float(np.std(thrs))  if len(thrs) else np.nan,
+        "Sensitivity_mean": float(np.mean(sens)) if len(sens) else np.nan,
+        "Sensitivity_sd":   float(np.std(sens))  if len(sens) else np.nan,
+        "Specificity_mean": float(np.mean(spec)) if len(spec) else np.nan,
+        "Specificity_sd":   float(np.std(spec))  if len(spec) else np.nan,
+    }])
+    # Diagnostics for UI
+    df_out["n_input_presences"] = int(len(df))
+    df_out["n_kept_presences"]  = int(len(presence_samples))
+    df_out["n_predictors_used"] = int(len(used))
+    return df_out
+
 # --- Load presence points ---
 df   = pd.read_csv(csv_path)
 lats = df['latitude'].values
@@ -56,11 +107,6 @@ with rasterio.open(rasters[0]) as ref:
         'transform': ref_transform
     }
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
-
-# --- Helper: whether a raster is categorical-like (choose nearest resampling) ---
-def _is_categorical(name: str) -> bool:
-    n = name.lower()
-    return ("landcover" in n) or n.endswith("_onehot") or ("class" in n)
 
 # --- Stack predictors (align every layer to reference grid) ---
 layers, names = [], []
@@ -143,7 +189,6 @@ if len(np.unique(yc)) < 2:
     raise RuntimeError("Only one class present in training data (either no presences or no backgrounds after filtering).")
 
 # --- Drop constant predictors based on presence+background combined (Xc) ---
-EPS = 1e-8
 col_std = np.nanstd(Xc, axis=0)
 keep_mask = col_std > EPS
 dropped = [n for n, k in zip(names, keep_mask) if not k]
@@ -157,7 +202,6 @@ if dropped:
 Xc_model = Xc[:, keep_mask]
 names_model = used
 used_idx = np.flatnonzero(keep_mask)
-drop_idx = np.flatnonzero(~keep_mask)
 
 # --- Export extracted samples: RAW values ---
 pres_lats = kept_coords[:, 0] if kept_coords.size else np.array([], dtype=np.float32)
@@ -183,44 +227,8 @@ absences_csv = "outputs/absence_points_coordinates.csv"
 absence_df_raw[['latitude', 'longitude']].to_csv(absences_csv, index=False)
 print(f"🗺️ Absence coordinates saved to {absences_csv}")
 
-# ---------- Helpers: metric computation ----------
-def _compute_metrics_from_probs(y_true, p, thr):
-    yhat = (p >= thr).astype(int)
-    tn, fp, fn, tp = confusion_matrix(y_true, yhat, labels=[0, 1]).ravel()
-    sens = tp/(tp+fn) if (tp+fn) else 0.0
-    spec = tn/(tn+fp) if (tn+fp) else 0.0
-    tss  = sens + spec - 1
-    kapp = cohen_kappa_score(y_true, yhat)
-    auc  = roc_auc_score(y_true, p)
-    return auc, tss, kapp, sens, spec
-
-def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, spec):
-    df_out = pd.DataFrame([{
-        "n_folds": int(n_folds),
-        "cv_method": method,
-        "cv_note": note or "",
-        "AUC_mean":   float(np.mean(aucs)) if len(aucs) else np.nan,
-        "AUC_sd":     float(np.std(aucs))  if len(aucs) else np.nan,
-        "TSS_mean":   float(np.mean(tsses)) if len(tsses) else np.nan,
-        "TSS_sd":     float(np.std(tsses))  if len(tsses) else np.nan,
-        "Kappa_mean": float(np.mean(kappas)) if len(kappas) else np.nan,
-        "Kappa_sd":   float(np.std(kappas))  if len(kappas) else np.nan,
-        "Threshold_mean":   float(np.mean(thrs)) if len(thrs) else np.nan,
-        "Threshold_sd":     float(np.std(thrs))  if len(thrs) else np.nan,
-        "Sensitivity_mean": float(np.mean(sens)) if len(sens) else np.nan,
-        "Sensitivity_sd":   float(np.std(sens))  if len(sens) else np.nan,
-        "Specificity_mean": float(np.mean(spec)) if len(spec) else np.nan,
-        "Specificity_sd":   float(np.std(spec))  if len(spec) else np.nan,
-    }])
-    # Diagnostics for UI
-    df_out["n_input_presences"] = int(len(df))
-    df_out["n_kept_presences"]  = int(len(presence_samples))
-    df_out["n_predictors_used"] = int(len(used))
-    return df_out
-
-# ---------- Spatial cross-validation (blocked; threshold picked on TRAIN) ----------
+# ---------- Cross-validation ----------
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
-n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
 cv_aucs, cv_tsses, cv_kappas = [], [], []
 cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
 
@@ -242,7 +250,6 @@ def _run_repeated_kfold_fallback():
         print(f"📊 Wrote CV fallback (NaNs) to {perf_cv_csv}")
         return
 
-    # choose splits ~ min(5, Np//5) but at least 3
     n_splits  = max(3, min(5, max(2, Np // 5)))
     n_repeats = 5 if Np >= 10 else 3
 
@@ -275,12 +282,18 @@ def _run_repeated_kfold_fallback():
         X_tr, y_tr = X_tr[mtr], y_tr[mtr]
         X_te, y_te = X_te[mte], y_te[mte]
 
-        # Drop to kept columns; scale per fold (ALL variables, incl. dummies)
+        # Ensure both classes exist in TEST and TRAIN
+        if np.unique(y_te).size < 2:
+            print("[Kfold] Skipping fold: test set collapsed to a single class after filtering.")
+            continue
+        if np.unique(y_tr).size < 2:
+            print("[Kfold] Skipping fold: train set collapsed to a single class after filtering.")
+            continue
+
+        # Drop to kept columns; scale per fold (ε-guarded z-score)
         X_tr_model = X_tr[:, keep_mask]
         X_te_model = X_te[:, keep_mask]
-        scaler_cv = StandardScaler().fit(X_tr_model)
-        X_tr_s = scaler_cv.transform(X_tr_model)
-        X_te_s = scaler_cv.transform(X_te_model)
+        X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr_model, X_te_model)
 
         # Fit, pick threshold on TRAIN (Youden), score on TEST
         clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
@@ -308,12 +321,13 @@ did_spatial = False
 if len(coords) >= 2:
     try:
         # n_init=10 for sklearn<=1.3 compatibility
-        kmeans = KMeans(n_clusters=min(5, len(coords)), random_state=42, n_init=10).fit(coords)
+        n_blocks = min(5, len(coords))
+        kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init=10).fit(coords)
         blocks = kmeans.labels_  # presences' block labels
         # Assign every valid pixel in the pool to a block
         pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
 
-        gkf = GroupKFold(n_splits=len(np.unique(blocks)))
+        gkf = GroupKFold(n_splits=n_blocks)
         for train_idx, test_idx in gkf.split(presence_samples,
                                              np.ones(len(presence_samples), dtype=int),
                                              groups=blocks):
@@ -355,12 +369,18 @@ if len(coords) >= 2:
             X_tr, y_tr = X_tr[mtr], y_tr[mtr]
             X_te, y_te = X_te[mte], y_te[mte]
 
-            # Drop to kept columns; scale per fold (ALL variables, incl. dummies)
+            # Ensure both classes exist in TEST and TRAIN
+            if np.unique(y_te).size < 2:
+                print("[CV] Skipping fold: test set collapsed to a single class after filtering.")
+                continue
+            if np.unique(y_tr).size < 2:
+                print("[CV] Skipping fold: train set collapsed to a single class after filtering.")
+                continue
+
+            # Drop to kept columns; scale per fold (ε-guarded z-score)
             X_tr_model = X_tr[:, keep_mask]
             X_te_model = X_te[:, keep_mask]
-            scaler_cv = StandardScaler().fit(X_tr_model)
-            X_tr_s = scaler_cv.transform(X_tr_model)
-            X_te_s = scaler_cv.transform(X_te_model)
+            X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr_model, X_te_model)
 
             # fit
             clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
@@ -396,7 +416,7 @@ if len(coords) >= 2:
 
         did_spatial = True
         note = ""
-        cv_summary = _cv_summary_frame(len(np.unique(blocks)), "spatial_blocks", note,
+        cv_summary = _cv_summary_frame(n_blocks, "spatial_blocks", note,
                                        cv_aucs, cv_tsses, cv_kappas,
                                        cv_thresholds, cv_sensitivities, cv_specificities)
         cv_summary.to_csv(perf_cv_csv, index=False)
