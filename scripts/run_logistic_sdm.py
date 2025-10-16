@@ -2,6 +2,7 @@
 # Spatial-blocks CV with K-fold fallback. Standardizes ALL predictors
 # (including binary/categorical). Constant features are dropped globally;
 # per-fold scaling uses an ε-guard to avoid NaNs when a column is constant in a fold.
+# Spatial CV now assigns blocks lazily (batch candidates only), avoiding huge kmeans.predict over the full pool.
 
 import os
 import numpy as np
@@ -80,6 +81,48 @@ def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, sp
     df_out["n_kept_presences"]  = int(len(presence_samples))
     df_out["n_predictors_used"] = int(len(used))
     return df_out
+
+def _lin_to_coords(linear_idx: np.ndarray, width: int, transform):
+    """Vectorized linear index -> (lon, lat) using row/col and raster transform."""
+    rows = np.divide(linear_idx, width, dtype=np.int64)
+    cols = np.mod(linear_idx,  width)
+    xs, ys = rasterio.transform.xy(transform, rows, cols, offset='center')
+    # xy returns sequences; convert to numpy
+    return np.asarray(xs), np.asarray(ys)  # lon, lat
+
+def _sample_by_blocks(kmeans: KMeans, blocks_wanted, n_needed, rng, pool_len, valid_idx, width, transform, max_batch=100_000, max_tries=30):
+    """
+    Lazily sample candidate background pixels from the pool (by index),
+    predict their block labels, and keep those that match blocks_wanted.
+    Avoids predicting labels for the entire pool.
+    """
+    if n_needed <= 0 or pool_len == 0:
+        return np.empty((0,), dtype=np.int64)
+    collected = []
+    tries = 0
+    size_per_try = min(max_batch, pool_len)
+    while len(collected) < n_needed and tries < max_tries:
+        batch_idx = rng.choice(pool_len, size=size_per_try, replace=False)
+        lin = valid_idx[batch_idx]
+        xs, ys = _lin_to_coords(lin, width, transform)  # lon, lat
+        coords = np.column_stack([ys, xs])  # kmeans was fit on [lat, lon]
+        pred = kmeans.predict(coords)
+        mask = np.isin(pred, blocks_wanted)
+        if mask.any():
+            selected = batch_idx[mask]
+            collected.extend(selected.tolist())
+        tries += 1
+        # reduce batch after a few tries to avoid hammering memory
+        if tries == 10:
+            size_per_try = max(10_000, size_per_try // 2)
+        if tries == 20:
+            size_per_try = max(5_000, size_per_try // 2)
+    if len(collected) < n_needed:
+        # fall back to global random if not enough found (keeps CV moving)
+        need = n_needed - len(collected)
+        fallback = rng.choice(pool_len, size=need, replace=False)
+        collected.extend(fallback.tolist())
+    return np.asarray(collected[:n_needed], dtype=np.int64)
 
 # --- Load presence points ---
 print("[STEP] load-presences")
@@ -168,9 +211,10 @@ flat       = stack.reshape(-1, stack.shape[-1]).astype(np.float32)
 valid_mask = ~np.any(np.isnan(flat), axis=1)
 valid_idx  = np.flatnonzero(valid_mask)
 pool       = flat[valid_mask]
-print(f"✅ Valid pixel pool: {len(pool)}")
+pool_len   = len(pool)
+print(f"✅ Valid pixel pool: {pool_len}")
 
-if len(pool) == 0:
+if pool_len == 0:
     raise RuntimeError(
         "No valid pixels where all predictors overlap (the stack is fully NaN). "
         "This usually means one layer has no data over your area of interest. "
@@ -180,16 +224,14 @@ if len(pool) == 0:
 # Choose background for the *raw sample table* (map plotting, not CV)
 print("[STEP] sample-background-for-tables")
 np.random.seed(42)
-n_bg       = min(5 * max(1, len(presence_samples)), len(pool))
-bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)  # size may be 0; that's okay
+n_bg       = min(5 * max(1, len(presence_samples)), pool_len)
+bg_indices = np.random.choice(pool_len, size=n_bg, replace=False)  # size may be 0; that's okay
 background_samples = pool[bg_indices].astype(np.float32)
 print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
 # Convert chosen background indices back to row/col → lon/lat (for export)
 bg_linear  = valid_idx[bg_indices]
-bg_rows    = bg_linear // width
-bg_cols    = bg_linear %  width
-bg_xs, bg_ys = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset='center')
+bg_xs, bg_ys = _lin_to_coords(bg_linear, width, ref_transform)  # lon, lat
 bg_lons = np.array(bg_xs); bg_lats = np.array(bg_ys)
 
 # --- Prepare data (combined presence + background) ---
@@ -257,12 +299,6 @@ print("[STEP] cross-validation")
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 cv_aucs, cv_tsses, cv_kappas = [], [], []
 cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
-
-# Build lon/lat for ALL valid pixels in the pool (for assigning blocks)
-pool_rows = np.divide(valid_idx, width, dtype=np.int64)
-pool_cols = np.mod(valid_idx,  width)
-pool_xs, pool_ys = rasterio.transform.xy(ref_transform, pool_rows, pool_cols, offset='center')
-pool_lons_all = np.array(pool_xs); pool_lats_all = np.array(pool_ys)
 
 def _run_repeated_kfold_fallback():
     """Repeated Stratified K-fold fallback (non-spatial)."""
@@ -351,35 +387,27 @@ if len(coords) >= 2:
         n_blocks = min(5, len(coords))
         kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init=10).fit(coords)
         blocks = kmeans.labels_  # presences' block labels
-        # Assign every valid pixel in the pool to a block
-        pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
 
         gkf = GroupKFold(n_splits=n_blocks)
-        for train_idx, test_idx in gkf.split(presence_samples,
-                                             np.ones(len(presence_samples), dtype=int),
-                                             groups=blocks):
+        for fold_id, (train_idx, test_idx) in enumerate(
+            gkf.split(presence_samples, np.ones(len(presence_samples), dtype=int), groups=blocks),
+            start=1
+        ):
+            print(f"[STEP] spatial-cv-fold {fold_id}/{n_blocks}")
             # split presence
             Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
             test_blocks = set(blocks[test_idx])
             train_blocks = [b for b in np.unique(blocks) if b not in test_blocks]
 
-            # masks for pool by block
-            mask_tr_pool = np.isin(pool_blocks, train_blocks)
-            mask_te_pool = np.isin(pool_blocks, list(test_blocks))
+            rng = np.random.default_rng(10_000 + fold_id)
 
-            # background for train/test (draw only from their respective blocks)
-            n_bt  = min(5 * len(train_idx), int(mask_tr_pool.sum()))
-            n_bt2 = min(5 * len(test_idx),  int(mask_te_pool.sum()))
+            # Decide how many backgrounds
+            n_bt  = min(5 * len(train_idx), pool_len)
+            n_bt2 = min(5 * len(test_idx),  pool_len)
 
-            # fallbacks if a block is tiny
-            if n_bt < 1 or n_bt2 < 1:
-                bt_idx  = np.random.choice(len(pool), size=max(1, 5*len(train_idx)), replace=False)
-                bt_idx2 = np.random.choice(len(pool), size=max(1, 5*len(test_idx)),  replace=False)
-            else:
-                tr_inds = np.flatnonzero(mask_tr_pool)
-                te_inds = np.flatnonzero(mask_te_pool)
-                bt_idx  = np.random.choice(tr_inds, size=n_bt,  replace=False)
-                bt_idx2 = np.random.choice(te_inds, size=n_bt2, replace=False)
+            # Lazily sample backgrounds by blocks (batch candidates only)
+            bt_idx  = _sample_by_blocks(kmeans, train_blocks, n_bt,  rng, pool_len, valid_idx, width, ref_transform)
+            bt_idx2 = _sample_by_blocks(kmeans, list(test_blocks), n_bt2, rng, pool_len, valid_idx, width, ref_transform)
 
             Xb_tr = pool[bt_idx]
             Xb_te = pool[bt_idx2]
@@ -443,7 +471,8 @@ if len(coords) >= 2:
 
         did_spatial = True
         note = ""
-        cv_summary = _cv_summary_frame(n_blocks, "spatial_blocks", note,
+        n_cv_folds = len(cv_aucs)
+        cv_summary = _cv_summary_frame(n_cv_folds, "spatial_blocks", note,
                                        cv_aucs, cv_tsses, cv_kappas,
                                        cv_thresholds, cv_sensitivities, cv_specificities)
         cv_summary.to_csv(perf_cv_csv, index=False)
