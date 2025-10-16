@@ -2,10 +2,12 @@
 # Spatial-blocks CV with K-fold fallback. Standardizes ALL predictors
 # (including binary/categorical). Constant features are dropped globally;
 # per-fold scaling uses an ε-guard to avoid NaNs when a column is constant in a fold.
-# Spatial CV assigns blocks lazily (batch candidates only), avoiding huge kmeans.predict over the full pool.
+# Spatial CV assigns blocks lazily (batch candidates only); if that fails per-fold,
+# we fall back to global random backgrounds for that fold (fail-soft).
 
 import os
 import numpy as np
+import pd as _pd_alias  # placeholder to catch accidental 'pd' typo
 import pandas as pd
 import rasterio
 import joblib
@@ -39,10 +41,7 @@ def _is_categorical(name: str) -> bool:
     return ("landcover" in n) or n.endswith("_onehot") or ("class" in n)
 
 def _zscore_train_test(X_tr, X_te):
-    """
-    Fit z-score on TRAIN; clamp tiny std to 1.0; apply to TRAIN/TEST.
-    Returns X_tr_s, X_te_s, mu, sd
-    """
+    """Fit z-score on TRAIN; clamp tiny std to 1.0; apply to TRAIN/TEST."""
     mu = np.nanmean(X_tr, axis=0)
     sd = np.nanstd(X_tr, axis=0)
     sd = np.where(sd < EPS, 1.0, sd)  # avoid divide-by-zero
@@ -91,40 +90,47 @@ def _lin_to_coords(linear_idx, width, transform):
     rows = linear_idx // width
     cols = linear_idx %  width
     xs, ys = rasterio.transform.xy(transform, rows, cols, offset='center')
-    # ensure numpy arrays
     return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
 
-def _sample_by_blocks(kmeans: KMeans, blocks_wanted, n_needed, rng, pool_len, valid_idx, width, transform, max_batch=100_000, max_tries=30):
+def _sample_by_blocks_or_global(kmeans: KMeans, blocks_wanted, n_needed, rng,
+                                pool_len, valid_idx, width, transform,
+                                max_batch=100_000, max_tries=30):
     """
-    Lazily sample candidate background pixels from the pool (by index),
-    predict their block labels, and keep those that match blocks_wanted.
-    Avoids predicting labels for the entire pool.
+    Try lazy block-aware background sampling. If anything goes wrong,
+    fall back to global random sampling for this fold.
     """
-    if n_needed <= 0 or pool_len == 0:
-        return np.empty((0,), dtype=np.int64)
-    collected = []
-    tries = 0
-    size_per_try = min(max_batch, pool_len)
-    while len(collected) < n_needed and tries < max_tries:
-        batch_idx = rng.choice(pool_len, size=size_per_try, replace=False)
-        lin = valid_idx[batch_idx]
-        xs, ys = _lin_to_coords(lin, width, transform)  # lon, lat
-        coords = np.column_stack([ys, xs])  # kmeans was fit on [lat, lon]
-        pred = kmeans.predict(coords)
-        mask = np.isin(pred, blocks_wanted)
-        if mask.any():
-            selected = batch_idx[mask]
-            collected.extend(selected.tolist())
-        tries += 1
-        if tries == 10:
-            size_per_try = max(10_000, size_per_try // 2)
-        if tries == 20:
-            size_per_try = max(5_000, size_per_try // 2)
-    if len(collected) < n_needed:
-        need = n_needed - len(collected)
-        fallback = rng.choice(pool_len, size=need, replace=False)
-        collected.extend(fallback.tolist())
-    return np.asarray(collected[:n_needed], dtype=np.int64)
+    try:
+        if n_needed <= 0 or pool_len == 0:
+            return np.empty((0,), dtype=np.int64)
+        collected = []
+        tries = 0
+        size_per_try = min(max_batch, pool_len)
+        while len(collected) < n_needed and tries < max_tries:
+            batch_idx = rng.choice(pool_len, size=size_per_try, replace=False)
+            lin = valid_idx[batch_idx]
+            xs, ys = _lin_to_coords(lin, width, transform)  # lon, lat
+            if xs.size == 0:
+                tries += 1
+                continue
+            coords = np.column_stack([ys.astype(np.float64), xs.astype(np.float64)])  # [lat, lon]
+            pred = kmeans.predict(coords)
+            mask = np.isin(pred, blocks_wanted)
+            if mask.any():
+                selected = batch_idx[mask]
+                collected.extend(selected.tolist())
+            tries += 1
+            if tries == 10:
+                size_per_try = max(10_000, size_per_try // 2)
+            if tries == 20:
+                size_per_try = max(5_000, size_per_try // 2)
+        if len(collected) < n_needed:
+            need = n_needed - len(collected)
+            fallback = rng.choice(pool_len, size=need, replace=False)
+            collected.extend(fallback.tolist())
+        return np.asarray(collected[:n_needed], dtype=np.int64)
+    except Exception as e:
+        print(f"⚠️  Block-aware sampling failed for this fold: {e} — using global random backgrounds.")
+        return rng.choice(pool_len, size=min(n_needed, pool_len), replace=False)
 
 # --- Load presence points ---
 print("[STEP] load-presences")
@@ -198,7 +204,7 @@ for lat, lon in zip(lats, lons):
             kept_coords.append((lat, lon))
 
 presence_samples = np.array(presence_samples, dtype=np.float32)
-kept_coords = np.array(kept_coords, dtype=np.float32) if len(kept_coords) else np.empty((0, 2), dtype=np.float32)
+kept_coords = np.array(kept_coords, dtype=np.float64) if len(kept_coords) else np.empty((0, 2), dtype=np.float64)
 print(f"📍 Presence samples: {presence_samples.shape}")
 
 if presence_samples.shape[0] == 0:
@@ -231,7 +237,7 @@ bg_indices = np.random.choice(pool_len, size=n_bg, replace=False)  # size may be
 background_samples = pool[bg_indices].astype(np.float32)
 print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
-# Convert chosen background indices back to row/col → lon/lat (for export)
+# Convert chosen background indices back to lon/lat (for export)
 bg_linear = valid_idx[bg_indices]
 if bg_linear.size == 0:
     bg_lons = np.empty((0,), dtype=np.float64)
@@ -248,7 +254,7 @@ y = np.concatenate([
     np.zeros(len(background_samples), dtype=int)
 ])
 
-# Guard rows: require finite values (also excludes NaNs and infs)
+# Guard rows: require finite values
 finite_mask = np.all(np.isfinite(X), axis=1)
 Xc, yc = X[finite_mask], y[finite_mask]
 print(f"🔀 Training samples: {X.shape} → after finite filter: {Xc.shape}; "
@@ -411,9 +417,9 @@ if len(coords) >= 2:
             n_bt  = min(5 * len(train_idx), pool_len)
             n_bt2 = min(5 * len(test_idx),  pool_len)
 
-            # Lazily sample backgrounds by blocks (batch candidates only)
-            bt_idx  = _sample_by_blocks(kmeans, train_blocks, n_bt,  rng, pool_len, valid_idx, width, ref_transform)
-            bt_idx2 = _sample_by_blocks(kmeans, list(test_blocks), n_bt2, rng, pool_len, valid_idx, width, ref_transform)
+            # Lazily sample backgrounds; if blocked sampling fails, fall back to global rand
+            bt_idx  = _sample_by_blocks_or_global(kmeans, train_blocks, n_bt,  rng, pool_len, valid_idx, width, ref_transform)
+            bt_idx2 = _sample_by_blocks_or_global(kmeans, list(test_blocks), n_bt2, rng, pool_len, valid_idx, width, ref_transform)
 
             Xb_tr = pool[bt_idx]
             Xb_te = pool[bt_idx2]
@@ -505,7 +511,6 @@ mean_full = np.zeros(len(names), dtype=float)
 std_full  = np.zeros(len(names), dtype=float)
 mean_full[used_idx] = scaler.mean_.astype(float)
 std_full[used_idx]  = scaler.scale_.astype(float)
-# Dropped columns remain 0.0 mean/std (their z-scores are 0 downstream)
 stats_csv = "outputs/standardization_stats.csv"
 stats_df = pd.DataFrame({
     "predictor": names,
@@ -522,7 +527,7 @@ def _std_full_from_model(arr_full: np.ndarray) -> np.ndarray:
     """Standardize kept columns using fitted scaler, expand back to full width (dropped → 0)."""
     if arr_full.size == 0:
         return arr_full.reshape((0, len(names)))
-    arr_kept = arr_full[:, keep_mask]  # rows known finite from earlier extraction
+    arr_kept = arr_full[:, keep_mask]
     arr_kept_s = scaler.transform(arr_kept)
     out = np.zeros((arr_full.shape[0], len(names)), dtype=np.float32)
     out[:, used_idx] = arr_kept_s.astype(np.float32)
