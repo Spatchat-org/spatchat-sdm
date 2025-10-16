@@ -236,14 +236,24 @@ bg_indices = np.random.choice(pool_len, size=n_bg, replace=False)  # size may be
 background_samples = pool[bg_indices].astype(np.float32)
 print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
-# Convert chosen background indices back to lon/lat (for export)
+# Convert chosen background indices back to lon/lat (for export) — FAIL-SOFT
 bg_linear = valid_idx[bg_indices]
-if bg_linear.size == 0:
+try:
+    if bg_linear.size == 0:
+        bg_lons = np.empty((0,), dtype=np.float64)
+        bg_lats = np.empty((0,), dtype=np.float64)
+    else:
+        # robust integer math -> coords
+        bg_xs, bg_ys = _lin_to_coords(bg_linear, width, ref_transform)  # lon, lat
+        bg_lons = np.asarray(bg_xs, dtype=np.float64).ravel()
+        bg_lats = np.asarray(bg_ys, dtype=np.float64).ravel()
+        if bg_lons.size != bg_lats.size:
+            raise ValueError(f"bg coord size mismatch: {bg_lons.size} vs {bg_lats.size}")
+except Exception as e:
+    print(f"⚠️  Could not recover background lon/lat ({e}). "
+          f"Continuing without writing absence point coordinates.")
     bg_lons = np.empty((0,), dtype=np.float64)
     bg_lats = np.empty((0,), dtype=np.float64)
-else:
-    bg_xs, bg_ys = _lin_to_coords(bg_linear, width, ref_transform)  # lon, lat
-    bg_lons = np.array(bg_xs); bg_lats = np.array(bg_ys)
 
 # --- Prepare data (combined presence + background) ---
 print("[STEP] build-train-table")
@@ -300,10 +310,18 @@ raw_csv = "outputs/sdm_point_samples_raw.csv"
 samples_df_raw.to_csv(raw_csv, index=False)
 print(f"📄 Point samples (RAW) saved to {raw_csv}")
 
-# Small helper CSV solely for mapping background/absence points
+# Small helper CSV solely for mapping background/absence points — FAIL-SOFT
 absences_csv = "outputs/absence_points_coordinates.csv"
-absence_df_raw[['latitude', 'longitude']].to_csv(absences_csv, index=False)
-print(f"🗺️ Absence coordinates saved to {absences_csv}")
+try:
+    if bg_lats.size and bg_lons.size and bg_lats.size == bg_lons.size:
+        pd.DataFrame({"latitude": bg_lats, "longitude": bg_lons}).to_csv(absences_csv, index=False)
+        print(f"🗺️ Absence coordinates saved to {absences_csv}")
+    else:
+        # write an empty, well-formed file so the UI never crashes on read
+        pd.DataFrame({"latitude": [], "longitude": []}).to_csv(absences_csv, index=False)
+        print(f"🗺️ Absence coordinates unavailable; wrote empty file at {absences_csv}")
+except Exception as e:
+    print(f"⚠️  Failed to write absence coordinate CSV ({e}); continuing.")
 
 # ---------- Cross-validation ----------
 print("[STEP] cross-validation")
