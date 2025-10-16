@@ -82,12 +82,14 @@ def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, sp
     return df_out
 
 # --- Load presence points ---
+print("[STEP] load-presences")
 df   = pd.read_csv(csv_path)
 lats = df['latitude'].values
 lons = df['longitude'].values
 print(f"📍 Loaded {len(df)} presence points.")
 
 # --- Reference grid ---
+print("[STEP] load-reference-grid")
 rasters = sorted([os.path.join(raster_dir, f)
                   for f in os.listdir(raster_dir)
                   if f.endswith('.tif')])
@@ -109,16 +111,21 @@ with rasterio.open(rasters[0]) as ref:
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
 
 # --- Stack predictors (align every layer to reference grid) ---
+print("[STEP] stack-predictors")
 layers, names = [], []
 for path in rasters:
     name = os.path.splitext(os.path.basename(path))[0]
     with rasterio.open(path) as src:
+        # Handle missing CRS by assuming reference CRS (common with some GeoTIFF exports)
+        src_crs = src.crs if src.crs is not None else ref_crs
+        if src.crs is None:
+            print(f"⚠️  {name}.tif has no CRS; assuming {ref_crs}")
         dst = np.full((height, width), np.nan, dtype=np.float32)
         resamp = WarpResampling.nearest if _is_categorical(name) else WarpResampling.bilinear
         reproject(
             source=rasterio.band(src, 1),
             destination=dst,
-            src_transform=src.transform, src_crs=src.crs,
+            src_transform=src.transform, src_crs=src_crs,
             dst_transform=ref_transform, dst_crs=ref_crs,
             resampling=resamp, dst_nodata=np.nan
         )
@@ -131,6 +138,7 @@ stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract presence samples (only where predictors are all valid) ---
+print("[STEP] extract-presence-samples")
 presence_samples = []
 kept_coords = []  # (lat, lon) on valid pixels
 for lat, lon in zip(lats, lons):
@@ -148,18 +156,32 @@ presence_samples = np.array(presence_samples, dtype=np.float32)
 kept_coords = np.array(kept_coords, dtype=np.float32) if len(kept_coords) else np.empty((0, 2), dtype=np.float32)
 print(f"📍 Presence samples: {presence_samples.shape}")
 
+if presence_samples.shape[0] == 0:
+    raise RuntimeError(
+        "No presence points fell on pixels where all predictors are valid. "
+        "Check that your points overlap the fetched rasters and that predictor coverage isn’t all-NaN in that area."
+    )
+
 # --- Background sampling pool (all valid pixels) ---
+print("[STEP] build-valid-pool")
 flat       = stack.reshape(-1, stack.shape[-1]).astype(np.float32)
 valid_mask = ~np.any(np.isnan(flat), axis=1)
 valid_idx  = np.flatnonzero(valid_mask)
 pool       = flat[valid_mask]
 print(f"✅ Valid pixel pool: {len(pool)}")
 
+if len(pool) == 0:
+    raise RuntimeError(
+        "No valid pixels where all predictors overlap (the stack is fully NaN). "
+        "This usually means one layer has no data over your area of interest. "
+        "Try removing the offending layer(s) or widening the extent."
+    )
+
 # Choose background for the *raw sample table* (map plotting, not CV)
+print("[STEP] sample-background-for-tables")
 np.random.seed(42)
-n_bg       = 5 * max(1, len(presence_samples))
-n_bg       = min(n_bg, len(pool))  # cap at available pool size
-bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)
+n_bg       = min(5 * max(1, len(presence_samples)), len(pool))
+bg_indices = np.random.choice(len(pool), size=n_bg, replace=False)  # size may be 0; that's okay
 background_samples = pool[bg_indices].astype(np.float32)
 print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
@@ -171,13 +193,14 @@ bg_xs, bg_ys = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset='ce
 bg_lons = np.array(bg_xs); bg_lats = np.array(bg_ys)
 
 # --- Prepare data (combined presence + background) ---
+print("[STEP] build-train-table")
 X = np.vstack([presence_samples, background_samples])
 y = np.concatenate([
     np.ones(len(presence_samples), dtype=int),
     np.zeros(len(background_samples), dtype=int)
 ])
 
-# Guard rows: require finite values (this also excludes NaNs and infs)
+# Guard rows: require finite values (also excludes NaNs and infs)
 finite_mask = np.all(np.isfinite(X), axis=1)
 Xc, yc = X[finite_mask], y[finite_mask]
 print(f"🔀 Training samples: {X.shape} → after finite filter: {Xc.shape}; "
@@ -189,6 +212,7 @@ if len(np.unique(yc)) < 2:
     raise RuntimeError("Only one class present in training data (either no presences or no backgrounds after filtering).")
 
 # --- Drop constant predictors based on presence+background combined (Xc) ---
+print("[STEP] drop-constant-predictors")
 col_std = np.nanstd(Xc, axis=0)
 keep_mask = col_std > EPS
 dropped = [n for n, k in zip(names, keep_mask) if not k]
@@ -204,6 +228,7 @@ names_model = used
 used_idx = np.flatnonzero(keep_mask)
 
 # --- Export extracted samples: RAW values ---
+print("[STEP] export-sample-tables-raw")
 pres_lats = kept_coords[:, 0] if kept_coords.size else np.array([], dtype=np.float32)
 pres_lons = kept_coords[:, 1] if kept_coords.size else np.array([], dtype=np.float32)
 
@@ -228,13 +253,14 @@ absence_df_raw[['latitude', 'longitude']].to_csv(absences_csv, index=False)
 print(f"🗺️ Absence coordinates saved to {absences_csv}")
 
 # ---------- Cross-validation ----------
+print("[STEP] cross-validation")
 coords = kept_coords  # (n_presences, 2) as [lat, lon]
 cv_aucs, cv_tsses, cv_kappas = [], [], []
 cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
 
 # Build lon/lat for ALL valid pixels in the pool (for assigning blocks)
-pool_rows = valid_idx // width
-pool_cols = valid_idx %  width
+pool_rows = np.divide(valid_idx, width, dtype=np.int64)
+pool_cols = np.mod(valid_idx,  width)
 pool_xs, pool_ys = rasterio.transform.xy(ref_transform, pool_rows, pool_cols, offset='center')
 pool_lons_all = np.array(pool_xs); pool_lats_all = np.array(pool_ys)
 
@@ -320,6 +346,7 @@ def _run_repeated_kfold_fallback():
 did_spatial = False
 if len(coords) >= 2:
     try:
+        print("[STEP] spatial-cv")
         # n_init=10 for sklearn<=1.3 compatibility
         n_blocks = min(5, len(coords))
         kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init=10).fit(coords)
@@ -430,6 +457,7 @@ else:
     _run_repeated_kfold_fallback()
 
 # --- Final scaler & model on all filtered samples (scale everything; only kept cols) ---
+print("[STEP] fit-final-model")
 scaler = StandardScaler().fit(Xc_model)
 Xc_s = scaler.transform(Xc_model)
 model = LogisticRegression(max_iter=1000, class_weight="balanced").fit(Xc_s, yc)
@@ -437,6 +465,7 @@ joblib.dump(scaler, scaler_pkl)
 print(f"💾 Saved scaler to {scaler_pkl}")
 
 # --- Export standardization stats (mark dropped constants) ---
+print("[STEP] export-standardization-stats")
 mean_full = np.zeros(len(names), dtype=float)
 std_full  = np.zeros(len(names), dtype=float)
 mean_full[used_idx] = scaler.mean_.astype(float)
@@ -453,6 +482,7 @@ stats_df.to_csv(stats_csv, index=False)
 print(f"📄 Standardization stats saved to {stats_csv}")
 
 # --- Export extracted samples: STANDARDIZED values (reconstruct full columns) ---
+print("[STEP] export-sample-tables-standardized")
 def _std_full_from_model(arr_full: np.ndarray) -> np.ndarray:
     """Standardize kept columns using fitted scaler, expand back to full width (dropped → 0)."""
     if arr_full.size == 0:
@@ -481,6 +511,7 @@ pd.concat([presence_df_std, absence_df_std], ignore_index=True).to_csv(std_csv, 
 print(f"📄 Point samples (STANDARDIZED) saved to {std_csv}")
 
 # --- Fitted (in-sample) metrics on standardized training data ---
+print("[STEP] fitted-metrics")
 y_prob = model.predict_proba(Xc_s)[:, 1]
 auc    = roc_auc_score(yc, y_prob)
 fpr, tpr, thr = roc_curve(yc, y_prob)
@@ -508,6 +539,7 @@ fitted_df.to_csv(compat_perf, index=False)
 print(f"📊 Fitted (compat) metrics saved to {compat_perf}")
 
 # --- Write out coefficients (map back to full feature list; dropped → 0) ---
+print("[STEP] export-coefficients")
 intercept = model.intercept_[0]
 coef_used = model.coef_.flatten()
 full_coef = np.zeros(len(names), dtype=float)
@@ -519,6 +551,7 @@ coef_df.to_csv(coef_csv, index=False)
 print(f"📊 Coefficients saved to {coef_csv}")
 
 # --- Save final suitability map (using scaled raster pixels; only kept cols) ---
+print("[STEP] write-suitability-map")
 pred_flat = np.full(flat.shape[0], np.nan, dtype=np.float32)
 pool_model = pool[:, keep_mask]
 pool_s = scaler.transform(pool_model)
@@ -529,6 +562,7 @@ with rasterio.open(output_map, "w", **profile) as dst:
 print(f"🎯 Final suitability map saved to {output_map}")
 
 # --- Export standardized rasters (z-scored; dropped → 0) ---
+print("[STEP] write-standardized-rasters")
 os.makedirs(std_ras_dir, exist_ok=True)
 print(f"💾 Writing standardized rasters to {std_ras_dir}")
 
