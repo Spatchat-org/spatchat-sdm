@@ -126,9 +126,19 @@ for path in rasters:
             dst_transform=ref_transform, dst_crs=ref_crs,
             resampling=resamp, dst_nodata=np.nan
         )
-    nan_pct = float(np.isnan(dst).mean() * 100.0)
-    print(f"🧪 {name}.tif → NaN%: {nan_pct:.2f}")
-    layers.append(dst)
+
+    if _is_categorical(name):
+        # NaN outside class ⇒ treat as 0 (absence), and hard-binarize
+        # This prevents presences from being dropped due to NaNs in the land-cover band.
+        np.nan_to_num(dst, copy=False, nan=0.0)
+        dst = (dst > 0.5).astype(np.float32)
+        ones = int((dst == 1.0).sum())
+        print(f"🧪 {name}.tif → categorical: ones={ones}, zeros={dst.size - ones}")
+    else:
+        nan_pct = float(np.isnan(dst).mean() * 100.0)
+        print(f"🧪 {name}.tif → NaN%: {nan_pct:.2f}")
+
+    layers.append(dst.astype(np.float32, copy=False))
     names.append(name)
 
 stack = np.stack(layers, axis=-1)
