@@ -306,8 +306,8 @@ presence_df_raw.insert(1, 'longitude', pres_lons[:len(presence_df_raw)])
 presence_df_raw.insert(2, 'label', 1)
 
 absence_df_raw = pd.DataFrame(background_samples, columns=names)
-absence_df_raw.insert(0, 'latitude',  np.array([], dtype=np.float64)[:len(absence_df_raw)])
-absence_df_raw.insert(1, 'longitude', np.array([], dtype=np.float64)[:len(absence_df_raw)])
+absence_df_raw.insert(0, 'latitude',  np.full(len(absence_df_raw), np.nan, dtype=np.float64))
+absence_df_raw.insert(1, 'longitude', np.full(len(absence_df_raw), np.nan, dtype=np.float64))
 absence_df_raw.insert(2, 'label', 0)
 
 samples_df_raw = pd.concat([presence_df_raw, absence_df_raw], ignore_index=True)
@@ -465,8 +465,8 @@ presence_df_std.insert(1, 'longitude', pres_lons[:len(presence_df_std)] if kept_
 presence_df_std.insert(2, 'label', 1)
 
 absence_df_std = pd.DataFrame(absence_std, columns=names)
-absence_df_std.insert(0, 'latitude',  [])
-absence_df_std.insert(1, 'longitude', [])
+absence_df_std.insert(0, 'latitude',  np.full(len(absence_df_std), np.nan, dtype=np.float64))
+absence_df_std.insert(1, 'longitude', np.full(len(absence_df_std), np.nan, dtype=np.float64))
 absence_df_std.insert(2, 'label', 0)
 
 pd.concat([presence_df_std, absence_df_std], ignore_index=True).to_csv("outputs/sdm_point_samples_standardized.csv", index=False)
