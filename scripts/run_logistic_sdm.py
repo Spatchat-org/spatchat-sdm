@@ -243,7 +243,6 @@ try:
         bg_lons = np.empty((0,), dtype=np.float64)
         bg_lats = np.empty((0,), dtype=np.float64)
     else:
-        # robust integer math -> coords
         bg_xs, bg_ys = _lin_to_coords(bg_linear, width, ref_transform)  # lon, lat
         bg_lons = np.asarray(bg_xs, dtype=np.float64).ravel()
         bg_lats = np.asarray(bg_ys, dtype=np.float64).ravel()
@@ -257,6 +256,11 @@ except Exception as e:
 
 # --- Prepare data (combined presence + background) ---
 print("[STEP] build-train-table")
+# Ensure both sample matrices are 2-D with identical feature width
+n_features = stack.shape[-1]
+presence_samples   = np.asarray(presence_samples,   dtype=np.float32).reshape(-1, n_features)
+background_samples = np.asarray(background_samples, dtype=np.float32).reshape(-1, n_features)
+
 X = np.vstack([presence_samples, background_samples])
 y = np.concatenate([
     np.ones(len(presence_samples), dtype=int),
@@ -317,7 +321,6 @@ try:
         pd.DataFrame({"latitude": bg_lats, "longitude": bg_lons}).to_csv(absences_csv, index=False)
         print(f"🗺️ Absence coordinates saved to {absences_csv}")
     else:
-        # write an empty, well-formed file so the UI never crashes on read
         pd.DataFrame({"latitude": [], "longitude": []}).to_csv(absences_csv, index=False)
         print(f"🗺️ Absence coordinates unavailable; wrote empty file at {absences_csv}")
 except Exception as e:
