@@ -667,6 +667,8 @@ def _compose_status_with_cv_and_coefs(status_prefix: str, long_names: bool = Fal
     """Read CV + coef files and return (assistant_txt, download_update)."""
     cv_fp = "outputs/performance_metrics_cv.csv"
     coef_fp = "outputs/coefficients.csv"
+    drop_csv = "outputs/dropped_predictors.csv"  # NEW
+
     if not os.path.exists(cv_fp) or not os.path.exists(coef_fp):
         return status_prefix, gr.update()
 
@@ -676,14 +678,35 @@ def _compose_status_with_cv_and_coefs(status_prefix: str, long_names: bool = Fal
 
     row = cv.iloc[0]
 
+    # Build the CV table & warnings
     perf_md, folds, warn_md = build_cv_section(row, long_names=long_names)
+
+    # Coefficients table
     coef = pd.read_csv(coef_fp).dropna(axis=1, how='all')
     coef_md = coef.to_markdown(index=False)
 
-    # Choose label based on method
+    # Label based on method
     cv_method = _getv(row, "cv_method")
     cv_method = str(cv_method) if not pd.isna(cv_method) else "spatial_blocks"
     cv_label = "spatial blocks" if cv_method in {"spatial_blocks", "kmeans_blocks"} else cv_method
+
+    # 🔎 NEW: include dropped predictors (if any)
+    dropped_md = ""
+    try:
+        if os.path.exists(drop_csv):
+            dropped_df = pd.read_csv(drop_csv)
+            if not dropped_df.empty:
+                bullets = []
+                for _, r in dropped_df.iterrows():
+                    pred = str(r.get("predictor", ""))
+                    reason = str(r.get("reason", ""))
+                    cval = r.get("constant_value", np.nan)
+                    extra = f" (constant={float(cval):.6g})" if pd.notna(cval) else ""
+                    bullets.append(f"- **{pred}** — {reason}{extra}")
+                dropped_md = "\n\n**Dropped Predictors (uninformative on training data):**\n\n" + "\n".join(bullets) + "\n"
+    except Exception:
+        # If anything goes wrong, just omit the section
+        dropped_md = ""
 
     warning_block = f"\n\n{warn_md}\n" if warn_md else ""
     assistant_txt = (
@@ -691,7 +714,9 @@ def _compose_status_with_cv_and_coefs(status_prefix: str, long_names: bool = Fal
         f"{warning_block}\n"
         f"**Cross-validated Performance ({cv_label}; n_folds={folds})**\n\n{perf_md}\n\n"
         f"**Predictor Coefficients:**\n\n{coef_md}"
+        f"{dropped_md}"
     )
+
     dl_update = gr.update(value="spatchat_results.zip" if os.path.exists("spatchat_results.zip") else None)
     return assistant_txt, dl_update
 
