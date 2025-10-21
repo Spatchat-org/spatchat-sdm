@@ -1,9 +1,13 @@
 # scripts/run_logistic_sdm.py
-# Robust SDM pipeline: spatial-blocks CV with K-fold fallback; standardizes ALL used predictors.
-# Removes fragile background lon/lat export (writes an empty CSV instead) to avoid run crashes.
-# Guarantees 2-D shapes before stacking to prevent vstack errors.
+# Robust SDM pipeline with categorical landcover handling and clear drop-reasons.
+# - Detects one-hot landcover rasters (e.g., "5_mixed_forest.tif")
+# - NaN->0 and binarize for categorical bands (0/1)
+# - Drops any constant predictor on combined Xc (all 0s, all 1s, or any constant value)
+# - Writes drop reasons to outputs/dropped_predictors.csv and .md
+# - Spatial CV with fallback; standardizes all used predictors (incl. binary) with ε-guard
 
 import os
+import re
 import numpy as np
 import pandas as pd
 import rasterio
@@ -29,6 +33,8 @@ scaler_pkl   = "outputs/standard_scaler.pkl"
 output_map   = "outputs/suitability_map_wgs84.tif"
 std_ras_dir  = "outputs/standardized_rasters_wgs84"
 absences_csv = "outputs/absence_points_coordinates.csv"  # map overlay only
+drop_csv     = "outputs/dropped_predictors.csv"
+drop_md      = "outputs/dropped_predictors.md"
 os.makedirs("outputs", exist_ok=True)
 
 # ---------- Constants & helpers ----------
@@ -36,7 +42,13 @@ EPS = 1e-8  # small value for zero-variance checks
 
 def _is_categorical(name: str) -> bool:
     n = name.lower()
-    return ("landcover" in n) or n.endswith("_onehot") or ("class" in n)
+    # Treat MODIS one-hot exports like "5_mixed_forest", "14_croplands", etc. as categorical
+    return (
+        ("landcover" in n) or
+        n.endswith("_onehot") or
+        ("class" in n) or
+        bool(re.match(r"^\d+_", n))
+    )
 
 def _zscore_train_test(X_tr, X_te):
     """Fit z-score on TRAIN; clamp tiny std to 1.0; apply to TRAIN/TEST."""
@@ -110,7 +122,7 @@ with rasterio.open(rasters[0]) as ref:
 
 # --- Stack predictors (align every layer to reference grid) ---
 print("[STEP] stack-predictors")
-layers, names = [], []
+layers, names, is_cat = [], [], []
 for path in rasters:
     name = os.path.splitext(os.path.basename(path))[0]
     with rasterio.open(path) as src:
@@ -118,7 +130,8 @@ for path in rasters:
         if src.crs is None:
             print(f"⚠️  {name}.tif has no CRS; assuming {ref_crs}")
         dst = np.full((height, width), np.nan, dtype=np.float32)
-        resamp = WarpResampling.nearest if _is_categorical(name) else WarpResampling.bilinear
+        categorical = _is_categorical(name)
+        resamp = WarpResampling.nearest if categorical else WarpResampling.bilinear
         reproject(
             source=rasterio.band(src, 1),
             destination=dst,
@@ -127,9 +140,8 @@ for path in rasters:
             resampling=resamp, dst_nodata=np.nan
         )
 
-    if _is_categorical(name):
-        # NaN outside class ⇒ treat as 0 (absence), and hard-binarize
-        # This prevents presences from being dropped due to NaNs in the land-cover band.
+    if categorical:
+        # Off-class areas: NaN → 0 (absence), then hard-binarize
         np.nan_to_num(dst, copy=False, nan=0.0)
         dst = (dst > 0.5).astype(np.float32)
         ones = int((dst == 1.0).sum())
@@ -140,8 +152,10 @@ for path in rasters:
 
     layers.append(dst.astype(np.float32, copy=False))
     names.append(name)
+    is_cat.append(bool(categorical))
 
 stack = np.stack(layers, axis=-1)
+is_cat = np.array(is_cat, dtype=bool)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # --- Extract presence samples (only where predictors are all valid) ---
@@ -166,7 +180,7 @@ print(f"📍 Presence samples: {presence_samples.shape}")
 if presence_samples.shape[0] == 0:
     raise RuntimeError(
         "No presence points fell on pixels where all predictors are valid. "
-        "Check overlap and predictor coverage."
+        "Check continuous-layer coverage & coordinates."
     )
 
 # --- Background sampling pool (all valid pixels) ---
@@ -181,7 +195,7 @@ print(f"✅ Valid pixel pool: {pool_len}")
 if pool_len == 0:
     raise RuntimeError(
         "No valid pixels where all predictors overlap (stack fully NaN). "
-        "Likely a categorical class has no coverage in your AOI."
+        "Likely a continuous layer has no data in your AOI."
     )
 
 # Choose background for the *raw sample table* (map plotting, not CV)
@@ -220,16 +234,61 @@ if Xc.shape[0] == 0:
 if len(np.unique(yc)) < 2:
     raise RuntimeError("Only one class present in training data.")
 
-# --- Drop constant predictors based on presence+background combined (Xc) ---
-print("[STEP] drop-constant-predictors")
+# --- Drop constant predictors (combined Xc) with explicit reasons ---
+print("[STEP] drop-constant-predictors + reasons")
 col_std = np.nanstd(Xc, axis=0)
 keep_mask = col_std > EPS
-dropped = [n for n, k in zip(names, keep_mask) if not k]
-used    = [n for n, k in zip(names, keep_mask) if k]
+
+drop_reasons = []
+for j, keep in enumerate(keep_mask):
+    if keep:
+        continue
+    col = Xc[:, j]
+    uniq = np.unique(col)
+    reason = "constant value"
+    const_value = None
+    if uniq.size == 1:
+        const_value = float(uniq[0])
+        # Specialize messages for binary landcover
+        if is_cat[j] and const_value == 0.0:
+            reason = "categorical: all 0 (class absent in AOI samples)"
+        elif is_cat[j] and const_value == 1.0:
+            reason = "categorical: all 1 (class ubiquitous in AOI samples)"
+        else:
+            reason = f"constant value = {const_value:.6g}"
+    else:
+        # This case should not happen if std==0, but keep for completeness
+        reason = "near-constant (std≈0)"
+    drop_reasons.append({
+        "predictor": names[j],
+        "categorical": bool(is_cat[j]),
+        "reason": reason,
+        "constant_value": const_value if const_value is not None else np.nan
+    })
+
+dropped = [d["predictor"] for d in drop_reasons]
+used    = [n for (n, k) in zip(names, keep_mask) if k]
+
+# Save reasons to disk (CSV + Markdown)
+if drop_reasons:
+    pd.DataFrame(drop_reasons).to_csv(drop_csv, index=False)
+    with open(drop_md, "w", encoding="utf-8") as f:
+        f.write("# Dropped Predictors (uninformative on training data)\n\n")
+        for d in drop_reasons:
+            cat = "categorical" if d["categorical"] else "continuous"
+            cv  = "" if np.isnan(d["constant_value"]) else f" (constant={d['constant_value']:.6g})"
+            f.write(f"- **{d['predictor']}** [{cat}]: {d['reason']}{cv}\n")
+    print(f"⚠️ Dropped predictors: {', '.join(dropped)}")
+    print(f"📝 Reasons written to {drop_csv} and {drop_md}")
+else:
+    # If none dropped, still emit empty files for consistency
+    pd.DataFrame(columns=["predictor","categorical","reason","constant_value"]).to_csv(drop_csv, index=False)
+    with open(drop_md, "w", encoding="utf-8") as f:
+        f.write("# Dropped Predictors (none)\n")
+    print("✅ No predictors were dropped as constant.")
+
 if not np.any(keep_mask):
     raise RuntimeError("All predictors are constant over training data.")
-if dropped:
-    print(f"⚠️ Dropping constant predictors: {', '.join(dropped)}")
 
 # Slice for modeling/scaling
 Xc_model = Xc[:, keep_mask]
@@ -266,8 +325,7 @@ def _run_repeated_kfold_fallback():
     Np = len(presence_samples)
     if Np < 3:
         note = "Too few presences; reporting NaNs."
-        out = _cv_summary_frame(0, "repeated_kfold", note, [], [], [], [], [], [])
-        out.to_csv(perf_cv_csv, index=False)
+        _cv_summary_frame(0, "repeated_kfold", note, [], [], [], [], [], []).to_csv(perf_cv_csv, index=False)
         print(f"📊 Wrote CV fallback (NaNs) to {perf_cv_csv}")
         return
 
@@ -319,7 +377,6 @@ if len(coords) >= 2:
         gkf = GroupKFold(n_splits=n_blocks)
         for train_idx, test_idx in gkf.split(presence_samples, np.ones(len(presence_samples), dtype=int), groups=blocks):
             Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
-            # For robustness with categorical layers, just use global random backgrounds per fold.
             rng = np.random.default_rng(10_000 + int(test_idx[0]))
             n_bt  = min(5 * len(train_idx), pool_len)
             n_bt2 = min(5 * len(test_idx),  pool_len)
@@ -472,3 +529,15 @@ for j, name in enumerate(names):
     with rasterio.open(os.path.join(std_ras_dir, f"{name}_z.tif"), "w", **profile) as dst:
         dst.write(band_flat.reshape((height, width)), 1)
     print(f"    • {name}_z.tif")
+
+# --- Final user-facing summary about dropped variables ---
+if drop_reasons:
+    print("\n=== Dropped variables (uninformative on training data) ===")
+    for d in drop_reasons:
+        msg = f"- {d['predictor']}: {d['reason']}"
+        if not np.isnan(d.get("constant_value", np.nan)):
+            msg += f" (constant={d['constant_value']:.6g})"
+        print(msg)
+    print(f"\nA detailed report is saved to:\n  • {drop_csv}\n  • {drop_md}\n")
+else:
+    print("\nNo variables were dropped as uninformative.\n")
