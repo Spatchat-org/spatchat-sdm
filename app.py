@@ -476,25 +476,41 @@ def create_map():
     rasdir = "predictor_rasters/wgs84"
     if os.path.isdir(rasdir):
         for fn in sorted(os.listdir(rasdir)):
-            if fn.endswith(".tif"):
-                fpath = os.path.join(rasdir, fn)
-                try:
-                    with rasterio.open(fpath) as src:
-                        arr = src.read(1)
-                        bnd = src.bounds
-                    vmin = np.nanmin(arr)
-                    vmax = np.nanmax(arr)
-                    if np.isnan(vmin) or vmin == vmax:
-                        continue
-                    rgba = colormaps["viridis"]((arr - vmin) / (vmax - vmin))
-                    folium.raster_layers.ImageOverlay(
-                        image=rgba,
-                        bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
-                        opacity=1.0,
-                        name=f"🟨 {fn} ({vmin:.2f}–{vmax:.2f})"
-                    ).add_to(m)
-                except Exception as e:
-                    print(f"[map] Skipped raster {fn}: {e}", file=sys.stderr)
+            if not fn.endswith(".tif"):
+                continue
+            fullfp = os.path.join(rasdir, fn)
+            try:
+                with rasterio.open(fullfp) as src:
+                    arr = src.read(1)
+                    bnd = src.bounds
+
+                # Skip only if the entire array is NaN
+                if np.all(np.isnan(arr)):
+                    continue
+
+                vmin = float(np.nanmin(arr))
+                vmax = float(np.nanmax(arr))
+
+                if vmin == vmax:
+                    # Constant raster (e.g., all zeros). Still show it.
+                    # Map to a fixed color; no divide-by-zero.
+                    normed = np.zeros_like(arr, dtype=np.float32)
+                    rgba = colormaps["viridis"](normed)
+                    layer_name = f"🟨 {os.path.splitext(fn)[0]} (constant={vmin:.2f})"
+                else:
+                    # Normal case: scale and colorize
+                    normed = (arr - vmin) / (vmax - vmin)
+                    rgba = colormaps["viridis"](normed)
+                    layer_name = f"🟨 {os.path.splitext(fn)[0]} ({vmin:.2f}–{vmax:.2f})"
+
+                folium.raster_layers.ImageOverlay(
+                    image=rgba,
+                    bounds=[[bnd.bottom, bnd.left], [bnd.top, bnd.right]],
+                    opacity=1.0,
+                    name=layer_name
+                ).add_to(m)
+            except Exception as e:
+                print(f"[map] Skipped raster {fn}: {e}", file=sys.stderr)
 
     # Suitability raster
     sf = "outputs/suitability_map_wgs84.tif"
