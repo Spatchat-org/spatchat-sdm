@@ -1,10 +1,6 @@
 # scripts/run_logistic_sdm.py
-# Robust SDM pipeline with categorical landcover handling and clear drop-reasons.
-# - Detects one-hot landcover rasters (e.g., "5_mixed_forest.tif")
-# - NaN->0 and binarize for categorical bands (0/1)
-# - Drops any constant predictor on combined Xc (all 0s, all 1s, or any constant value)
-# - Writes drop reasons to outputs/dropped_predictors.csv and .md
-# - Spatial CV with fallback; standardizes all used predictors (incl. binary) with ε-guard
+# Logistic SDM with spatial-block CV (k-fold fallback), robust handling of binary landcover,
+# and proper export of background coordinates into the sample CSVs.
 
 import os
 import re
@@ -16,152 +12,149 @@ import joblib
 from rasterio.transform import rowcol
 from rasterio.warp import reproject, Resampling as WarpResampling
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (roc_auc_score, roc_curve, confusion_matrix,
-                             cohen_kappa_score)
+from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, cohen_kappa_score
 from sklearn.model_selection import GroupKFold, RepeatedStratifiedKFold
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
 
-# --- Paths ---
+# ──────────────────────────────────────────────────────────────
+# Paths & setup
+# ──────────────────────────────────────────────────────────────
 csv_path     = "inputs/presence_points.csv"
 raster_dir   = "predictor_rasters/wgs84"
+os.makedirs("outputs", exist_ok=True)
 perf_cv_csv  = "outputs/performance_metrics_cv.csv"
 perf_fit_csv = "outputs/performance_metrics_fitted.csv"
-compat_perf  = "outputs/performance_metrics.csv"   # legacy/zip
+compat_perf  = "outputs/performance_metrics.csv"
 coef_csv     = "outputs/coefficients.csv"
 scaler_pkl   = "outputs/standard_scaler.pkl"
 output_map   = "outputs/suitability_map_wgs84.tif"
 std_ras_dir  = "outputs/standardized_rasters_wgs84"
-absences_csv = "outputs/absence_points_coordinates.csv"  # map overlay only
+raw_csv      = "outputs/sdm_point_samples_raw.csv"
+std_csv      = "outputs/sdm_point_samples_standardized.csv"
 drop_csv     = "outputs/dropped_predictors.csv"
-drop_md      = "outputs/dropped_predictors.md"
-os.makedirs("outputs", exist_ok=True)
+absences_csv = "outputs/absence_points_coordinates.csv"  # optional for the map
 
-# ---------- Constants & helpers ----------
-EPS = 1e-8  # small value for zero-variance checks
+EPS = 1e-8
+np.random.seed(42)
 
+# ──────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────
 def _is_categorical(name: str) -> bool:
+    """
+    Heuristic: MODIS one-hot layers look like '5_mixed_forest', or include 'landcover' or 'onehot'.
+    """
     n = name.lower()
-    # Treat MODIS one-hot exports like "5_mixed_forest", "14_croplands", etc. as categorical
-    return (
-        ("landcover" in n) or
-        n.endswith("_onehot") or
-        ("class" in n) or
-        bool(re.match(r"^\d+_", n))
-    )
-
-def _zscore_train_test(X_tr, X_te):
-    """Fit z-score on TRAIN; clamp tiny std to 1.0; apply to TRAIN/TEST."""
-    mu = np.nanmean(X_tr, axis=0)
-    sd = np.nanstd(X_tr, axis=0)
-    sd = np.where(sd < EPS, 1.0, sd)
-    return (X_tr - mu) / sd, (X_te - mu) / sd, mu, sd
+    return bool(re.match(r"^\d+_", n) or "landcover" in n or "onehot" in n)
 
 def _compute_metrics_from_probs(y_true, p, thr):
     yhat = (p >= thr).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, yhat, labels=[0, 1]).ravel()
-    sens = tp/(tp+fn) if (tp+fn) else 0.0
-    spec = tn/(tn+fp) if (tn+fp) else 0.0
+    sens = tp / (tp + fn) if (tp + fn) else 0.0
+    spec = tn / (tn + fp) if (tn + fp) else 0.0
     tss  = sens + spec - 1
     kapp = cohen_kappa_score(y_true, yhat)
     auc  = roc_auc_score(y_true, p)
     return auc, tss, kapp, sens, spec
 
-def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, spec):
-    df_out = pd.DataFrame([{
+def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, spec,
+                      n_input_presences, n_kept_presences, n_predictors_used):
+    return pd.DataFrame([{
         "n_folds": int(n_folds),
         "cv_method": method,
         "cv_note": note or "",
-        "AUC_mean":   float(np.mean(aucs)) if len(aucs) else np.nan,
-        "AUC_sd":     float(np.std(aucs))  if len(aucs) else np.nan,
-        "TSS_mean":   float(np.mean(tsses)) if len(tsses) else np.nan,
-        "TSS_sd":     float(np.std(tsses))  if len(tsses) else np.nan,
+        "AUC_mean": float(np.mean(aucs)) if len(aucs) else np.nan,
+        "AUC_sd":   float(np.std(aucs))  if len(aucs) else np.nan,
+        "TSS_mean": float(np.mean(tsses)) if len(tsses) else np.nan,
+        "TSS_sd":   float(np.std(tsses))  if len(tsses) else np.nan,
         "Kappa_mean": float(np.mean(kappas)) if len(kappas) else np.nan,
         "Kappa_sd":   float(np.std(kappas))  if len(kappas) else np.nan,
-        "Threshold_mean":   float(np.mean(thrs)) if len(thrs) else np.nan,
-        "Threshold_sd":     float(np.std(thrs))  if len(thrs) else np.nan,
+        "Threshold_mean": float(np.mean(thrs)) if len(thrs) else np.nan,
+        "Threshold_sd":   float(np.std(thrs))  if len(thrs) else np.nan,
         "Sensitivity_mean": float(np.mean(sens)) if len(sens) else np.nan,
         "Sensitivity_sd":   float(np.std(sens))  if len(sens) else np.nan,
         "Specificity_mean": float(np.mean(spec)) if len(spec) else np.nan,
         "Specificity_sd":   float(np.std(spec))  if len(spec) else np.nan,
+        "n_input_presences": int(n_input_presences),
+        "n_kept_presences":  int(n_kept_presences),
+        "n_predictors_used": int(n_predictors_used),
     }])
-    # Diagnostics for UI
-    df_out["n_input_presences"] = int(len(df))
-    df_out["n_kept_presences"]  = int(len(presence_samples))
-    df_out["n_predictors_used"] = int(len(used))
-    return df_out
 
-# --- Load presence points ---
-print("[STEP] load-presences")
-df   = pd.read_csv(csv_path)
-lats = df['latitude'].values
-lons = df['longitude'].values
-print(f"📍 Loaded {len(df)} presence points.")
+def _zscore_train_test(X_tr, X_te, is_cat_kept):
+    """
+    Fit scaling on TRAIN; continuous -> z-score; categorical (binary) -> center-only (std=1).
+    Also guards tiny variance for continuous.
+    """
+    mu = np.nanmean(X_tr, axis=0)
+    sd = np.nanstd(X_tr, axis=0)
 
-# --- Reference grid ---
-print("[STEP] load-reference-grid")
-rasters = sorted([os.path.join(raster_dir, f)
-                  for f in os.listdir(raster_dir)
-                  if f.endswith('.tif')])
+    # center-only for categorical
+    sd = np.where(is_cat_kept, 1.0, sd)
+    # tiny var guard for continuous
+    sd = np.where(sd < EPS, 1.0, sd)
+
+    return (X_tr - mu) / sd, (X_te - mu) / sd, mu, sd
+
+# ──────────────────────────────────────────────────────────────
+# Load presence points
+# ──────────────────────────────────────────────────────────────
+df_in = pd.read_csv(csv_path)
+lats = df_in["latitude"].values
+lons = df_in["longitude"].values
+print(f"📍 Loaded {len(df_in)} presence points.")
+
+# ──────────────────────────────────────────────────────────────
+# Reference grid & aligned stack
+# ──────────────────────────────────────────────────────────────
+rasters = sorted([os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith(".tif")])
 if not rasters:
     raise RuntimeError(f"No .tif found in {raster_dir}")
+
 with rasterio.open(rasters[0]) as ref:
     ref_crs       = ref.crs
     ref_transform = ref.transform
     height, width = ref.height, ref.width
     profile = {
-        'driver': 'GTiff',
-        'height': height,
-        'width': width,
-        'count': 1,
-        'dtype': rasterio.float32,
-        'crs': ref_crs,
-        'transform': ref_transform
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": rasterio.float32,
+        "crs": ref_crs,
+        "transform": ref_transform,
+        "compress": "DEFLATE",
+        "predictor": 2,
+        "zlevel": 4,
     }
     print(f"🎯 Reference grid: {width}×{height} @ {ref_transform} in {ref_crs}")
 
-# --- Stack predictors (align every layer to reference grid) ---
-print("[STEP] stack-predictors")
 layers, names, is_cat = [], [], []
 for path in rasters:
     name = os.path.splitext(os.path.basename(path))[0]
     with rasterio.open(path) as src:
-        src_crs = src.crs if src.crs is not None else ref_crs
-        if src.crs is None:
-            print(f"⚠️  {name}.tif has no CRS; assuming {ref_crs}")
         dst = np.full((height, width), np.nan, dtype=np.float32)
-        categorical = _is_categorical(name)
-        resamp = WarpResampling.nearest if categorical else WarpResampling.bilinear
+        resamp = WarpResampling.nearest if _is_categorical(name) else WarpResampling.bilinear
         reproject(
             source=rasterio.band(src, 1),
             destination=dst,
-            src_transform=src.transform, src_crs=src_crs,
+            src_transform=src.transform, src_crs=src.crs,
             dst_transform=ref_transform, dst_crs=ref_crs,
             resampling=resamp, dst_nodata=np.nan
         )
-
-    if categorical:
-        # Off-class areas: NaN → 0 (absence), then hard-binarize
-        np.nan_to_num(dst, copy=False, nan=0.0)
-        dst = (dst > 0.5).astype(np.float32)
-        ones = int((dst == 1.0).sum())
-        print(f"🧪 {name}.tif → categorical: ones={ones}, zeros={dst.size - ones}")
-    else:
-        nan_pct = float(np.isnan(dst).mean() * 100.0)
-        print(f"🧪 {name}.tif → NaN%: {nan_pct:.2f}")
-
-    layers.append(dst.astype(np.float32, copy=False))
+    layers.append(dst)
     names.append(name)
-    is_cat.append(bool(categorical))
+    is_cat.append(_is_categorical(name))
+    print(f"🧩 Added layer '{name}' (categorical={is_cat[-1]})")
 
-stack = np.stack(layers, axis=-1)
 is_cat = np.array(is_cat, dtype=bool)
+stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
-# --- Extract presence samples (only where predictors are all valid) ---
-print("[STEP] extract-presence-samples")
+# ──────────────────────────────────────────────────────────────
+# Extract presence samples
+# ──────────────────────────────────────────────────────────────
 presence_samples = []
-kept_coords = []  # (lat, lon) on valid pixels
+kept_coords = []
 for lat, lon in zip(lats, lons):
     try:
         r, c = rowcol(ref_transform, lon, lat, op=round)
@@ -174,17 +167,12 @@ for lat, lon in zip(lats, lons):
             kept_coords.append((lat, lon))
 
 presence_samples = np.array(presence_samples, dtype=np.float32)
-kept_coords = np.array(kept_coords, dtype=np.float64) if len(kept_coords) else np.empty((0, 2), dtype=np.float64)
-print(f"📍 Presence samples: {presence_samples.shape}")
+kept_coords = np.array(kept_coords, dtype=np.float32) if len(kept_coords) else np.empty((0, 2), dtype=np.float32)
+print(f"📍 Presence samples kept: {presence_samples.shape[0]}")
 
-if presence_samples.shape[0] == 0:
-    raise RuntimeError(
-        "No presence points fell on pixels where all predictors are valid. "
-        "Check continuous-layer coverage & coordinates."
-    )
-
-# --- Background sampling pool (all valid pixels) ---
-print("[STEP] build-valid-pool")
+# ──────────────────────────────────────────────────────────────
+# Background pool & sampling
+# ──────────────────────────────────────────────────────────────
 flat       = stack.reshape(-1, stack.shape[-1]).astype(np.float32)
 valid_mask = ~np.any(np.isnan(flat), axis=1)
 valid_idx  = np.flatnonzero(valid_mask)
@@ -192,152 +180,127 @@ pool       = flat[valid_mask]
 pool_len   = len(pool)
 print(f"✅ Valid pixel pool: {pool_len}")
 
-if pool_len == 0:
-    raise RuntimeError(
-        "No valid pixels where all predictors overlap (stack fully NaN). "
-        "Likely a continuous layer has no data in your AOI."
-    )
+if presence_samples.shape[0] == 0:
+    raise RuntimeError("No presence points fell on pixels where all predictors are valid. Check overlap and predictor coverage.")
 
-# Choose background for the *raw sample table* (map plotting, not CV)
-print("[STEP] sample-background-for-tables")
-np.random.seed(42)
-n_bg       = min(5 * max(1, len(presence_samples)), pool_len)
-bg_indices = np.random.choice(pool_len, size=n_bg, replace=False)  # OK if n_bg == 0
+# choose background count and sample
+n_bg = min(max(5 * presence_samples.shape[0], 1), pool_len)
+bg_indices = np.random.choice(pool_len, size=n_bg, replace=False)
 background_samples = pool[bg_indices].astype(np.float32)
-print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
-# Convert chosen background linear indices → row/col → lon/lat and save for map overlay
+# background locations for exports/map
 if len(bg_indices) > 0:
     bg_linear = valid_idx[bg_indices].astype(np.int64)
     bg_rows   = (bg_linear // width).astype(np.int64)
     bg_cols   = (bg_linear %  width).astype(np.int64)
-
     # rasterio.transform.xy returns (x=lon, y=lat)
-    bg_lons, bg_lats = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset='center')
+    bg_lons, bg_lats = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset="center")
     bg_lats = np.asarray(bg_lats, dtype=float)
     bg_lons = np.asarray(bg_lons, dtype=float)
-    pd.DataFrame({"latitude": bg_lats, "longitude": bg_lons}).to_csv(absences_csv, index=False)
-    print(f"🗺️ Absence coordinates saved to {absences_csv} ({len(bg_lats)} points)")
 else:
-    pd.DataFrame({"latitude": [], "longitude": []}).to_csv(absences_csv, index=False)
-    print(f"🗺️ No background points sampled; wrote empty {absences_csv}")
+    bg_lats = np.array([], dtype=float)
+    bg_lons = np.array([], dtype=float)
 
-# --- Prepare data (combined presence + background) ---
-print("[STEP] build-train-table")
-# Ensure both sample matrices are 2-D with identical feature width
-n_features = stack.shape[-1]
-presence_samples   = np.asarray(presence_samples,   dtype=np.float32).reshape(-1, n_features)
-background_samples = np.asarray(background_samples, dtype=np.float32).reshape(-1, n_features)
+# Map overlay CSV (optional)
+pd.DataFrame({"latitude": bg_lats, "longitude": bg_lons}).to_csv(absences_csv, index=False)
+print(f"🗺️ Absence coordinates saved to {absences_csv} ({len(bg_lats)} points)")
 
+# ──────────────────────────────────────────────────────────────
+# Build training matrix; drop uninformative predictors safely
+# ──────────────────────────────────────────────────────────────
 X = np.vstack([presence_samples, background_samples])
 y = np.concatenate([
-    np.ones(len(presence_samples), dtype=int),
-    np.zeros(len(background_samples), dtype=int)
+    np.ones(presence_samples.shape[0], dtype=int),
+    np.zeros(background_samples.shape[0], dtype=int)
 ])
 
-# Guard rows: require finite values
 finite_mask = np.all(np.isfinite(X), axis=1)
 Xc, yc = X[finite_mask], y[finite_mask]
-print(f"🔀 Training samples: {X.shape} → after finite filter: {Xc.shape}; "
-      f"positives={int((yc==1).sum())}, negatives={int((yc==0).sum())}")
-
+print(f"🔀 Train rows after finite filter: {X.shape} → {Xc.shape} (pos={int((yc==1).sum())}, neg={int((yc==0).sum())})")
 if Xc.shape[0] == 0:
-    raise RuntimeError("No usable training rows after filtering.")
+    raise RuntimeError("No usable training rows after filtering. Check predictor coverage & presence coordinates.")
 if len(np.unique(yc)) < 2:
-    raise RuntimeError("Only one class present in training data.")
+    raise RuntimeError("Only one class present after filtering. Need both presences and backgrounds.")
 
-# --- Drop constant predictors (combined Xc) with explicit reasons ---
-print("[STEP] drop-constant-predictors + reasons")
-col_std = np.nanstd(Xc, axis=0)
-keep_mask = col_std > EPS
-
+# Determine drops
+col_std = np.nanstd(Xc, axis=0)  # std over combined train rows
+keep_mask = np.ones(len(names), dtype=bool)
 drop_reasons = []
-for j, keep in enumerate(keep_mask):
-    if keep:
-        continue
-    col = Xc[:, j]
-    uniq = np.unique(col)
-    reason = "constant value"
-    const_value = None
-    if uniq.size == 1:
-        const_value = float(uniq[0])
-        # Specialize messages for binary landcover
-        if is_cat[j] and const_value == 0.0:
-            reason = "categorical: all 0 (class absent in AOI samples)"
-        elif is_cat[j] and const_value == 1.0:
-            reason = "categorical: all 1 (class ubiquitous in AOI samples)"
-        else:
-            reason = f"constant value = {const_value:.6g}"
+
+for j, n in enumerate(names):
+    if is_cat[j]:
+        # Binary: check if both classes appear in combined rows
+        minv, maxv = float(np.nanmin(Xc[:, j])), float(np.nanmax(Xc[:, j]))
+        if (minv >= 1.0 - EPS) and (maxv <= 1.0 + EPS):
+            keep_mask[j] = False
+            drop_reasons.append((n, "categorical: all 1 in training rows", 1.0))
+        elif (maxv <= 0.0 + EPS) and (minv >= 0.0 - EPS):
+            keep_mask[j] = False
+            drop_reasons.append((n, "categorical: all 0 in training rows (class absent in AOI samples)", 0.0))
+        # else: informative → keep
     else:
-        # This case should not happen if std==0, but keep for completeness
-        reason = "near-constant (std≈0)"
-    drop_reasons.append({
-        "predictor": names[j],
-        "categorical": bool(is_cat[j]),
-        "reason": reason,
-        "constant_value": const_value if const_value is not None else np.nan
-    })
-
-dropped = [d["predictor"] for d in drop_reasons]
-used    = [n for (n, k) in zip(names, keep_mask) if k]
-
-# Save reasons to disk (CSV + Markdown)
-if drop_reasons:
-    pd.DataFrame(drop_reasons).to_csv(drop_csv, index=False)
-    with open(drop_md, "w", encoding="utf-8") as f:
-        f.write("# Dropped Predictors (uninformative on training data)\n\n")
-        for d in drop_reasons:
-            cat = "categorical" if d["categorical"] else "continuous"
-            cv  = "" if np.isnan(d["constant_value"]) else f" (constant={d['constant_value']:.6g})"
-            f.write(f"- **{d['predictor']}** [{cat}]: {d['reason']}{cv}\n")
-    print(f"⚠️ Dropped predictors: {', '.join(dropped)}")
-    print(f"📝 Reasons written to {drop_csv} and {drop_md}")
-else:
-    # If none dropped, still emit empty files for consistency
-    pd.DataFrame(columns=["predictor","categorical","reason","constant_value"]).to_csv(drop_csv, index=False)
-    with open(drop_md, "w", encoding="utf-8") as f:
-        f.write("# Dropped Predictors (none)\n")
-    print("✅ No predictors were dropped as constant.")
+        if col_std[j] <= EPS:
+            keep_mask[j] = False
+            drop_reasons.append((n, "continuous: near-constant on training rows", float(np.nanmean(Xc[:, j]))))
 
 if not np.any(keep_mask):
-    raise RuntimeError("All predictors are constant over training data.")
+    raise RuntimeError("All predictors are uninformative on training rows. Add at least one varying layer.")
 
-# Slice for modeling/scaling
-Xc_model = Xc[:, keep_mask]
-names_model = used
 used_idx = np.flatnonzero(keep_mask)
+names_used = [names[i] for i in used_idx]
+is_cat_kept = is_cat[used_idx]
+print(f"✅ Using {len(names_used)}/{len(names)} predictors: {', '.join(names_used)}")
 
-# --- Export extracted samples: RAW values ---
-print("[STEP] export-sample-tables-raw")
-pres_lats = kept_coords[:, 0] if kept_coords.size else np.array([], dtype=np.float32)
-pres_lons = kept_coords[:, 1] if kept_coords.size else np.array([], dtype=np.float32)
+# Export drop report for the UI
+pd.DataFrame([{"predictor": n, "reason": r, "constant_value": v} for n, r, v in drop_reasons]).to_csv(drop_csv, index=False)
+
+# ──────────────────────────────────────────────────────────────
+# Export point samples (RAW)
+# ──────────────────────────────────────────────────────────────
+pres_lats = kept_coords[:, 0] if kept_coords.size else np.array([], dtype=float)
+pres_lons = kept_coords[:, 1] if kept_coords.size else np.array([], dtype=float)
 
 presence_df_raw = pd.DataFrame(presence_samples, columns=names)
-presence_df_raw.insert(0, 'latitude',  pres_lats[:len(presence_df_raw)])
-presence_df_raw.insert(1, 'longitude', pres_lons[:len(presence_df_raw)])
-presence_df_raw.insert(2, 'label', 1)
+presence_df_raw.insert(0, "latitude",  pres_lats[:len(presence_df_raw)])
+presence_df_raw.insert(1, "longitude", pres_lons[:len(presence_df_raw)])
+presence_df_raw.insert(2, "label", 1)
 
 absence_df_raw = pd.DataFrame(background_samples, columns=names)
-absence_df_raw.insert(0, 'latitude',  np.full(len(absence_df_raw), np.nan, dtype=np.float64))
-absence_df_raw.insert(1, 'longitude', np.full(len(absence_df_raw), np.nan, dtype=np.float64))
-absence_df_raw.insert(2, 'label', 0)
+absence_df_raw.insert(0, "latitude",  bg_lats[:len(absence_df_raw)] if len(bg_lats) else np.array([], dtype=float))
+absence_df_raw.insert(1, "longitude", bg_lons[:len(absence_df_raw)] if len(bg_lons) else np.array([], dtype=float))
+absence_df_raw.insert(2, "label", 0)
 
 samples_df_raw = pd.concat([presence_df_raw, absence_df_raw], ignore_index=True)
-samples_df_raw.to_csv("outputs/sdm_point_samples_raw.csv", index=False)
-print(f"📄 Point samples (RAW) saved to outputs/sdm_point_samples_raw.csv")
+samples_df_raw.to_csv(raw_csv, index=False)
+print(f"📄 Point samples (RAW) saved to {raw_csv}")
 
-# ---------- Cross-validation ----------
-print("[STEP] cross-validation")
-coords = kept_coords  # (n_presences, 2) as [lat, lon]
+# ──────────────────────────────────────────────────────────────
+# Spatial CV (blocked) with per-fold scaling; fallback to RepeatedStratifiedKFold
+# ──────────────────────────────────────────────────────────────
+coords = kept_coords  # presences only (lat, lon)
+n_blocks = min(5, len(coords)) if len(coords) > 0 else 0
+
 cv_aucs, cv_tsses, cv_kappas = [], [], []
 cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
 
+# lon/lat for all valid pool pixels (to assign blocks)
+pool_rows = valid_idx // width
+pool_cols = valid_idx %  width
+pool_lons_all, pool_lats_all = rasterio.transform.xy(ref_transform, pool_rows, pool_cols, offset="center")
+pool_lats_all = np.asarray(pool_lats_all, dtype=float)
+pool_lons_all = np.asarray(pool_lons_all, dtype=float)
+
 def _run_repeated_kfold_fallback():
-    print("ℹ️ Falling back to Repeated Stratified K-fold (non-spatial).")
-    Np = len(presence_samples)
+    print("ℹ️ Falling back to Repeated Stratified K-fold CV (non-spatial).")
+    Np = presence_samples.shape[0]
     if Np < 3:
-        note = "Too few presences; reporting NaNs."
-        _cv_summary_frame(0, "repeated_kfold", note, [], [], [], [], [], []).to_csv(perf_cv_csv, index=False)
+        out = _cv_summary_frame(
+            0, "repeated_kfold",
+            "Too few presences for K-fold; reporting NaNs.",
+            [], [], [], [], [], [],
+            len(df_in), len(presence_samples), len(names_used)
+        )
+        out.to_csv(perf_cv_csv, index=False)
         print(f"📊 Wrote CV fallback (NaNs) to {perf_cv_csv}")
         return
 
@@ -346,23 +309,27 @@ def _run_repeated_kfold_fallback():
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
 
     aucs = []; tsses = []; kappas = []; thrs = []; sensv = []; specv = []
+
     for fold_i, (tr_idx, te_idx) in enumerate(rskf.split(presence_samples, np.ones(Np, dtype=int)), start=1):
-        Xp_tr = presence_samples[tr_idx]; Xp_te = presence_samples[te_idx]
+        Xp_tr, Xp_te = presence_samples[tr_idx], presence_samples[te_idx]
+
         rng = np.random.default_rng(1000 + fold_i)
         n_bt_tr = min(5 * len(tr_idx), pool_len)
         n_bt_te = min(5 * len(te_idx),  pool_len)
         bt_idx  = rng.choice(pool_len, size=n_bt_tr, replace=False)
         bt_idx2 = rng.choice(pool_len, size=n_bt_te, replace=False)
-        Xb_tr = pool[bt_idx]; Xb_te = pool[bt_idx2]
+        Xb_tr, Xb_te = pool[bt_idx], pool[bt_idx2]
 
         X_tr = np.vstack([Xp_tr, Xb_tr]); y_tr = np.concatenate([np.ones(len(Xp_tr), dtype=int), np.zeros(len(Xb_tr), dtype=int)])
         X_te = np.vstack([Xp_te, Xb_te]); y_te = np.concatenate([np.ones(len(Xp_te), dtype=int), np.zeros(len(Xb_te), dtype=int)])
 
         mtr = np.all(np.isfinite(X_tr), axis=1); mte = np.all(np.isfinite(X_te), axis=1)
-        X_tr, y_tr = X_tr[mtr], y_tr[mtr]; X_te, y_te = X_te[mte], y_te[mte]
-        if np.unique(y_te).size < 2 or np.unique(y_tr).size < 2: continue
+        X_tr, y_tr = X_tr[mtr], y_tr[mtr]
+        X_te, y_te = X_te[mte], y_te[mte]
 
-        X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr[:, keep_mask], X_te[:, keep_mask])
+        X_tr_k = X_tr[:, used_idx]
+        X_te_k = X_te[:, used_idx]
+        X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr_k, X_te_k, is_cat_kept)
 
         clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
         p_tr = clf.predict_proba(X_tr_s)[:, 1]
@@ -375,35 +342,55 @@ def _run_repeated_kfold_fallback():
         aucs.append(float(auc)); tsses.append(float(tss)); kappas.append(float(kapp))
         thrs.append(float(bt));  sensv.append(float(sens)); specv.append(float(spec))
 
-    note = f"Used non-spatial Repeated Stratified K-fold (splits={n_splits}, repeats={n_repeats})."
-    _cv_summary_frame(n_splits * n_repeats, "repeated_kfold", note, aucs, tsses, kappas, thrs, sensv, specv).to_csv(perf_cv_csv, index=False)
+    out = _cv_summary_frame(
+        n_splits * n_repeats, "repeated_kfold",
+        f"Spatial blocking unavailable; used non-spatial Repeated Stratified K-fold (splits={n_splits}, repeats={n_repeats}).",
+        aucs, tsses, kappas, thrs, sensv, specv,
+        len(df_in), len(presence_samples), len(names_used)
+    )
+    out.to_csv(perf_cv_csv, index=False)
     print(f"📊 Wrote CV fallback (Repeated K-fold) to {perf_cv_csv}")
 
 did_spatial = False
-if len(coords) >= 2:
+if n_blocks >= 2:
     try:
-        print("[STEP] spatial-cv")
-        n_blocks = min(5, len(coords))
-        kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init=10).fit(coords)
+        kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init="auto").fit(coords)
         blocks = kmeans.labels_
+        pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
+
         gkf = GroupKFold(n_splits=n_blocks)
-        for train_idx, test_idx in gkf.split(presence_samples, np.ones(len(presence_samples), dtype=int), groups=blocks):
-            Xp_tr, Xp_te = presence_samples[train_idx], presence_samples[test_idx]
-            rng = np.random.default_rng(10_000 + int(test_idx[0]))
-            n_bt  = min(5 * len(train_idx), pool_len)
-            n_bt2 = min(5 * len(test_idx),  pool_len)
-            bt_idx  = rng.choice(pool_len, size=n_bt,  replace=False)
-            bt_idx2 = rng.choice(pool_len, size=n_bt2, replace=False)
-            Xb_tr = pool[bt_idx]; Xb_te = pool[bt_idx2]
+        for tr_idx, te_idx in gkf.split(presence_samples, np.ones(len(presence_samples), dtype=int), groups=blocks):
+            Xp_tr, Xp_te = presence_samples[tr_idx], presence_samples[te_idx]
+            test_blocks = set(blocks[te_idx])
+            train_blocks = [b for b in range(n_blocks) if b not in test_blocks]
+
+            mask_tr_pool = np.isin(pool_blocks, train_blocks)
+            mask_te_pool = np.isin(pool_blocks, list(test_blocks))
+
+            n_bt  = min(5 * len(tr_idx), int(mask_tr_pool.sum()))
+            n_bt2 = min(5 * len(te_idx),  int(mask_te_pool.sum()))
+
+            if n_bt < 1 or n_bt2 < 1:
+                bt_idx  = np.random.choice(pool_len, size=max(1, 5 * len(tr_idx)), replace=False)
+                bt_idx2 = np.random.choice(pool_len, size=max(1, 5 * len(te_idx)),  replace=False)
+            else:
+                tr_inds = np.flatnonzero(mask_tr_pool)
+                te_inds = np.flatnonzero(mask_te_pool)
+                bt_idx  = np.random.choice(tr_inds, size=n_bt,  replace=False)
+                bt_idx2 = np.random.choice(te_inds, size=n_bt2, replace=False)
+
+            Xb_tr, Xb_te = pool[bt_idx], pool[bt_idx2]
 
             X_tr = np.vstack([Xp_tr, Xb_tr]); y_tr = np.concatenate([np.ones(len(Xp_tr), dtype=int), np.zeros(len(Xb_tr), dtype=int)])
             X_te = np.vstack([Xp_te, Xb_te]); y_te = np.concatenate([np.ones(len(Xp_te), dtype=int), np.zeros(len(Xb_te), dtype=int)])
 
             mtr = np.all(np.isfinite(X_tr), axis=1); mte = np.all(np.isfinite(X_te), axis=1)
-            X_tr, y_tr = X_tr[mtr], y_tr[mtr]; X_te, y_te = X_te[mte], y_te[mte]
-            if np.unique(y_te).size < 2 or np.unique(y_tr).size < 2: continue
+            X_tr, y_tr = X_tr[mtr], y_tr[mtr]
+            X_te, y_te = X_te[mte], y_te[mte]
 
-            X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr[:, keep_mask], X_te[:, keep_mask])
+            X_tr_k = X_tr[:, used_idx]
+            X_te_k = X_te[:, used_idx]
+            X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr_k, X_te_k, is_cat_kept)
 
             clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
 
@@ -412,7 +399,7 @@ if len(coords) >= 2:
             bt = thr_tr[np.argmax(tpr_tr - fpr_tr)]
 
             p_te = clf.predict_proba(X_te_s)[:, 1]
-            auc = roc_auc_score(y_te, p_te)
+            auc  = roc_auc_score(y_te, p_te)
             yhat = (p_te >= bt).astype(int)
             tn, fp, fn, tp = confusion_matrix(y_te, yhat, labels=[0, 1]).ravel()
             sens = tp/(tp+fn) if (tp+fn) else 0.0
@@ -420,50 +407,69 @@ if len(coords) >= 2:
             tss  = sens + spec - 1
             kapp = cohen_kappa_score(y_te, yhat)
 
-            cv_aucs.append(float(auc)); cv_tsses.append(float(tss)); cv_kappas.append(float(kapp))
-            cv_thresholds.append(float(bt)); cv_sensitivities.append(float(sens)); cv_specificities.append(float(spec))
+            cv_aucs.append(float(auc))
+            cv_tsses.append(float(tss))
+            cv_kappas.append(float(kapp))
+            cv_thresholds.append(float(bt))
+            cv_sensitivities.append(float(sens))
+            cv_specificities.append(float(spec))
 
         did_spatial = True
-        _cv_summary_frame(len(cv_aucs), "spatial_blocks", "", cv_aucs, cv_tsses, cv_kappas,
-                          cv_thresholds, cv_sensitivities, cv_specificities).to_csv(perf_cv_csv, index=False)
+        out = _cv_summary_frame(
+            n_blocks, "spatial_blocks", "",
+            cv_aucs, cv_tsses, cv_kappas, cv_thresholds, cv_sensitivities, cv_specificities,
+            len(df_in), len(presence_samples), len(names_used)
+        )
+        out.to_csv(perf_cv_csv, index=False)
         print(f"📊 Cross-validated (spatial blocks) metrics saved to {perf_cv_csv}")
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"⚠️ Spatial CV failed with error: {e}")
         _run_repeated_kfold_fallback()
 else:
-    print("ℹ️ Not enough presences for spatial CV (need ≥2 blocks).")
+    print("ℹ️ Not enough presence points/blocks for spatial CV (need ≥2 blocks).")
     _run_repeated_kfold_fallback()
 
-# --- Final scaler & model on all filtered samples (only kept cols) ---
+# ──────────────────────────────────────────────────────────────
+# Final fit with center-only on categorical
+# ──────────────────────────────────────────────────────────────
 print("[STEP] fit-final-model")
-scaler = StandardScaler().fit(Xc_model)
-Xc_s = scaler.transform(Xc_model)
-model = LogisticRegression(max_iter=1000, class_weight="balanced").fit(Xc_s, yc)
-joblib.dump(scaler, scaler_pkl)
-print(f"💾 Saved scaler to {scaler_pkl}")
 
-# --- Export standardization stats ---
-print("[STEP] export-standardization-stats")
+Xc_model = Xc[:, used_idx]
+
+mu_final = np.nanmean(Xc_model, axis=0)
+sd_final = np.nanstd(Xc_model, axis=0)
+sd_final = np.where(is_cat_kept, 1.0, sd_final)     # center-only for categorical
+sd_final = np.where(sd_final < EPS, 1.0, sd_final)  # tiny variance guard
+
+def _apply_standardize(arr_kept):
+    return (arr_kept - mu_final) / sd_final
+
+Xc_s = _apply_standardize(Xc_model)
+
+model = LogisticRegression(max_iter=1000, class_weight="balanced").fit(Xc_s, yc)
+joblib.dump({"mu": mu_final, "sd": sd_final, "keep_mask": keep_mask, "is_cat": is_cat}, scaler_pkl)
+print(f"💾 Saved scaler stats to {scaler_pkl}")
+
+# ── Export standardization stats mapped back to full list
 mean_full = np.zeros(len(names), dtype=float)
 std_full  = np.zeros(len(names), dtype=float)
-mean_full[used_idx] = scaler.mean_.astype(float)
-std_full[used_idx]  = scaler.scale_.astype(float)
+mean_full[used_idx] = mu_final
+std_full[used_idx]  = sd_final
 pd.DataFrame({
     "predictor": names,
-    "mean":  mean_full,
-    "std":   std_full,
+    "mean": mean_full,
+    "std":  std_full,
     "dropped_constant": [not k for k in keep_mask]
 }).to_csv("outputs/standardization_stats.csv", index=False)
-print(f"📄 Standardization stats saved to outputs/standardization_stats.csv")
 
-# --- Export standardized sample tables ---
-print("[STEP] export-sample-tables-standardized")
+# ──────────────────────────────────────────────────────────────
+# Export point samples (STANDARDIZED)
+# ──────────────────────────────────────────────────────────────
 def _std_full(arr_full: np.ndarray) -> np.ndarray:
     if arr_full.size == 0:
         return arr_full.reshape((0, len(names)))
-    arr_kept = arr_full[:, keep_mask]
-    arr_kept_s = scaler.transform(arr_kept)
+    arr_kept_s = _apply_standardize(arr_full[:, used_idx])
     out = np.zeros((arr_full.shape[0], len(names)), dtype=np.float32)
     out[:, used_idx] = arr_kept_s.astype(np.float32)
     return out
@@ -472,20 +478,22 @@ presence_std = _std_full(presence_samples)
 absence_std  = _std_full(background_samples)
 
 presence_df_std = pd.DataFrame(presence_std, columns=names)
-presence_df_std.insert(0, 'latitude',  pres_lats[:len(presence_df_std)] if kept_coords.size else [])
-presence_df_std.insert(1, 'longitude', pres_lons[:len(presence_df_std)] if kept_coords.size else [])
-presence_df_std.insert(2, 'label', 1)
+presence_df_std.insert(0, "latitude",  pres_lats[:len(presence_df_std)])
+presence_df_std.insert(1, "longitude", pres_lons[:len(presence_df_std)])
+presence_df_std.insert(2, "label", 1)
 
 absence_df_std = pd.DataFrame(absence_std, columns=names)
-absence_df_std.insert(0, 'latitude',  np.full(len(absence_df_std), np.nan, dtype=np.float64))
-absence_df_std.insert(1, 'longitude', np.full(len(absence_df_std), np.nan, dtype=np.float64))
-absence_df_std.insert(2, 'label', 0)
+absence_df_std.insert(0, "latitude",  bg_lats[:len(absence_df_std)] if len(bg_lats) else np.array([], dtype=float))
+absence_df_std.insert(1, "longitude", bg_lons[:len(absence_df_std)] if len(bg_lons) else np.array([], dtype=float))
+absence_df_std.insert(2, "label", 0)
 
-pd.concat([presence_df_std, absence_df_std], ignore_index=True).to_csv("outputs/sdm_point_samples_standardized.csv", index=False)
-print(f"📄 Point samples (STANDARDIZED) saved to outputs/sdm_point_samples_standardized.csv")
+samples_df_std = pd.concat([presence_df_std, absence_df_std], ignore_index=True)
+samples_df_std.to_csv(std_csv, index=False)
+print(f"📄 Point samples (STANDARDIZED) saved to {std_csv}")
 
-# --- Fitted (in-sample) metrics ---
-print("[STEP] fitted-metrics")
+# ──────────────────────────────────────────────────────────────
+# Fitted (in-sample) metrics on standardized training data
+# ──────────────────────────────────────────────────────────────
 y_prob = model.predict_proba(Xc_s)[:, 1]
 auc    = roc_auc_score(yc, y_prob)
 fpr, tpr, thr = roc_curve(yc, y_prob)
@@ -497,59 +505,56 @@ spec  = tn/(tn+fp) if (tn+fp) else 0.0
 tss   = sens + spec - 1
 kappa = cohen_kappa_score(yc, yhat)
 
-pd.DataFrame([{
-    'AUC_fitted':         float(auc),
-    'Threshold_fitted':   float(best_thr),
-    'Sensitivity_fitted': float(sens),
-    'Specificity_fitted': float(spec),
-    'TSS_fitted':         float(tss),
-    'Kappa_fitted':       float(kappa)
-}]).to_csv(perf_fit_csv, index=False)
-print(f"📊 Fitted (in-sample) metrics saved to {perf_fit_csv}")
-pd.read_csv(perf_fit_csv).to_csv(compat_perf, index=False)
-print(f"📊 Fitted (compat) metrics saved to {compat_perf}")
+fitted_df = pd.DataFrame([{
+    "AUC_fitted":         float(auc),
+    "Threshold_fitted":   float(best_thr),
+    "Sensitivity_fitted": float(sens),
+    "Specificity_fitted": float(spec),
+    "TSS_fitted":         float(tss),
+    "Kappa_fitted":       float(kappa)
+}])
+fitted_df.to_csv(perf_fit_csv, index=False)
+fitted_df.to_csv(compat_perf, index=False)
+print(f"📊 Fitted metrics saved to {perf_fit_csv}")
 
-# --- Coefficients ---
-print("[STEP] export-coefficients")
+# ──────────────────────────────────────────────────────────────
+# Coefficients mapped back to full feature list
+# ──────────────────────────────────────────────────────────────
 intercept = model.intercept_[0]
 coef_used = model.coef_.flatten()
 full_coef = np.zeros(len(names), dtype=float)
 full_coef[used_idx] = coef_used
-pd.DataFrame({'predictor': ['Intercept'] + names,
-             'coefficient': np.concatenate([[intercept], full_coef])}).to_csv(coef_csv, index=False)
+coef_df = pd.DataFrame({"predictor": ["Intercept"] + names, "coefficient": np.concatenate([[intercept], full_coef])})
+coef_df.to_csv(coef_csv, index=False)
 print(f"📊 Coefficients saved to {coef_csv}")
 
-# --- Suitability map ---
-print("[STEP] write-suitability-map")
+# ──────────────────────────────────────────────────────────────
+# Suitability map (predict on full grid)
+# ──────────────────────────────────────────────────────────────
 pred_flat = np.full(flat.shape[0], np.nan, dtype=np.float32)
-pool_model = pool[:, keep_mask]
-pool_s = scaler.transform(pool_model)
+pool_model = pool[:, used_idx]
+pool_s = _apply_standardize(pool_model).astype(np.float32)
 pred_flat[valid_mask] = model.predict_proba(pool_s)[:, 1].astype(np.float32)
 pred_map = pred_flat.reshape((height, width))
+
 with rasterio.open(output_map, "w", **profile) as dst:
     dst.write(pred_map, 1)
 print(f"🎯 Final suitability map saved to {output_map}")
 
-# --- Standardized rasters ---
-print("[STEP] write-standardized-rasters")
+# ──────────────────────────────────────────────────────────────
+# Standardized rasters (z-scored for continuous, centered for categorical)
+# ──────────────────────────────────────────────────────────────
 os.makedirs(std_ras_dir, exist_ok=True)
+print(f"💾 Writing standardized rasters to {std_ras_dir}")
+
 pool_s_full = np.zeros((pool.shape[0], len(names)), dtype=np.float32)
-pool_s_full[:, used_idx] = pool_s.astype(np.float32)
+pool_s_full[:, used_idx] = pool_s  # already standardized according to type
+
 for j, name in enumerate(names):
     band_flat = np.full(flat.shape[0], np.float32(np.nan), dtype=np.float32)
-    band_flat[valid_mask] = pool_s_full[:, j].astype(np.float32)
-    with rasterio.open(os.path.join(std_ras_dir, f"{name}_z.tif"), "w", **profile) as dst:
-        dst.write(band_flat.reshape((height, width)), 1)
+    band_flat[valid_mask] = pool_s_full[:, j]
+    band = band_flat.reshape((height, width))
+    out_path = os.path.join(std_ras_dir, f"{name}_z.tif")
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(band, 1)
     print(f"    • {name}_z.tif")
-
-# --- Final user-facing summary about dropped variables ---
-if drop_reasons:
-    print("\n=== Dropped variables (uninformative on training data) ===")
-    for d in drop_reasons:
-        msg = f"- {d['predictor']}: {d['reason']}"
-        if not np.isnan(d.get("constant_value", np.nan)):
-            msg += f" (constant={d['constant_value']:.6g})"
-        print(msg)
-    print(f"\nA detailed report is saved to:\n  • {drop_csv}\n  • {drop_md}\n")
-else:
-    print("\nNo variables were dropped as uninformative.\n")
