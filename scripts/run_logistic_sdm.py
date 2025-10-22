@@ -1,6 +1,7 @@
 # scripts/run_logistic_sdm.py
 # Logistic SDM with spatial-block CV (k-fold fallback), robust handling of binary landcover,
-# presence-row imputation from pool means, and export of background coordinates.
+# presence-row imputation from pool means, export of background coordinates,
+# and coefficient significance (std errors & p-values via statsmodels).
 
 import os
 import re
@@ -8,6 +9,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 import joblib
+import statsmodels.api as sm
 
 from rasterio.transform import rowcol
 from rasterio.warp import reproject, Resampling as WarpResampling
@@ -186,7 +188,6 @@ col_means = np.nanmean(pool, axis=0)
 col_means = np.where(np.isfinite(col_means), col_means, 0.0)
 nan_mask_pres = ~np.isfinite(presence_samples)
 if np.any(nan_mask_pres):
-    # indices of cols per-row where NaN occurs
     row_idx, col_idx = np.nonzero(nan_mask_pres)
     presence_samples[row_idx, col_idx] = col_means[col_idx]
     print(f"🧽 Imputed NaNs in presence rows with pool means (cols affected: {int(nan_mask_pres.any(axis=0).sum())})")
@@ -200,7 +201,6 @@ background_samples = pool[bg_indices].astype(np.float32)
 bg_linear = valid_idx[bg_indices].astype(np.int64)
 bg_rows   = (bg_linear // width).astype(np.int64)
 bg_cols   = (bg_linear %  width).astype(np.int64)
-# rasterio.transform.xy returns (x=lon, y=lat)
 bg_lons, bg_lats = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset="center")
 bg_lats = np.asarray(bg_lats, dtype=float)
 bg_lons = np.asarray(bg_lons, dtype=float)
@@ -231,7 +231,6 @@ drop_reasons = []
 
 for j, n in enumerate(names):
     if is_cat[j]:
-        # Binary: check if both classes appear in combined rows
         minv, maxv = float(np.nanmin(Xc[:, j])), float(np.nanmax(Xc[:, j]))
         if (minv >= 1.0 - EPS) and (maxv <= 1.0 + EPS):
             keep_mask[j] = False
@@ -239,7 +238,6 @@ for j, n in enumerate(names):
         elif (maxv <= 0.0 + EPS) and (minv >= 0.0 - EPS):
             keep_mask[j] = False
             drop_reasons.append((n, "categorical: all 0 in training rows (class absent in AOI samples)", 0.0))
-        # else informative → keep
     else:
         if col_std[j] <= EPS:
             keep_mask[j] = False
@@ -447,7 +445,10 @@ def _apply_standardize(arr_kept):
 
 Xc_s = _apply_standardize(Xc_model)
 
+# Fit sklearn model for prediction map & fitted metrics
 model = LogisticRegression(max_iter=1000, class_weight="balanced").fit(Xc_s, yc)
+
+# Save scaler stats for downstream
 joblib.dump({"mu": mu_final, "sd": sd_final, "keep_mask": keep_mask, "is_cat": is_cat}, scaler_pkl)
 print(f"💾 Saved scaler stats to {scaler_pkl}")
 
@@ -518,22 +519,65 @@ fitted_df.to_csv(compat_perf, index=False)
 print(f"📊 Fitted metrics saved to {perf_fit_csv}")
 
 # ──────────────────────────────────────────────────────────────
-# Coefficients mapped back to full feature list
+# Coefficients + Significance (via statsmodels)
 # ──────────────────────────────────────────────────────────────
-intercept = model.intercept_[0]
-coef_used = model.coef_.flatten()
-full_coef = np.zeros(len(names), dtype=float)
-full_coef[used_idx] = coef_used
-coef_df = pd.DataFrame({"predictor": ["Intercept"] + names, "coefficient": np.concatenate([[intercept], full_coef])})
+print("[STEP] computing coefficient significance (statsmodels)")
+
+# statsmodels needs explicit intercept
+coef_df = None
+try:
+    Xc_s_sm = sm.add_constant(Xc_s, has_constant="add")
+    logit_sm = sm.Logit(yc, Xc_s_sm)
+    # Use a stable optimizer; suppress console output
+    result_sm = logit_sm.fit(disp=False, method="lbfgs", maxiter=200)
+
+    params = result_sm.params
+    bse    = result_sm.bse
+    pvals  = result_sm.pvalues
+
+    # Map back to full predictor list
+    intercept = params[0]
+    coef_used = params[1:]  # skip intercept
+
+    full_coef = np.zeros(len(names), dtype=float)
+    full_se   = np.zeros(len(names), dtype=float)
+    full_p    = np.ones(len(names), dtype=float)
+
+    full_coef[used_idx] = coef_used
+    full_se[used_idx]   = bse[1:]
+    full_p[used_idx]    = pvals[1:]
+
+    coef_df = pd.DataFrame({
+        "predictor": ["Intercept"] + names,
+        "coefficient": np.concatenate([[intercept], full_coef]),
+        "std_error":  np.concatenate([[bse[0]],     full_se]),
+        "p_value":    np.concatenate([[pvals[0]],   full_p])
+    })
+
+except Exception as e:
+    # Fallback: write sklearn coefficients with NaN SE/p-values if statsmodels fails (e.g., separation)
+    print(f"[WARN] statsmodels Logit failed ({e}); falling back to sklearn coeffs without p-values.")
+    intercept = model.intercept_[0]
+    coef_used = model.coef_.flatten()
+    full_coef = np.zeros(len(names), dtype=float)
+    full_coef[used_idx] = coef_used
+
+    coef_df = pd.DataFrame({
+        "predictor": ["Intercept"] + names,
+        "coefficient": np.concatenate([[intercept], full_coef]),
+        "std_error":  [np.nan] * (len(names) + 1),
+        "p_value":    [np.nan] * (len(names) + 1)
+    })
+
 coef_df.to_csv(coef_csv, index=False)
-print(f"📊 Coefficients saved to {coef_csv}")
+print(f"📊 Coefficients + p-values saved to {coef_csv}")
 
 # ──────────────────────────────────────────────────────────────
 # Suitability map (predict on full grid)
 # ──────────────────────────────────────────────────────────────
 pred_flat = np.full(flat.shape[0], np.nan, dtype=np.float32)
 pool_model = pool[:, used_idx]
-pool_s = _apply_standardize(pool_model).astype(np.float32)
+pool_s = ((pool_model - mu_final) / sd_final).astype(np.float32)  # same scaling as final model
 pred_flat[valid_mask] = model.predict_proba(pool_s)[:, 1].astype(np.float32)
 pred_map = pred_flat.reshape((height, width))
 
