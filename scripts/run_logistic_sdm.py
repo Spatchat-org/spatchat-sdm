@@ -206,9 +206,21 @@ bg_indices = np.random.choice(pool_len, size=n_bg, replace=False)  # OK if n_bg 
 background_samples = pool[bg_indices].astype(np.float32)
 print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
-# Always write a valid (possibly empty) absence CSV so UI never crashes
-pd.DataFrame({"latitude": [], "longitude": []}).to_csv(absences_csv, index=False)
-print(f"🗺️ Absence coordinates (overlay) skipped — wrote empty file at {absences_csv}")
+# Convert chosen background linear indices → row/col → lon/lat and save for map overlay
+if len(bg_indices) > 0:
+    bg_linear = valid_idx[bg_indices].astype(np.int64)
+    bg_rows   = (bg_linear // width).astype(np.int64)
+    bg_cols   = (bg_linear %  width).astype(np.int64)
+
+    # rasterio.transform.xy returns (x=lon, y=lat)
+    bg_lons, bg_lats = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset='center')
+    bg_lats = np.asarray(bg_lats, dtype=float)
+    bg_lons = np.asarray(bg_lons, dtype=float)
+    pd.DataFrame({"latitude": bg_lats, "longitude": bg_lons}).to_csv(absences_csv, index=False)
+    print(f"🗺️ Absence coordinates saved to {absences_csv} ({len(bg_lats)} points)")
+else:
+    pd.DataFrame({"latitude": [], "longitude": []}).to_csv(absences_csv, index=False)
+    print(f"🗺️ No background points sampled; wrote empty {absences_csv}")
 
 # --- Prepare data (combined presence + background) ---
 print("[STEP] build-train-table")
