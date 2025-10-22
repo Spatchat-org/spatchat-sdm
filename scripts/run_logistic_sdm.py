@@ -1,6 +1,6 @@
 # scripts/run_logistic_sdm.py
 # Logistic SDM with spatial-block CV (k-fold fallback), robust handling of binary landcover,
-# and proper export of background coordinates into the sample CSVs.
+# presence-row imputation from pool means, and export of background coordinates.
 
 import os
 import re
@@ -42,7 +42,7 @@ np.random.seed(42)
 # ──────────────────────────────────────────────────────────────
 def _is_categorical(name: str) -> bool:
     """
-    Heuristic: MODIS one-hot layers look like '5_mixed_forest', or include 'landcover' or 'onehot'.
+    Heuristic: MODIS one-hot layers look like '5_mixed_forest', or include 'landcover'/'onehot'.
     """
     n = name.lower()
     return bool(re.match(r"^\d+_", n) or "landcover" in n or "onehot" in n)
@@ -50,8 +50,8 @@ def _is_categorical(name: str) -> bool:
 def _compute_metrics_from_probs(y_true, p, thr):
     yhat = (p >= thr).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, yhat, labels=[0, 1]).ravel()
-    sens = tp / (tp + fn) if (tp + fn) else 0.0
-    spec = tn / (tn + fp) if (tn + fp) else 0.0
+    sens = tp/(tp+fn) if (tp+fn) else 0.0
+    spec = tn/(tn+fp) if (tn+fp) else 0.0
     tss  = sens + spec - 1
     kapp = cohen_kappa_score(y_true, yhat)
     auc  = roc_auc_score(y_true, p)
@@ -82,17 +82,15 @@ def _cv_summary_frame(n_folds, method, note, aucs, tsses, kappas, thrs, sens, sp
 
 def _zscore_train_test(X_tr, X_te, is_cat_kept):
     """
-    Fit scaling on TRAIN; continuous -> z-score; categorical (binary) -> center-only (std=1).
-    Also guards tiny variance for continuous.
+    Fit scaling on TRAIN:
+      - continuous -> z-score (mu, sd)
+      - categorical (binary) -> center-only (sd=1)
+      - guard tiny variance for continuous (sd<EPS -> 1)
     """
     mu = np.nanmean(X_tr, axis=0)
     sd = np.nanstd(X_tr, axis=0)
-
-    # center-only for categorical
-    sd = np.where(is_cat_kept, 1.0, sd)
-    # tiny var guard for continuous
-    sd = np.where(sd < EPS, 1.0, sd)
-
+    sd = np.where(is_cat_kept, 1.0, sd)          # center-only for binary
+    sd = np.where(sd < EPS, 1.0, sd)             # guard
     return (X_tr - mu) / sd, (X_te - mu) / sd, mu, sd
 
 # ──────────────────────────────────────────────────────────────
@@ -151,7 +149,7 @@ stack = np.stack(layers, axis=-1)
 print(f"🗺️ Stacked predictor shape: {stack.shape}")
 
 # ──────────────────────────────────────────────────────────────
-# Extract presence samples
+# Extract presence samples (allow NaNs; we'll impute later)
 # ──────────────────────────────────────────────────────────────
 presence_samples = []
 kept_coords = []
@@ -161,17 +159,18 @@ for lat, lon in zip(lats, lons):
     except Exception:
         continue
     if 0 <= r < height and 0 <= c < width:
-        vals = stack[r, c, :]
-        if not np.any(np.isnan(vals)):
-            presence_samples.append(vals)
-            kept_coords.append((lat, lon))
+        vals = stack[r, c, :].astype(np.float32, copy=False)
+        presence_samples.append(vals)
+        kept_coords.append((lat, lon))
 
 presence_samples = np.array(presence_samples, dtype=np.float32)
 kept_coords = np.array(kept_coords, dtype=np.float32) if len(kept_coords) else np.empty((0, 2), dtype=np.float32)
-print(f"📍 Presence samples kept: {presence_samples.shape[0]}")
+print(f"📍 Presence samples extracted (may include NaNs): {presence_samples.shape[0]}")
+if presence_samples.shape[0] == 0:
+    raise RuntimeError("No presence points fell inside the raster extent. Check overlap and predictor coverage.")
 
 # ──────────────────────────────────────────────────────────────
-# Background pool & sampling
+# Background pool (valid pixels only) & sampling
 # ──────────────────────────────────────────────────────────────
 flat       = stack.reshape(-1, stack.shape[-1]).astype(np.float32)
 valid_mask = ~np.any(np.isnan(flat), axis=1)
@@ -179,9 +178,18 @@ valid_idx  = np.flatnonzero(valid_mask)
 pool       = flat[valid_mask]
 pool_len   = len(pool)
 print(f"✅ Valid pixel pool: {pool_len}")
+if pool_len == 0:
+    raise RuntimeError("No valid pixels in predictor stack. Check predictor coverage/NaNs.")
 
-if presence_samples.shape[0] == 0:
-    raise RuntimeError("No presence points fell on pixels where all predictors are valid. Check overlap and predictor coverage.")
+# Impute missing predictor values at presence rows using pool column means
+col_means = np.nanmean(pool, axis=0)
+col_means = np.where(np.isfinite(col_means), col_means, 0.0)
+nan_mask_pres = ~np.isfinite(presence_samples)
+if np.any(nan_mask_pres):
+    # indices of cols per-row where NaN occurs
+    row_idx, col_idx = np.nonzero(nan_mask_pres)
+    presence_samples[row_idx, col_idx] = col_means[col_idx]
+    print(f"🧽 Imputed NaNs in presence rows with pool means (cols affected: {int(nan_mask_pres.any(axis=0).sum())})")
 
 # choose background count and sample
 n_bg = min(max(5 * presence_samples.shape[0], 1), pool_len)
@@ -189,19 +197,13 @@ bg_indices = np.random.choice(pool_len, size=n_bg, replace=False)
 background_samples = pool[bg_indices].astype(np.float32)
 
 # background locations for exports/map
-if len(bg_indices) > 0:
-    bg_linear = valid_idx[bg_indices].astype(np.int64)
-    bg_rows   = (bg_linear // width).astype(np.int64)
-    bg_cols   = (bg_linear %  width).astype(np.int64)
-    # rasterio.transform.xy returns (x=lon, y=lat)
-    bg_lons, bg_lats = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset="center")
-    bg_lats = np.asarray(bg_lats, dtype=float)
-    bg_lons = np.asarray(bg_lons, dtype=float)
-else:
-    bg_lats = np.array([], dtype=float)
-    bg_lons = np.array([], dtype=float)
-
-# Map overlay CSV (optional)
+bg_linear = valid_idx[bg_indices].astype(np.int64)
+bg_rows   = (bg_linear // width).astype(np.int64)
+bg_cols   = (bg_linear %  width).astype(np.int64)
+# rasterio.transform.xy returns (x=lon, y=lat)
+bg_lons, bg_lats = rasterio.transform.xy(ref_transform, bg_rows, bg_cols, offset="center")
+bg_lats = np.asarray(bg_lats, dtype=float)
+bg_lons = np.asarray(bg_lons, dtype=float)
 pd.DataFrame({"latitude": bg_lats, "longitude": bg_lons}).to_csv(absences_csv, index=False)
 print(f"🗺️ Absence coordinates saved to {absences_csv} ({len(bg_lats)} points)")
 
@@ -237,7 +239,7 @@ for j, n in enumerate(names):
         elif (maxv <= 0.0 + EPS) and (minv >= 0.0 - EPS):
             keep_mask[j] = False
             drop_reasons.append((n, "categorical: all 0 in training rows (class absent in AOI samples)", 0.0))
-        # else: informative → keep
+        # else informative → keep
     else:
         if col_std[j] <= EPS:
             keep_mask[j] = False
@@ -266,8 +268,8 @@ presence_df_raw.insert(1, "longitude", pres_lons[:len(presence_df_raw)])
 presence_df_raw.insert(2, "label", 1)
 
 absence_df_raw = pd.DataFrame(background_samples, columns=names)
-absence_df_raw.insert(0, "latitude",  bg_lats[:len(absence_df_raw)] if len(bg_lats) else np.array([], dtype=float))
-absence_df_raw.insert(1, "longitude", bg_lons[:len(absence_df_raw)] if len(bg_lons) else np.array([], dtype=float))
+absence_df_raw.insert(0, "latitude",  bg_lats[:len(absence_df_raw)])
+absence_df_raw.insert(1, "longitude", bg_lons[:len(absence_df_raw)])
 absence_df_raw.insert(2, "label", 0)
 
 samples_df_raw = pd.concat([presence_df_raw, absence_df_raw], ignore_index=True)
@@ -310,12 +312,12 @@ def _run_repeated_kfold_fallback():
 
     aucs = []; tsses = []; kappas = []; thrs = []; sensv = []; specv = []
 
-    for fold_i, (tr_idx, te_idx) in enumerate(rskf.split(presence_samples, np.ones(Np, dtype=int)), start=1):
-        Xp_tr, Xp_te = presence_samples[tr_idx], presence_samples[te_idx]
+    for fold_i, (tr_i, te_i) in enumerate(rskf.split(presence_samples, np.ones(Np, dtype=int)), start=1):
+        Xp_tr, Xp_te = presence_samples[tr_i], presence_samples[te_i]
 
         rng = np.random.default_rng(1000 + fold_i)
-        n_bt_tr = min(5 * len(tr_idx), pool_len)
-        n_bt_te = min(5 * len(te_idx),  pool_len)
+        n_bt_tr = min(5 * len(tr_i), pool_len)
+        n_bt_te = min(5 * len(te_i),  pool_len)
         bt_idx  = rng.choice(pool_len, size=n_bt_tr, replace=False)
         bt_idx2 = rng.choice(pool_len, size=n_bt_te, replace=False)
         Xb_tr, Xb_te = pool[bt_idx], pool[bt_idx2]
@@ -327,8 +329,7 @@ def _run_repeated_kfold_fallback():
         X_tr, y_tr = X_tr[mtr], y_tr[mtr]
         X_te, y_te = X_te[mte], y_te[mte]
 
-        X_tr_k = X_tr[:, used_idx]
-        X_te_k = X_te[:, used_idx]
+        X_tr_k = X_tr[:, used_idx]; X_te_k = X_te[:, used_idx]
         X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr_k, X_te_k, is_cat_kept)
 
         clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
@@ -359,20 +360,20 @@ if n_blocks >= 2:
         pool_blocks = kmeans.predict(np.column_stack([pool_lats_all, pool_lons_all]))
 
         gkf = GroupKFold(n_splits=n_blocks)
-        for tr_idx, te_idx in gkf.split(presence_samples, np.ones(len(presence_samples), dtype=int), groups=blocks):
-            Xp_tr, Xp_te = presence_samples[tr_idx], presence_samples[te_idx]
-            test_blocks = set(blocks[te_idx])
+        for tr_i, te_i in gkf.split(presence_samples, np.ones(len(presence_samples), dtype=int), groups=blocks):
+            Xp_tr, Xp_te = presence_samples[tr_i], presence_samples[te_i]
+            test_blocks = set(blocks[te_i])
             train_blocks = [b for b in range(n_blocks) if b not in test_blocks]
 
             mask_tr_pool = np.isin(pool_blocks, train_blocks)
             mask_te_pool = np.isin(pool_blocks, list(test_blocks))
 
-            n_bt  = min(5 * len(tr_idx), int(mask_tr_pool.sum()))
-            n_bt2 = min(5 * len(te_idx),  int(mask_te_pool.sum()))
+            n_bt  = min(5 * len(tr_i), int(mask_tr_pool.sum()))
+            n_bt2 = min(5 * len(te_i),  int(mask_te_pool.sum()))
 
             if n_bt < 1 or n_bt2 < 1:
-                bt_idx  = np.random.choice(pool_len, size=max(1, 5 * len(tr_idx)), replace=False)
-                bt_idx2 = np.random.choice(pool_len, size=max(1, 5 * len(te_idx)),  replace=False)
+                bt_idx  = np.random.choice(pool_len, size=max(1, 5 * len(tr_i)), replace=False)
+                bt_idx2 = np.random.choice(pool_len, size=max(1, 5 * len(te_i)),  replace=False)
             else:
                 tr_inds = np.flatnonzero(mask_tr_pool)
                 te_inds = np.flatnonzero(mask_te_pool)
@@ -388,8 +389,7 @@ if n_blocks >= 2:
             X_tr, y_tr = X_tr[mtr], y_tr[mtr]
             X_te, y_te = X_te[mte], y_te[mte]
 
-            X_tr_k = X_tr[:, used_idx]
-            X_te_k = X_te[:, used_idx]
+            X_tr_k = X_tr[:, used_idx]; X_te_k = X_te[:, used_idx]
             X_tr_s, X_te_s, _, _ = _zscore_train_test(X_tr_k, X_te_k, is_cat_kept)
 
             clf = LogisticRegression(max_iter=1000, class_weight="balanced").fit(X_tr_s, y_tr)
@@ -483,8 +483,8 @@ presence_df_std.insert(1, "longitude", pres_lons[:len(presence_df_std)])
 presence_df_std.insert(2, "label", 1)
 
 absence_df_std = pd.DataFrame(absence_std, columns=names)
-absence_df_std.insert(0, "latitude",  bg_lats[:len(absence_df_std)] if len(bg_lats) else np.array([], dtype=float))
-absence_df_std.insert(1, "longitude", bg_lons[:len(absence_df_std)] if len(bg_lons) else np.array([], dtype=float))
+absence_df_std.insert(0, "latitude",  bg_lats[:len(absence_df_std)])
+absence_df_std.insert(1, "longitude", bg_lons[:len(absence_df_std)])
 absence_df_std.insert(2, "label", 0)
 
 samples_df_std = pd.concat([presence_df_std, absence_df_std], ignore_index=True)
