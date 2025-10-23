@@ -52,7 +52,12 @@ os.makedirs(out_dir, exist_ok=True)
 def _is_categorical_name(name: str) -> bool:
     n = name.lower()
     # Treat MODIS class one-hots like "5_mixed_forest" as categorical.
-    return ("landcover" in n) or n.endswith("_onehot") or ("_mixed_forest" in n) or n.split("_", 1)[0].isdigit()
+    return (
+        ("landcover" in n)
+        or n.endswith("_onehot")
+        or ("_mixed_forest" in n)
+        or n.split("_", 1)[0].isdigit()
+    )
 
 def _read_stack_align(raster_paths, ref_profile=None):
     """Read rasters, reproject/align to the reference grid, return stack [H,W,C], names, and profile of ref."""
@@ -85,18 +90,32 @@ def _read_stack_align(raster_paths, ref_profile=None):
 
     for p in raster_paths:
         nm = os.path.splitext(os.path.basename(p))[0]
-        with rasterio.open(p) as src:
+        is_cat = _is_categorical_name(nm)
+
+        # For categorical layers, fill with 0 and use dst_nodata=0
+        # For numeric layers, fill with NaN and use dst_nodata=NaN
+        if is_cat:
+            dst = np.zeros((height, width), dtype=np.float32)
+            resamp = WarpResampling.nearest
+            dst_nodata = 0.0
+        else:
             dst = np.full((height, width), np.nan, dtype=np.float32)
-            resamp = WarpResampling.nearest if _is_categorical_name(nm) else WarpResampling.bilinear
+            resamp = WarpResampling.bilinear
+            dst_nodata = np.nan
+
+        with rasterio.open(p) as src:
             reproject(
                 source=rasterio.band(src, 1),
                 destination=dst,
                 src_transform=src.transform, src_crs=src.crs,
                 dst_transform=ref_transform, dst_crs=ref_crs,
-                resampling=resamp, dst_nodata=np.nan,
+                resampling=resamp, dst_nodata=dst_nodata,
             )
+
+        # For logging: % NaN after reprojection (should be ~0 for categoricals now)
         nan_pct = float(np.isnan(dst).mean() * 100.0)
-        print(f"🧪 {nm}.tif → NaN%: {nan_pct:.2f}")
+        print(f"🧪 {nm}.tif → NaN%: {nan_pct:.2f}  ({'categorical' if is_cat else 'numeric'})")
+
         names.append(nm)
         aligned.append(dst)
 
