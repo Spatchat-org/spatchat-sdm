@@ -525,28 +525,45 @@ pval_full = np.full(C, np.nan, dtype=float)
 
 if HAVE_SM:
     try:
+        # Refit using statsmodels for p-values
         X_sm = Xc_used.copy()
         X_sm = sm.add_constant(X_sm, has_constant='add')
         logit = sm.Logit(yc, X_sm)
         res = logit.fit(disp=False, maxiter=200)
-        params = res.params  # [const, used...]
+
+        # Extract parameters
+        params = res.params
         bse = res.bse
         pvals = res.pvalues
-        intercept = float(params[0])
-        coef_used = params[1:].astype(float)
 
-        # Map back to full length
-        coef_full[:] = 0.0
-        coef_full[used_idx] = coef_used
-        # Std errors / pvals per used column
+        intercept = float(params[0])
+        coef_used = params[1:]  # same order as used_idx
+
+        # Map back correctly
         for k, j in enumerate(used_idx):
+            coef_full[j] = float(coef_used[k])
             std_err_full[j] = float(bse[1 + k])
-            pval_full[j]    = float(pvals[1 + k])
+            pval_full[j] = float(pvals[1 + k])
+
+        print("📊 p-values successfully computed with statsmodels.")
     except Exception as e:
         print(f"[pval] statsmodels failed: {e}", file=sys.stderr)
-        # keep defaults: NaNs for se/p, sklearn coefficients already set
 else:
     print("[pval] statsmodels not available; std_error and p_value will be NaN.", file=sys.stderr)
+
+# Build coefficient table
+coef_rows = [("Intercept", float(intercept), np.nan, np.nan)]
+for j, name in enumerate(names):
+    coef_rows.append((
+        name,
+        float(coef_full[j]),
+        float(std_err_full[j]) if np.isfinite(std_err_full[j]) else np.nan,
+        float(pval_full[j]) if np.isfinite(pval_full[j]) else np.nan
+    ))
+coef_df = pd.DataFrame(coef_rows, columns=["predictor", "coefficient", "std_error", "p_value"])
+coef_df.to_csv(coef_csv, index=False)
+print(f"📊 Coefficients saved to {coef_csv}")
+
 
 # Build coefficient table
 coef_rows = [("Intercept", float(intercept), np.nan, np.nan)]
