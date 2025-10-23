@@ -1,8 +1,3 @@
-# scripts/run_logistic_sdm.py
-# Logistic SDM: numeric standardization only, categorical 0/1, random spatial backgrounds.
-# Spatial-block CV with repeated K-fold fallback. Robust dropping of uninformative predictors.
-# Exports raw & standardized samples (with coords), coefficients with p-values, and suitability map.
-
 import os
 import sys
 import numpy as np
@@ -512,70 +507,67 @@ fitted_df.to_csv(perf_fit_csv, index=False)
 fitted_df.to_csv(compat_perf, index=False)
 print(f"📊 Fitted metrics saved to {perf_fit_csv} and {compat_perf}")
 
-# ---------------- Coefficients + p-values (from Fisher information) ----------------
-import math
+# ---------------- Coefficients + p-values (statsmodels) ----------------
+coef_used = model.coef_.reshape(1, -1)[0]
+intercept = model.intercept_[0]
 
-# Coefficients from the fitted sklearn model on standardized, kept columns
-intercept = float(model.intercept_[0])
-coef_used = model.coef_.reshape(-1)[0]  # shape: (n_kept,)
-
-# Map used coefs back to full feature list (dropped predictors stay 0)
-C = len(names)
 coef_full = np.zeros(C, dtype=float)
 coef_full[used_idx] = coef_used
 
-# Build design matrix for variance estimation: Xs already standardized & filtered
-#   Xc_s: (n_samples, n_kept)   — created earlier right before fitting
-X_design = np.column_stack([np.ones((Xc_s.shape[0], 1), dtype=float), Xc_s])
-
-# Predicted probabilities on training data (for W)
-p_tr = model.predict_proba(Xc_s)[:, 1]
-# Guard against 0/1 extremes to keep W invertible
-p_tr = np.clip(p_tr, 1e-6, 1 - 1e-6)
-W = p_tr * (1 - p_tr)  # (n,)
-
-# Compute observed Fisher information and covariance
-XTWX = X_design.T @ (W[:, None] * X_design)
-try:
-    cov = np.linalg.inv(XTWX)
-except np.linalg.LinAlgError:
-    cov = np.linalg.pinv(XTWX)
-
-se_params = np.sqrt(np.diag(cov))  # std errors for [intercept, used columns]
-
-# Z-scores & p-values (two-sided, normal approximation)
-beta_params = np.concatenate([[intercept], coef_used])
-z_scores = beta_params / np.where(se_params > 0, se_params, np.nan)
-
-def _norm_cdf(x: np.ndarray) -> np.ndarray:
-    # vectorized standard normal CDF using erf
-    return 0.5 * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
-
-p_params = 2.0 * (1.0 - _norm_cdf(np.abs(z_scores)))
-
-# Map std errors and p-values back to full feature list (dropped → NaN)
+# Statsmodels p-values
 std_err_full = np.full(C, np.nan, dtype=float)
-pval_full    = np.full(C, np.nan, dtype=float)
-for k, j in enumerate(used_idx):
-    std_err_full[j] = float(se_params[1 + k])
-    pval_full[j]    = float(p_params[1 + k])
+pval_full = np.full(C, np.nan, dtype=float)
 
-intercept_se = float(se_params[0])
-intercept_p  = float(p_params[0])
+if HAVE_SM:
+    try:
+        # Refit using statsmodels for p-values
+        X_sm = Xc_used.copy()
+        X_sm = sm.add_constant(X_sm, has_constant='add')
+        logit = sm.Logit(yc, X_sm)
+        res = logit.fit(disp=False, maxiter=200)
 
-# ---------------- Write coefficient table (always include std_error & p_value) -----
-coef_rows = [("Intercept", intercept, intercept_se, intercept_p)]
+        # Extract parameters
+        params = res.params
+        bse = res.bse
+        pvals = res.pvalues
+
+        intercept = float(params[0])
+        coef_used = params[1:]  # same order as used_idx
+
+        # Map back correctly
+        for k, j in enumerate(used_idx):
+            coef_full[j] = float(coef_used[k])
+            std_err_full[j] = float(bse[1 + k])
+            pval_full[j] = float(pvals[1 + k])
+
+        print("📊 p-values successfully computed with statsmodels.")
+    except Exception as e:
+        print(f"[pval] statsmodels failed: {e}", file=sys.stderr)
+else:
+    print("[pval] statsmodels not available; std_error and p_value will be NaN.", file=sys.stderr)
+
+# Build coefficient table
+coef_rows = [("Intercept", float(intercept), np.nan, np.nan)]
 for j, name in enumerate(names):
     coef_rows.append((
         name,
         float(coef_full[j]),
         float(std_err_full[j]) if np.isfinite(std_err_full[j]) else np.nan,
-        float(pval_full[j])    if np.isfinite(pval_full[j])    else np.nan
+        float(pval_full[j]) if np.isfinite(pval_full[j]) else np.nan
     ))
-
 coef_df = pd.DataFrame(coef_rows, columns=["predictor", "coefficient", "std_error", "p_value"])
 coef_df.to_csv(coef_csv, index=False)
-print(f"📊 Coefficients (with p-values) saved to {coef_csv}")
+print(f"📊 Coefficients saved to {coef_csv}")
+
+
+# Build coefficient table
+coef_rows = [("Intercept", float(intercept), np.nan, np.nan)]
+for j, name in enumerate(names):
+    coef_rows.append((name, float(coef_full[j]), float(std_err_full[j]) if not np.isnan(std_err_full[j]) else np.nan,
+                      float(pval_full[j]) if not np.isnan(pval_full[j]) else np.nan))
+coef_df = pd.DataFrame(coef_rows, columns=["predictor", "coefficient", "std_error", "p_value"])
+coef_df.to_csv(cof_csv := coef_csv, index=False)
+print(f"📊 Coefficients saved to {cof_csv}")
 
 # ---------------- Export standardization stats ----------------
 # For numeric used columns → scaler stats; for numeric dropped or categorical → NaN stats
