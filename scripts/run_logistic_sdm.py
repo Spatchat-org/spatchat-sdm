@@ -42,7 +42,7 @@ scaler_pkl   = os.path.join(out_dir, "standard_scaler.pkl")
 stats_csv    = os.path.join(out_dir, "standardization_stats.csv")
 raw_csv      = os.path.join(out_dir, "sdm_point_samples_raw.csv")
 std_csv      = os.path.join(out_dir, "sdm_point_samples_standardized.csv")
-abs_csv      = os.path.join(out_dir, "absence_points_coordinates.csv")  # will be redundant but still written
+abs_csv      = os.path.join(out_dir, "absence_points_coordinates.csv")  # legacy / optional
 output_map   = os.path.join(out_dir, "suitability_map_wgs84.tif")
 std_ras_dir  = os.path.join(out_dir, "standardized_rasters_wgs84")
 
@@ -104,10 +104,15 @@ def _read_stack_align(raster_paths, ref_profile=None):
     return stack, names, profile
 
 def _lin_to_coords(lin_idx, width, transform):
-    rows = lin_idx // width
-    cols = lin_idx % width
+    """Convert linear indices → (lon, lat) arrays. Safe for empty input."""
+    arr = np.asarray(lin_idx).reshape(-1)
+    if arr.size == 0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    rows = (arr // width).astype(int)
+    cols = (arr %  width).astype(int)
     xs, ys = rasterio.transform.xy(transform, rows, cols, offset="center")
-    return np.array(xs), np.array(ys)  # lon, lat in WGS84
+    # rasterio returns lists; coerce to float arrays
+    return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
 
 def _compute_metrics_from_probs(y_true, p, thr):
     yhat = (p >= thr).astype(int)
@@ -178,13 +183,19 @@ presence_samples = np.array(presence_samples, dtype=np.float32)
 kept_coords = np.array(kept_coords, dtype=np.float32) if len(kept_coords) else np.empty((0, 2), dtype=np.float32)
 print(f"📍 Presence samples: {presence_samples.shape}")
 
+if presence_samples.shape[0] == 0:
+    raise RuntimeError("No presence points fell on pixels where all predictors are valid. Check coverage or extent.")
+
 # ---------------- Background pool & random sampling ----------------
 flat       = stack.reshape(-1, C).astype(np.float32)
 valid_mask = ~np.any(np.isnan(flat), axis=1)
 valid_idx  = np.flatnonzero(valid_mask)
 pool       = flat[valid_mask]
-pool_len   = len(pool)
+pool_len   = int(pool.shape[0])
 print(f"✅ Valid pixel pool: {pool_len}")
+
+if pool_len == 0:
+    raise RuntimeError("No valid pixels across predictors (all-NaN after alignment). Check rasters/AOI.")
 
 # Purely random backgrounds (uniform on valid pixels)
 np.random.seed(42)
@@ -195,7 +206,7 @@ print(f"🌎 Background samples (for tables): {background_samples.shape}")
 
 # Convert chosen background pool indices back to global linear → coords
 bg_linear = valid_idx[bg_indices]
-bg_lons, bg_lats = _lin_to_coords(bg_linear, W, profile["transform"])
+bg_lons, bg_lats = _lin_to_coords(bg_linear, W, profile["transform"])  # lon, lat
 
 # ---------------- Prepare X/y ----------------
 X = np.vstack([presence_samples, background_samples])
@@ -248,8 +259,6 @@ if not np.any(keep_mask):
 used_idx = np.flatnonzero(keep_mask)
 names_used = [names[j] for j in used_idx]
 is_cat_used = is_cat[used_idx]
-num_used = [j for j, k in zip(used_idx, ~is_cat[used_idx]) if k]
-cat_used = [j for j, k in zip(used_idx,  is_cat[used_idx]) if k]
 
 print(f"✅ Using {len(names_used)} predictors: {', '.join(names_used)}")
 if dropped:
@@ -288,8 +297,6 @@ cv_thresholds, cv_sensitivities, cv_specificities = [], [], []
 
 # For assigning pool to blocks if spatial CV is possible
 if n_blocks >= 2:
-    pool_rows = valid_idx // W
-    pool_cols = valid_idx %  W
     pool_lons_all, pool_lats_all = _lin_to_coords(valid_idx, W, profile["transform"])
 
 def _run_kfold_fallback():
@@ -523,18 +530,20 @@ else:
     print("[pval] statsmodels not available; std_error and p_value will be NaN.", file=sys.stderr)
 
 # Build coefficient table
-coef_rows = [("Intercept", intercept, np.nan, np.nan)]
+coef_rows = [("Intercept", float(intercept), np.nan, np.nan)]
 for j, name in enumerate(names):
-    coef_rows.append((name, coef_full[j], std_err_full[j], pval_full[j]))
+    coef_rows.append((name, float(coef_full[j]), float(std_err_full[j]) if not np.isnan(std_err_full[j]) else np.nan,
+                      float(pval_full[j]) if not np.isnan(pval_full[j]) else np.nan))
 coef_df = pd.DataFrame(coef_rows, columns=["predictor", "coefficient", "std_error", "p_value"])
-coef_df.to_csv(coef_csv, index=False)
-print(f"📊 Coefficients saved to {coef_csv}")
+coef_df.to_csv(cof_csv := coef_csv, index=False)
+print(f"📊 Coefficients saved to {cof_csv}")
 
 # ---------------- Export standardization stats ----------------
-# For numeric used columns → scaler stats; for numeric dropped or categorical → fill markers
+# For numeric used columns → scaler stats; for numeric dropped or categorical → NaN stats
 mean_full = np.full(C, np.nan, dtype=float)
 std_full  = np.full(C, np.nan, dtype=float)
 if scaler:
+    # used_idx[~is_cat_used] selects the numeric-used columns in model order
     mean_full[used_idx[~is_cat_used]] = scaler.mean_.astype(float)
     std_full[used_idx[~is_cat_used]]  = scaler.scale_.astype(float)
 
@@ -555,7 +564,6 @@ def _standardize_rows_full(arr_full: np.ndarray) -> np.ndarray:
     out = arr_full.copy().astype(np.float32)
     if scaler:
         out[:, used_idx[~is_cat_used]] = scaler.transform(out[:, used_idx[~is_cat_used]])
-    # For dropped numeric columns: leave original raw; model ignored them. For cats: unchanged 0/1.
     return out
 
 presence_std = _standardize_rows_full(presence_samples)
