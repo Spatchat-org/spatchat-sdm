@@ -3076,7 +3076,6 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
         value="logo_long1.png",
         show_label=False,
         type="filepath",
-        buttons=[],
         elem_id="logo-img"
     )
     gr.HTML("""
@@ -3930,7 +3929,6 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
                 label="Spatchat",
                 show_label=False,
                 layout="bubble",
-                buttons=[],
                 elem_id="spatchat-chatbot",
             )
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
