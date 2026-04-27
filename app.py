@@ -4018,23 +4018,14 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
             try:
                 chat = gr.Chatbot(
                     value=_welcome_messages,
-                    type="messages",
                     **_chatbot_base_kwargs,
                 )
-                CHATBOT_HISTORY_MODE = "messages"
-            except TypeError:
-                try:
-                    chat = gr.Chatbot(
-                        value=_welcome_messages,
-                        **_chatbot_base_kwargs,
-                    )
-                    CHATBOT_HISTORY_MODE = "messages"
-                except Exception:
-                    chat = gr.Chatbot(
-                        value=_messages_to_legacy_chat(_welcome_messages),
-                        **_chatbot_base_kwargs,
-                    )
-                    CHATBOT_HISTORY_MODE = "tuples"
+            except Exception:
+                chat = gr.Chatbot(
+                    value=_messages_to_legacy_chat(_welcome_messages),
+                    **_chatbot_base_kwargs,
+                )
+                CHATBOT_HISTORY_MODE = "tuples"
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
             user_in = gr.Textbox(
                 label=None,
