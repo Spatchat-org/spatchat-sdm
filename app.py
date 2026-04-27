@@ -2766,6 +2766,35 @@ window.spatchatBeginResize = function(event) {
   return false;
 };
 
+window.spatchatInitSplitterHandle = function() {
+  const handles = document.querySelectorAll("#spatchat-splitter .spatchat-splitter-handle");
+  handles.forEach((handle) => {
+    if (handle.__spatchatBound) return;
+    const start = (event) => {
+      if (window.spatchatBeginResize) return window.spatchatBeginResize(event);
+      return false;
+    };
+    handle.addEventListener("mousedown", start);
+    handle.addEventListener("pointerdown", start);
+    handle.__spatchatBound = true;
+  });
+};
+
+window.addEventListener("DOMContentLoaded", () => {
+  if (window.spatchatInitSplitterHandle) window.spatchatInitSplitterHandle();
+});
+window.addEventListener("load", () => {
+  if (window.spatchatInitSplitterHandle) window.spatchatInitSplitterHandle();
+});
+{
+  let splitterInitAttempts = 0;
+  const splitterInitTimer = window.setInterval(() => {
+    if (window.spatchatInitSplitterHandle) window.spatchatInitSplitterHandle();
+    splitterInitAttempts += 1;
+    if (splitterInitAttempts >= 20) window.clearInterval(splitterInitTimer);
+  }, 500);
+}
+
 window.spatchatValuesViewer = (() => {
   const selector = ".spatchat-values-root[data-payload]";
   const layerId = "spatchat-feature-viewer";
@@ -3986,7 +4015,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
                 elem_id="spatchat-feature-viewer",
             )
         with gr.Column(scale=0, min_width=14, elem_id="spatchat-splitter"):
-            gr.HTML("<div class='spatchat-splitter-handle' onmousedown='return window.spatchatBeginResize ? window.spatchatBeginResize(event) : false;' title='Drag to resize panels'></div>")
+            gr.HTML("<div class='spatchat-splitter-handle' title='Drag to resize panels'></div>")
         with gr.Column(scale=5, min_width=0, elem_id="spatchat-mapcol"):
             map_out = gr.HTML(create_map(), label="Map Preview", show_label=False, elem_id="spatchat-map")
 
