@@ -3,6 +3,7 @@
 import os
 import io
 import json
+import ast
 import base64
 import shutil
 import subprocess
@@ -382,6 +383,37 @@ def _choice_content(choice):
     if content is None:
         content = ""
     return content
+
+def _coerce_message_text(content):
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        text = content.strip()
+        # Recover from accidentally stringified content blocks, e.g. "[{'text': 'hi', 'type': 'text'}]".
+        if text and text[0] in "[{(":
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, (list, dict, tuple)):
+                    return _coerce_message_text(parsed)
+            except Exception:
+                pass
+        return content
+    if isinstance(content, dict):
+        if "text" in content:
+            return _coerce_message_text(content.get("text"))
+        if "content" in content:
+            return _coerce_message_text(content.get("content"))
+        if content.get("type") == "text":
+            return _coerce_message_text(content.get("text", ""))
+        return ""
+    if isinstance(content, (list, tuple)):
+        parts = []
+        for part in content:
+            piece = _coerce_message_text(part)
+            if piece:
+                parts.append(piece)
+        return "".join(parts)
+    return str(content)
 
 def _delta_text(delta):
     if isinstance(delta, dict):
@@ -2208,14 +2240,14 @@ def _history_to_messages(history):
         if isinstance(item, dict):
             role = str(item.get("role", "")).strip().lower()
             if role in {"user", "assistant"}:
-                out.append({"role": role, "content": str(item.get("content", "") or "")})
+                out.append({"role": role, "content": _coerce_message_text(item.get("content", ""))})
             continue
         if isinstance(item, (list, tuple)) and len(item) == 2:
             user_msg, assistant_msg = item
             if user_msg not in (None, ""):
-                out.append({"role": "user", "content": str(user_msg)})
+                out.append({"role": "user", "content": _coerce_message_text(user_msg)})
             if assistant_msg not in (None, ""):
-                out.append({"role": "assistant", "content": str(assistant_msg)})
+                out.append({"role": "assistant", "content": _coerce_message_text(assistant_msg)})
     return out
 
 
