@@ -3926,6 +3926,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
             chat = gr.Chatbot(
                 value=[{"role":"assistant","content":"Hello, I'm Spatchat, your SDM assistant. I can help you build a species distribution model from presence, presence-absence, or movement CSV data and environmental predictors. Upload a CSV to begin."}],
+                type="messages",
                 label="Spatchat",
                 show_label=False,
                 layout="bubble",
