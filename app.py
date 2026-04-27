@@ -2169,37 +2169,7 @@ def _typing_frames(text: str, min_step: int = 5, max_step: int = 22):
         yield msg[:idx]
 
 
-def _chatbot_capabilities():
-    """
-    Returns (supports_type_kwarg: bool, history_mode: str)
-    where history_mode is either "messages" or "tuples".
-    """
-    sample_messages = [{"role": "assistant", "content": "ok"}]
-    sample_tuples = [("hello", "ok")]
-
-    # Best case: explicit messages mode is supported.
-    try:
-        gr.Chatbot(value=sample_messages, type="messages", visible=False)
-        return True, "messages"
-    except Exception:
-        pass
-
-    # No type kwarg (or unusable); detect what default postprocess expects.
-    try:
-        gr.Chatbot(value=sample_messages, visible=False)
-        return False, "messages"
-    except Exception:
-        pass
-
-    try:
-        gr.Chatbot(value=sample_tuples, visible=False)
-        return False, "tuples"
-    except Exception:
-        # Conservative legacy fallback
-        return False, "tuples"
-
-
-CHATBOT_SUPPORTS_TYPE, CHATBOT_HISTORY_MODE = _chatbot_capabilities()
+CHATBOT_HISTORY_MODE = "messages"
 
 
 def _history_to_messages(history):
@@ -4038,16 +4008,33 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
     state = gr.State(_fresh_state())
     with gr.Row(elem_id="spatchat-workarea"):
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
-            _chatbot_kwargs = dict(
-                value=_history_for_chatbot([{"role": "assistant", "content": WELCOME_MESSAGE}]),
+            _chatbot_base_kwargs = dict(
                 label="Spatchat",
                 show_label=False,
                 layout="bubble",
                 elem_id="spatchat-chatbot",
             )
-            if CHATBOT_SUPPORTS_TYPE:
-                _chatbot_kwargs["type"] = "messages"
-            chat = gr.Chatbot(**_chatbot_kwargs)
+            _welcome_messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
+            try:
+                chat = gr.Chatbot(
+                    value=_welcome_messages,
+                    type="messages",
+                    **_chatbot_base_kwargs,
+                )
+                CHATBOT_HISTORY_MODE = "messages"
+            except TypeError:
+                try:
+                    chat = gr.Chatbot(
+                        value=_welcome_messages,
+                        **_chatbot_base_kwargs,
+                    )
+                    CHATBOT_HISTORY_MODE = "messages"
+                except Exception:
+                    chat = gr.Chatbot(
+                        value=_messages_to_legacy_chat(_welcome_messages),
+                        **_chatbot_base_kwargs,
+                    )
+                    CHATBOT_HISTORY_MODE = "tuples"
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
             user_in = gr.Textbox(
                 label=None,
