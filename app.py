@@ -26,6 +26,36 @@ import numpy as np
 import rasterio
 import ee
 
+
+def _install_asyncio_fd_warning_filter() -> None:
+    """
+    Suppress noisy Python 3.13 asyncio loop-destructor warnings:
+    ValueError: Invalid file descriptor: -1
+    This is an unraisable exception during GC, not a runtime app failure.
+    """
+    original_hook = getattr(sys, "unraisablehook", None)
+    if original_hook is None:
+        return
+
+    def _hook(unraisable):
+        try:
+            exc = getattr(unraisable, "exc_value", None)
+            obj = getattr(unraisable, "object", None)
+            if (
+                isinstance(exc, ValueError)
+                and "Invalid file descriptor: -1" in str(exc)
+                and "BaseEventLoop.__del__" in repr(obj)
+            ):
+                return
+        except Exception:
+            pass
+        original_hook(unraisable)
+
+    sys.unraisablehook = _hook
+
+
+_install_asyncio_fd_warning_filter()
+
 import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt, colormaps
