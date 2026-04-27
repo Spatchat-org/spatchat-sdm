@@ -1,0 +1,72 @@
+# Standalone reproducibility script for Spatchat logistic regression SDM
+#
+# Rename to logistic_regression_reproduce.py and run from this folder.
+# The script fits a transparent logistic model from feature_workspace.csv
+# using active predictors recorded in repro_config.json.
+#
+# USER ARGUMENTS:
+# - Adjust CV_MAX_SPLITS to change fallback cross-validation folds.
+
+import json
+import os
+
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "reproduced_outputs", "logistic_regression")
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+CV_MAX_SPLITS = 5
+
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    workspace_path = os.path.join(SCRIPT_DIR, "feature_workspace.csv")
+    if not os.path.exists(workspace_path):
+        raise FileNotFoundError("feature_workspace.csv is required.")
+
+    df = pd.read_csv(workspace_path)
+    predictors = [p for p in config.get("active_predictors", []) if p in df.columns]
+    if not predictors:
+        predictors = [c for c in df.columns if c not in {"point_id", "latitude", "longitude", "label"}]
+    if not predictors:
+        raise RuntimeError("No predictor columns found.")
+
+    y = pd.to_numeric(df.get("label", 1), errors="coerce").fillna(1).astype(int).to_numpy()
+    x = df[predictors].apply(pd.to_numeric, errors="coerce")
+    keep = np.isfinite(x.to_numpy(dtype=float)).all(axis=1) & np.isfinite(y)
+    x = x.loc[keep].to_numpy(dtype=float)
+    y = y[keep]
+
+    if len(np.unique(y)) < 2:
+        raise RuntimeError("Logistic regression needs both presence and absence/background labels in feature_workspace.csv.")
+
+    model = LogisticRegression(max_iter=2000, class_weight="balanced")
+    model.fit(x, y)
+    pred = model.predict_proba(x)[:, 1]
+    auc = roc_auc_score(y, pred)
+
+    cv_auc = np.nan
+    if min(np.bincount(y)) >= 2:
+        folds = min(CV_MAX_SPLITS, int(min(np.bincount(y))))
+        cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+        cv_auc = float(np.mean(cross_val_score(model, x, y, cv=cv, scoring="roc_auc")))
+
+    coef = pd.DataFrame({"predictor": predictors, "coefficient": model.coef_[0]})
+    coef.to_csv(os.path.join(OUTPUT_DIR, "coefficients_reproduced.csv"), index=False)
+    pd.DataFrame([{"training_auc": float(auc), "cv_auc_mean": cv_auc, "n": int(len(y))}]).to_csv(
+        os.path.join(OUTPUT_DIR, "metrics_reproduced.csv"),
+        index=False,
+    )
+    print(f"Reproduced logistic regression outputs in: {OUTPUT_DIR}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,50 @@
+# Standalone reproducibility script for Spatchat iSSA input audit
+#
+# Rename to issa_reproduce.py and run from this folder.
+# Full iSSA fitting depends on the exact movement-step generation settings;
+# this script exposes the copied movement fixes, active predictors, and any
+# iSSA output tables created by Spatchat for reviewer inspection.
+#
+# USER ARGUMENTS:
+# - Set MAX_ROWS for printed output table previews.
+
+import json
+import os
+
+import pandas as pd
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+MAX_ROWS = 20
+
+
+def main():
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    movement_path = os.path.join(SCRIPT_DIR, "movement_points.csv")
+    if not os.path.exists(movement_path):
+        raise FileNotFoundError("movement_points.csv was not included; iSSA requires movement data.")
+
+    movement = pd.read_csv(movement_path)
+    print("Movement rows:", len(movement))
+    print("Columns:", ", ".join(movement.columns))
+    print("Active predictors:", ", ".join(config.get("active_predictors", [])) or "none")
+
+    outputs_dir = os.path.join(SCRIPT_DIR, "outputs")
+    for name in (
+        "issa_summary.csv",
+        "issa_coefficients.csv",
+        "issa_projection_metrics.csv",
+        "issa_projection_coefficients.csv",
+    ):
+        path = os.path.join(outputs_dir, name)
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            print(f"\n{name}")
+            print(df.head(MAX_ROWS).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

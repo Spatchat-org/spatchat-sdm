@@ -1,0 +1,55 @@
+# Standalone reproducibility script for Spatchat SDM preprocessing
+#
+# Rename to preprocessing_reproduce.py and run from this folder.
+# It summarizes the copied point data, extracted predictor table,
+# multicollinearity diagnostics, and Moran's I diagnostics.
+#
+# USER ARGUMENTS:
+# - Set MAX_ROWS to control how many rows are printed from each output table.
+
+import json
+import os
+
+import pandas as pd
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "repro_config.json")
+MAX_ROWS = 20
+
+
+def read_csv_if_exists(name):
+    path = os.path.join(SCRIPT_DIR, name)
+    return pd.read_csv(path) if os.path.exists(path) else None
+
+
+def main():
+    config = {}
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+    print("Spatchat SDM preprocessing reproducibility summary")
+    print("Active predictors:", ", ".join(config.get("active_predictors", [])) or "none")
+
+    for name in ("presence_points.csv", "movement_points.csv", "absence_points_uploaded.csv", "feature_workspace.csv"):
+        df = read_csv_if_exists(name)
+        if df is not None:
+            print(f"{name}: {len(df)} rows, {len(df.columns)} columns")
+
+    outputs_dir = os.path.join(SCRIPT_DIR, "outputs")
+    for name in (
+        "multicollinearity_workspace_summary.csv",
+        "multicollinearity_workspace_correlation_matrix.csv",
+        "multicollinearity_workspace_prune_candidates.csv",
+        "spatial_independence_morans_i.csv",
+    ):
+        path = os.path.join(outputs_dir, name)
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            print(f"\n{name}")
+            print(df.head(MAX_ROWS).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
