@@ -1,0 +1,46 @@
+SpatChat SDM Pipeline: Methods Summary
+
+Data Ingestion & Coordinate Handling
+- Users upload a CSV of presence points.
+- Column names are auto‑detected (aliases, fuzzy match, numeric heuristics) and renamed to latitude/longitude.
+- All coordinates are reprojected to EPSG:4326 if needed.
+
+Predictor Selection & Fetching
+- Available layers:
+  • BIOCLIM variables bio1–bio19 (WorldClim V1 at 1 km)
+  • Elevation, Slope, Aspect (SRTM at 30 m)
+  • NDVI (MODIS MCD13Q1 mean 2022–2024 at 250 m)
+  • Landcover (MODIS MCD12Q1 LC_Type1 at 500 m, one‑hot–encoded subclasses)
+- Fetch workflow via Earth Engine:
+  1. Clip to study‐area bbox (points’ min/max ± 0.25°).
+  2. Export at native resolution in EPSG:4326.
+  3. Reproject & resample to a uniform 30 m lat/lon grid with rasterio.warp.reproject.
+
+Data Preparation & Sampling
+- Presence samples: extract pixel values at each presence point.
+- Background samples: randomly draw 5× as many background pixels from the valid grid.
+- Stack predictors into an (n_pixels×n_layers) array and build X, y matrices.
+
+Spatial Block Cross‑Validation
+- Cluster presence coordinates into n_blocks=5 via KMeans.
+- Use GroupKFold(n_splits=5, groups=blocks) to ensure each fold holds out one spatial block of presences.
+- For each fold:
+  • Sample background separately for training and test.
+  • Fit LogisticRegression(max_iter=1000).
+  • Compute AUC, threshold (max TSS), Sensitivity, Specificity, TSS, and Kappa.
+- Report mean ± std of AUC, TSS, Kappa across folds.
+
+Final Model Fit & Metrics
+- Retrain LogisticRegression on all cleaned data (Xc, yc).
+- Select threshold maximizing TSS.
+- Compute final AUC, TSS, Kappa and save to outputs/performance_metrics.csv.
+- Extract and save intercept + coefficients per predictor to outputs/coefficients.csv.
+
+Suitability Map Generation
+- Predict probabilities across the full grid.
+- Write GeoTIFF outputs/suitability_map_wgs84.tif.
+
+Interactive App & LLM Integration
+- Gradio routes commands (fetch, run_model, download, query) via JSON.
+- Custom Python handlers answer layer counts, point counts, map stats, and model stats.
+- All other questions go to the LLM, primed with this methods summary (and optionally your scripts) so it can answer implementation‑level queries accurately.
