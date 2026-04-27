@@ -1574,11 +1574,11 @@ def _copy_raster_to_wgs84(src_path: str, out_name: str) -> str:
 
 
 def on_raster_upload(files, history, state):
-    history2 = list(history or [])
+    history2 = _history_to_messages(history)
     state = _ensure_session_workspace(state)
     if not files:
         history2.append({"role": "assistant", "content": "No raster files were uploaded."})
-        return history2, create_map(state), state, gr.update(), gr.update(value=_render_feature_viewer_html(state))
+        return _history_for_chatbot(history2), create_map(state), state, gr.update(), gr.update(value=_render_feature_viewer_html(state))
 
     if not isinstance(files, list):
         files = [files]
@@ -1629,7 +1629,7 @@ def on_raster_upload(files, history, state):
         msg_parts.append("Skipped file(s):\n" + "\n".join(f"- {x}" for x in failed))
     msg_parts.append(ws_msg.strip())
     history2.append({"role": "assistant", "content": "\n\n".join(p for p in msg_parts if p)})
-    return history2, create_map(state), state, gr.update(), gr.update(value=_render_feature_viewer_html(state))
+    return _history_for_chatbot(history2), create_map(state), state, gr.update(), gr.update(value=_render_feature_viewer_html(state))
 
 
 def run_fetch(sl, lc, state=None):
@@ -2167,6 +2167,73 @@ def _typing_frames(text: str, min_step: int = 5, max_step: int = 22):
         step = max(min_step, min(max_step, 8 if msg[idx] == "\n" else 16))
         idx = min(n, idx + step)
         yield msg[:idx]
+
+
+def _chatbot_supports_type_kwarg() -> bool:
+    # Use a real constructor probe instead of signature inspection.
+    # Some Gradio builds wrap signatures in ways that report "type" but still reject it.
+    try:
+        _probe = gr.Chatbot(type="messages", visible=False)
+        _ = _probe
+        return True
+    except TypeError:
+        return False
+    except Exception:
+        # If probing fails for any other reason, stay conservative.
+        return False
+
+
+CHATBOT_SUPPORTS_TYPE = _chatbot_supports_type_kwarg()
+
+
+def _history_to_messages(history):
+    out = []
+    for item in list(history or []):
+        if isinstance(item, dict):
+            role = str(item.get("role", "")).strip().lower()
+            if role in {"user", "assistant"}:
+                out.append({"role": role, "content": str(item.get("content", "") or "")})
+            continue
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            user_msg, assistant_msg = item
+            if user_msg not in (None, ""):
+                out.append({"role": "user", "content": str(user_msg)})
+            if assistant_msg not in (None, ""):
+                out.append({"role": "assistant", "content": str(assistant_msg)})
+    return out
+
+
+def _messages_to_legacy_chat(messages):
+    rows = []
+    pending_user = None
+    for msg in list(messages or []):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "")).strip().lower()
+        content = str(msg.get("content", "") or "")
+        if role == "user":
+            if pending_user is not None:
+                rows.append((pending_user, None))
+            pending_user = content
+        elif role == "assistant":
+            rows.append((pending_user, content))
+            pending_user = None
+    if pending_user is not None:
+        rows.append((pending_user, None))
+    return rows
+
+
+def _history_for_chatbot(messages):
+    if CHATBOT_SUPPORTS_TYPE:
+        return list(messages or [])
+    return _messages_to_legacy_chat(messages)
+
+
+WELCOME_MESSAGE = (
+    "Hello, I'm Spatchat, your SDM assistant. I can help you build a species distribution model "
+    "from presence, presence-absence, or movement CSV data and environmental predictors. Upload a CSV to begin."
+)
+
 def chat_step(file, user_msg, history, state):
     state = _ensure_session_workspace(state)
 
@@ -2573,19 +2640,21 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
 
 
 def on_upload_with_viewer(f, history, state):
-    out = on_upload(f, history, state)
+    out = on_upload(f, _history_to_messages(history), state)
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
-    return (*out, gr.update(value=_render_feature_viewer_html(st)))
+    history_out = _history_for_chatbot(out[0])
+    return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)))
 
 
 def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state):
-    out = confirm_coords(lat_col, lon_col, crs_raw, history, state)
+    out = confirm_coords(lat_col, lon_col, crs_raw, _history_to_messages(history), state)
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
-    return (*out, gr.update(value=_render_feature_viewer_html(st)))
+    history_out = _history_for_chatbot(out[0])
+    return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)))
 
 
 def chat_step_with_viewer(file, user_msg, history, state):
-    base_history = list(history or [])
+    base_history = _history_to_messages(history)
     msg = str(user_msg or "").strip()
     status_label = "Thinking"
     try:
@@ -2601,7 +2670,7 @@ def chat_step_with_viewer(file, user_msg, history, state):
         visible_history.append({"role": "user", "content": msg})
     started_at = time.time()
     yield (
-        visible_history if msg else gr.skip(),
+        _history_for_chatbot(visible_history) if msg else gr.skip(),
         gr.skip(),
         gr.skip(),
         gr.skip(),
@@ -2640,7 +2709,7 @@ def chat_step_with_viewer(file, user_msg, history, state):
         err_history = list(visible_history if msg else base_history)
         err_history.append({"role": "assistant", "content": f"Sorry, that failed before I could finish: {box['error']}"})
         yield (
-            err_history,
+            _history_for_chatbot(err_history),
             create_map(state),
             state,
             gr.update(),
@@ -2653,7 +2722,7 @@ def chat_step_with_viewer(file, user_msg, history, state):
     if not isinstance(out, tuple) or len(out) < 4:
         st = state
         yield (
-            base_history,
+            _history_for_chatbot(base_history),
             create_map(st),
             st,
             gr.update(),
@@ -2673,12 +2742,12 @@ def chat_step_with_viewer(file, user_msg, history, state):
             break
 
     if assistant_index is None:
-        yield (next_history, map_out, st, dl_update, feature_update, _status_clear_update())
+        yield (_history_for_chatbot(next_history), map_out, st, dl_update, feature_update, _status_clear_update())
         return
 
     assistant_text = str(next_history[assistant_index].get("content", "") or "")
     if not assistant_text:
-        yield (next_history, map_out, st, dl_update, feature_update, _status_clear_update())
+        yield (_history_for_chatbot(next_history), map_out, st, dl_update, feature_update, _status_clear_update())
         return
 
     typing_history = [dict(m) for m in next_history]
@@ -2689,7 +2758,7 @@ def chat_step_with_viewer(file, user_msg, history, state):
     for frame in _typing_frames(assistant_text):
         typing_history[assistant_index]["content"] = frame + "▌"
         yield (
-            typing_history,
+            _history_for_chatbot(typing_history),
             map_out if not yielded_map else gr.skip(),
             st if not yielded_map else gr.skip(),
             dl_update if not yielded_download else gr.skip(),
@@ -2703,7 +2772,7 @@ def chat_step_with_viewer(file, user_msg, history, state):
 
     next_history[assistant_index]["content"] = assistant_text
     yield (
-        next_history,
+        _history_for_chatbot(next_history),
         map_out if not yielded_map else gr.skip(),
         st if not yielded_map else gr.skip(),
         dl_update if not yielded_download else gr.skip(),
@@ -3953,14 +4022,16 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
     state = gr.State(_fresh_state())
     with gr.Row(elem_id="spatchat-workarea"):
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
-            chat = gr.Chatbot(
-                value=[{"role":"assistant","content":"Hello, I'm Spatchat, your SDM assistant. I can help you build a species distribution model from presence, presence-absence, or movement CSV data and environmental predictors. Upload a CSV to begin."}],
-                type="messages",
+            _chatbot_kwargs = dict(
+                value=_history_for_chatbot([{"role": "assistant", "content": WELCOME_MESSAGE}]),
                 label="Spatchat",
                 show_label=False,
                 layout="bubble",
                 elem_id="spatchat-chatbot",
             )
+            if CHATBOT_SUPPORTS_TYPE:
+                _chatbot_kwargs["type"] = "messages"
+            chat = gr.Chatbot(**_chatbot_kwargs)
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
             user_in = gr.Textbox(
                 label=None,
@@ -4068,7 +4139,11 @@ def _launch_demo(blocks: gr.Blocks) -> None:
         params = {}
 
     available = params.keys() if hasattr(params, "keys") else []
-    if "head" not in available:
+    has_var_kwargs = any(
+        getattr(p, "kind", None) == inspect.Parameter.VAR_KEYWORD
+        for p in (params.values() if hasattr(params, "values") else [])
+    )
+    if "head" not in available and not has_var_kwargs:
         launch_kwargs.pop("head", None)
     if "ssr_mode" in available:
         launch_kwargs["ssr_mode"] = False
