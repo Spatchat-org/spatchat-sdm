@@ -2169,21 +2169,37 @@ def _typing_frames(text: str, min_step: int = 5, max_step: int = 22):
         yield msg[:idx]
 
 
-def _chatbot_supports_type_kwarg() -> bool:
-    # Use a real constructor probe instead of signature inspection.
-    # Some Gradio builds wrap signatures in ways that report "type" but still reject it.
+def _chatbot_capabilities():
+    """
+    Returns (supports_type_kwarg: bool, history_mode: str)
+    where history_mode is either "messages" or "tuples".
+    """
+    sample_messages = [{"role": "assistant", "content": "ok"}]
+    sample_tuples = [("hello", "ok")]
+
+    # Best case: explicit messages mode is supported.
     try:
-        _probe = gr.Chatbot(type="messages", visible=False)
-        _ = _probe
-        return True
-    except TypeError:
-        return False
+        gr.Chatbot(value=sample_messages, type="messages", visible=False)
+        return True, "messages"
     except Exception:
-        # If probing fails for any other reason, stay conservative.
-        return False
+        pass
+
+    # No type kwarg (or unusable); detect what default postprocess expects.
+    try:
+        gr.Chatbot(value=sample_messages, visible=False)
+        return False, "messages"
+    except Exception:
+        pass
+
+    try:
+        gr.Chatbot(value=sample_tuples, visible=False)
+        return False, "tuples"
+    except Exception:
+        # Conservative legacy fallback
+        return False, "tuples"
 
 
-CHATBOT_SUPPORTS_TYPE = _chatbot_supports_type_kwarg()
+CHATBOT_SUPPORTS_TYPE, CHATBOT_HISTORY_MODE = _chatbot_capabilities()
 
 
 def _history_to_messages(history):
@@ -2224,7 +2240,7 @@ def _messages_to_legacy_chat(messages):
 
 
 def _history_for_chatbot(messages):
-    if CHATBOT_SUPPORTS_TYPE:
+    if CHATBOT_HISTORY_MODE == "messages":
         return list(messages or [])
     return _messages_to_legacy_chat(messages)
 
