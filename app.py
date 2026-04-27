@@ -2812,11 +2812,14 @@ window.spatchatBeginResize = function(event) {
   const maxWidth = Math.max(minWidth, rect.width - 80);
   let latestClientX = event.clientX;
   let rafId = 0;
+  let lastValue = "";
 
   function apply() {
     rafId = 0;
     const next = Math.min(Math.max(latestClientX - rect.left, minWidth), maxWidth);
     const value = `${Math.round(next)}px`;
+    if (value === lastValue) return;
+    lastValue = value;
     sidebar.style.width = value;
     sidebar.style.flexBasis = value;
     sidebar.style.maxWidth = value;
@@ -2860,7 +2863,6 @@ window.spatchatInitSplitterHandle = function() {
       return false;
     };
     handle.addEventListener("mousedown", start);
-    handle.addEventListener("pointerdown", start);
     handle.__spatchatBound = true;
   });
 };
