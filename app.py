@@ -4157,7 +4157,12 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
     )
 
 def _launch_demo(blocks: gr.Blocks) -> None:
-    launch_kwargs = {"head": _SPLITTER_HEAD}
+    launch_kwargs = {
+        "share": False,
+        "head": _SPLITTER_HEAD,
+        "server_name": "0.0.0.0",
+        "server_port": int(os.environ.get("PORT", 7860))
+    }}
     try:
         sig = inspect.signature(gr.Blocks.launch)
         params = getattr(sig, "parameters", {}) or {}
