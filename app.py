@@ -66,6 +66,13 @@ from dotenv import load_dotenv
 from rasterio.crs import CRS as RioCRS
 from rasterio.warp import calculate_default_transform, reproject, transform as rio_transform, Resampling
 from llm_utils import UnifiedLLM as SharedUnifiedLLM
+
+try:
+    from spatchat_gate import metered_chat
+except ImportError:  # launched without spatchat-gateway's client/ on PYTHONPATH
+    def metered_chat(**_kwargs):
+        return lambda fn: fn
+
 from crs_utils import parse_crs_input
 from coords_utils import detect_lonlat_columns
 from map_layers import render_sdm_map
@@ -2669,6 +2676,14 @@ def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state):
     return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)))
 
 
+def _chat_denied(markdown, file, user_msg, history, state):
+    messages = _history_to_messages(history) + [
+        {"role": "user", "content": str(user_msg or "")},
+        {"role": "assistant", "content": markdown},
+    ]
+    return _history_for_chatbot(messages), gr.skip(), state, gr.skip(), gr.skip(), gr.skip()
+
+
 def chat_step_with_viewer(file, user_msg, history, state):
     base_history = _history_to_messages(history)
     msg = str(user_msg or "").strip()
@@ -4137,7 +4152,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer]
     )
     user_in.submit(
-        chat_step_with_viewer,
+        metered_chat(room="sdm", message_index=1, deny=_chat_denied)(chat_step_with_viewer),
         inputs=[file_input, user_in, chat, state],
         outputs=[chat, map_out, state, download_btn, feature_viewer, status_output],
         show_progress="hidden",
@@ -4160,7 +4175,7 @@ def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
         "share": False,
         "head": _SPLITTER_HEAD,
-        "server_name": "0.0.0.0",
+        "server_name": os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         "server_port": int(os.environ.get("PORT", 7860))
     }
     try:

@@ -1,0 +1,16 @@
+# Local configuration
+.env
+.env.local
+
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local virtual environments
+.venv/
+venv/
+
+# Temporary local work files
+.tmp_*
+*.log
