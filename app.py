@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 import gradio as gr
+import spatchat_ui
 import folium
 import html as html_lib
 import pandas as pd
@@ -2252,6 +2253,12 @@ def _history_for_chatbot(messages):
     return _messages_to_legacy_chat(messages)
 
 
+_SUGGESTION_CHIPS = [
+    "Fetch environmental predictors",
+    "Run the species distribution model",
+    "Show model results",
+]
+
 WELCOME_MESSAGE = (
     "Hello, I'm Spatchat, your SDM assistant. I can help you build a species distribution model "
     "from presence, presence-absence, or movement CSV data and environmental predictors. Upload a CSV to begin."
@@ -3203,12 +3210,6 @@ window.spatchatValuesViewer = (() => {
 """
 
 with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
-    gr.Image(
-        value="logo_long1.png",
-        show_label=False,
-        type="filepath",
-        elem_id="logo-img"
-    )
     gr.HTML("""
     <style>
     .gradio-container {
@@ -4031,69 +4032,41 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
     }
     </style>
     """)
-    gr.Markdown("## 🗺️ Spatchat: Species Distribution Model {sdm}  🐢🐍🦅🦋🦉🦊🐞 ")
-    gr.HTML("""
-    <div style="margin-top: -10px; margin-bottom: 15px;">
-      <input type="text" value="https://spatchat.org/browse/?room=sdm" id="shareLink" readonly style="width: 50%; padding: 5px; background-color: #f8f8f8; color: #222; font-weight: 500; border: 1px solid #ccc; border-radius: 4px;">
-      <button onclick="navigator.clipboard.writeText(document.getElementById('shareLink').value)" style="padding: 5px 10px; background-color: #007BFF; color: white; border: none; border-radius: 4px; cursor: pointer;">
-        📋 Copy Share Link
-      </button>
-      <div style="margin-top: 10px; font-size: 14px;">
-        <b>Share:</b>
-        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=sdm" target="_blank">🐦 Twitter</a> |
-        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=sdm" target="_blank">📘 Facebook</a>
-      </div>
-    </div>
-    """)
-    gr.Markdown("""
-                <div style="font-size: 14px;">
-                © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
-                If you use Spatchat in research, please cite:<br>
-                <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>Spatchat: Species Distribution Model.</i>
-                </div>
-                """)
+    spatchat_ui.build_header(
+        gr,
+        "Species Distribution Modeling",
+        "Upload occurrence data and environmental rasters, then model where a species can live through conversation.",
+        "sdm",
+    )
     state = gr.State(_fresh_state())
     with gr.Row(elem_id="spatchat-workarea"):
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
-            _chatbot_base_kwargs = dict(
-                label="Spatchat",
-                show_label=False,
-                layout="bubble",
-                elem_id="spatchat-chatbot",
-            )
             _welcome_messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
+            _chatbot_kwargs = spatchat_ui.chatbot_kwargs(gr, WELCOME_MESSAGE)
             try:
-                chat = gr.Chatbot(
-                    value=_welcome_messages,
-                    **_chatbot_base_kwargs,
-                )
+                chat = gr.Chatbot(**_chatbot_kwargs)
             except Exception:
-                chat = gr.Chatbot(
-                    value=_messages_to_legacy_chat(_welcome_messages),
-                    **_chatbot_base_kwargs,
-                )
+                _chatbot_kwargs["value"] = _messages_to_legacy_chat(_welcome_messages)
+                _chatbot_kwargs.pop("type", None)
+                chat = gr.Chatbot(**_chatbot_kwargs)
                 CHATBOT_HISTORY_MODE = "tuples"
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
-            user_in = gr.Textbox(
-                label=None,
-                show_label=False,
-                placeholder="Ask Spatchat...",
-                lines=1,
-                elem_id="spatchat-user-input",
-            )
-            file_input = gr.File(
-                label="Upload CSV",
-                type="filepath",
-                file_types=[".csv"],
-                elem_id="spatchat-file-input",
-            )
-            raster_input = gr.File(
-                label="Upload predictor rasters",
-                type="filepath",
-                file_count="multiple",
-                file_types=[".tif", ".tiff"],
-                elem_id="spatchat-raster-input",
-            )
+            with gr.Row(elem_id="spatchat-chips"):
+                raster_input = gr.UploadButton(
+                    "Upload predictor rasters",
+                    file_count="multiple",
+                    file_types=[".tif", ".tiff"],
+                    elem_id="spatchat-raster-input",
+                    size="sm",
+                    elem_classes=["spatchat-chip"],
+                    scale=0,
+                    min_width=0,
+                )
+                for _label in _SUGGESTION_CHIPS:
+                    gr.Button(_label, size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0).click(
+                        fn=None, js=spatchat_ui.chip_js(_label)
+                    )
+            file_input, user_in, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".csv"])
             lat_dropdown = gr.Dropdown(
                 choices=[],
                 label="Y / latitude column",
@@ -4122,26 +4095,31 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
                 value=None,
                 elem_id="spatchat-download",
             )
-            feature_viewer = gr.HTML(
-                value=_render_feature_viewer_html(None),
-                elem_id="spatchat-feature-viewer",
-            )
         with gr.Column(scale=0, min_width=14, elem_id="spatchat-splitter"):
             gr.HTML("<div class='spatchat-splitter-handle' title='Drag to resize panels'></div>")
         with gr.Column(scale=5, min_width=0, elem_id="spatchat-mapcol"):
-            map_out = gr.HTML(create_map(), label="Map Preview", show_label=False, elem_id="spatchat-map")
+            with gr.Tabs(elem_id="spatchat-tabs"):
+                with gr.Tab("Map", id="map"):
+                    map_out = gr.HTML(create_map(), label="Map Preview", show_label=False, elem_id="spatchat-map")
+                with gr.Tab("Predictors", id="predictors", elem_id="spatchat-plots-pane"):
+                    feature_viewer = gr.HTML(
+                        value=_render_feature_viewer_html(None),
+                        elem_id="spatchat-feature-viewer",
+                    )
+
+    spatchat_ui.build_footer(gr, "Wan, H.Y. &amp; Hysen, L. (2025). <i>Spatchat: Species Distribution Model.</i>")
 
     _prune_stale_sessions(max_age_seconds=60 * 60 * 24)
     _start_session_pruner()
     demo.queue(max_size=16)
     demo.unload(_cleanup_current_browser_session)
 
-    file_input.change(on_upload_with_viewer,
+    file_input.upload(on_upload_with_viewer,
         inputs=[file_input, chat, state],
         outputs=[chat, map_out, state, download_btn,
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer]
     )
-    raster_input.change(
+    raster_input.upload(
         on_raster_upload,
         inputs=[raster_input, chat, state],
         outputs=[chat, map_out, state, download_btn, feature_viewer],
@@ -4151,8 +4129,9 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
         outputs=[chat, map_out, state, download_btn,
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer]
     )
-    user_in.submit(
-        metered_chat(room="sdm", message_index=1, deny=_chat_denied)(chat_step_with_viewer),
+    gr.on(
+        triggers=[user_in.submit, send_btn.click],
+        fn=metered_chat(room="sdm", message_index=1, deny=_chat_denied)(chat_step_with_viewer),
         inputs=[file_input, user_in, chat, state],
         outputs=[chat, map_out, state, download_btn, feature_viewer, status_output],
         show_progress="hidden",
@@ -4174,7 +4153,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
 def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
         "share": False,
-        "head": _SPLITTER_HEAD,
+        "head": _SPLITTER_HEAD + spatchat_ui.HEAD,
         "server_name": os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         "server_port": int(os.environ.get("PORT", 7860))
     }
