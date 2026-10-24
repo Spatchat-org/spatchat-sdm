@@ -1,8 +1,9 @@
 name: Sync to Hugging Face Space
 
 # Every push to main updates https://huggingface.co/spaces/hoyiwan/spatchat-sdm.
-# Plain (non-force) push: if someone edited the Space directly, this fails instead of
-# overwriting their work. Pull the Space into main first, then push again.
+# The workflow commits this repo's files on top of the Space's own history (a normal
+# fast-forward push), so nothing on the Space is rewritten and old commits that contain
+# binary files are never sent (Hugging Face rejects those).
 on:
   push:
     branches: [main]
@@ -18,11 +19,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          path: src
 
       - name: Push to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.SPATCHAT }}
+          SPACE: hoyiwan/spatchat-sdm
         run: |
           test -n "$HF_TOKEN" || { echo "Add the SPATCHAT secret (a Hugging Face write token)"; exit 1; }
-          git push "https://user:${HF_TOKEN}@huggingface.co/spaces/hoyiwan/spatchat-sdm" HEAD:main
+          export GIT_LFS_SKIP_SMUDGE=1
+          git clone --depth 1 "https://user:${HF_TOKEN}@huggingface.co/spaces/${SPACE}" space
+          # Replace everything except the Space's own git data and LFS rules with this repo's files.
+          find space -mindepth 1 -maxdepth 1 ! -name .git ! -name .gitattributes -exec rm -rf {} +
+          rsync -a --exclude=.git --exclude=.github --exclude=.gitattributes src/ space/
+          cd space
+          git add -A
+          if git diff --cached --quiet; then echo "Space is already up to date"; exit 0; fi
+          git -c user.name="github-actions" -c user.email="actions@users.noreply.github.com" \
+            commit -q -m "Sync from GitHub ${GITHUB_SHA::7}"
+          git push origin HEAD:main
