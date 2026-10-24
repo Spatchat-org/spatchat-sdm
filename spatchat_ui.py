@@ -56,6 +56,8 @@ window.spatchatToggleTheme = function() {
     // Embedded in spatchat.org, which already has its own header.
     let embedded = true;
     try { embedded = window.self !== window.top; } catch (e) {}
+    // Served behind the gateway at /<room>/ (not at the site root): show account links.
+    if (window.location.pathname.replace(/[/]+$/, "") !== "") document.body.classList.add("spatchat-gated");
     if (embedded) {
       document.body.classList.add("spatchat-embedded");
       document.documentElement.classList.add("spatchat-embedded");
@@ -1457,6 +1459,25 @@ CSS = """
     body.spatchat-embedded:not(.spatchat-dark) #spatchat-workarea, body.spatchat-embedded:not(.spatchat-dark) #spatchat-splitter { background: transparent !important; }
     body.spatchat-dark #spatchat-sidebar, body.spatchat-dark #spatchat-mapcol, body.spatchat-dark #spatchat-workarea, body.spatchat-dark #spatchat-splitter { background: var(--spatchat-connect-bg) !important; }
     
+
+/* ---- single slim top bar: logo, room name, links, dark mode, share ---- */
+#spatchat-topbar { display: flex; align-items: center; gap: 12px; background: var(--spatchat-surface); border: 1px solid var(--spatchat-border);
+  border-radius: 12px; padding: 6px 14px; margin: 4px 0 10px; box-shadow: var(--spatchat-shadow); }
+#spatchat-topbar .sp-brand { display: flex; align-items: center; }
+#spatchat-topbar .sp-brand img { height: 28px; width: auto; display: block; }
+body.spatchat-dark #spatchat-topbar .sp-brand img { background: #fff; border-radius: 6px; padding: 2px 6px; }
+#spatchat-topbar .sp-room { margin: 0 !important; font-size: 17px !important; font-weight: 650 !important; letter-spacing: -0.01em;
+  color: var(--spatchat-text) !important; line-height: 1.2; }
+#spatchat-topbar .sp-spacer { flex: 1; }
+#spatchat-topbar .sp-link { font-size: 13px; font-weight: 600; color: var(--spatchat-text-secondary); text-decoration: none; padding: 6px 10px; border-radius: 8px; }
+#spatchat-topbar .sp-link:hover { background: var(--spatchat-surface-alt); color: var(--spatchat-text); }
+#spatchat-topbar .sp-gated { display: none; }
+body.spatchat-gated #spatchat-topbar .sp-gated { display: inline-block; }
+#spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
+body.spatchat-embedded #spatchat-topbar { background: transparent; border: none; box-shadow: none; padding-left: 2px; }
+body.spatchat-embedded #spatchat-topbar .sp-brand, body.spatchat-embedded #spatchat-topbar .sp-link { display: none !important; }
+body #spatchat-workarea { height: calc(100vh - 96px) !important; min-height: 520px; }
+body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 84px) !important; }
 </style>
 """
 
@@ -1479,36 +1500,29 @@ def _html(gr, value, **kw):
 
 
 def build_header(gr, title: str, subtitle: str, room: str) -> None:
-    """Emit the stylesheet, the top bar and the title row. Call first inside `with gr.Blocks(...)`."""
+    """Emit the stylesheet and one slim top bar. Call first inside `with gr.Blocks(...)`.
+
+    `subtitle` is kept for callers but no longer shown, to save vertical space."""
     gr.HTML(CSS)
-    with gr.Row(elem_id="spatchat-header-row"):
-        _html(gr, logo_html(), elem_id="logo-img", scale=0, min_width=0)
-        _html(gr, """
-        <nav style="display: flex; gap: 22px; align-items: center; font-size: 15px; font-weight: 600;">
-          <a href="https://spatchat.org/" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">Home</a>
-          <a href="https://spatchat.org/about" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">About</a>
-          <a href="https://spatchat.org/browse" target="_blank" rel="noopener" style="color: #1f7a4f; text-decoration: none;">Browse Rooms</a>
-          <a href="https://spatchat.org/join" target="_blank" rel="noopener" style="color: #10241a; text-decoration: none;">Join</a>
-        </nav>
-        """, elem_id="spatchat-navbar", scale=0, min_width=0)
-    gr.HTML(f"""
-    <div class="spatchat-title-row">
-      <div>
-        <h1 class="spatchat-title">{title}</h1>
-        <p class="spatchat-subtitle">{subtitle}</p>
-      </div>
+    _html(gr, f"""
+    <div id="spatchat-topbar">
+      <a class="sp-brand" href="https://spatchat.org/" target="_blank" rel="noopener" title="SpatChat home">{logo_html()}</a>
+      <h1 class="sp-room">{title}</h1>
+      <span class="sp-spacer"></span>
+      <a class="sp-link" href="https://spatchat.org/browse" target="_blank" rel="noopener">All rooms</a>
+      <a class="sp-link sp-gated" href="/account">Account</a>
       <div class="spatchat-title-actions">
-      <button id="spatchat-theme-btn" type="button" onclick="window.spatchatToggleTheme && window.spatchatToggleTheme()">
-        <span class="spatchat-theme-light">Dark mode</span><span class="spatchat-theme-dark">Light mode</span>
-      </button>
-      <button id="spatchat-share-btn" onclick="
-        navigator.clipboard.writeText('https://spatchat.org/browse/?room={room}');
-        this.textContent = 'Link copied';
-        setTimeout(() => {{ this.textContent = 'Share'; }}, 1500);
-      ">Share</button>
+        <button id="spatchat-theme-btn" type="button" onclick="window.spatchatToggleTheme && window.spatchatToggleTheme()">
+          <span class="spatchat-theme-light">Dark mode</span><span class="spatchat-theme-dark">Light mode</span>
+        </button>
+        <button id="spatchat-share-btn" type="button" onclick="
+          navigator.clipboard.writeText('https://spatchat.org/browse/?room={room}');
+          this.textContent = 'Link copied';
+          setTimeout(() => {{ this.textContent = 'Share'; }}, 1500);
+        ">Share</button>
       </div>
     </div>
-    """)
+    """, elem_id="spatchat-topbar-wrap")
 
 
 def build_footer(gr, cite: str) -> None:
