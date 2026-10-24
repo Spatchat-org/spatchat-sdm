@@ -1474,10 +1474,8 @@ body.spatchat-dark #spatchat-topbar .sp-brand img { background: #fff; border-rad
 #spatchat-topbar .sp-gated { display: none; }
 body.spatchat-gated #spatchat-topbar .sp-gated { display: inline-block; }
 #spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
-body.spatchat-embedded #spatchat-topbar { background: transparent; border: none; box-shadow: none; padding-left: 2px; }
-body.spatchat-embedded #spatchat-topbar .sp-brand, body.spatchat-embedded #spatchat-topbar .sp-link { display: none !important; }
 body #spatchat-workarea { height: calc(100vh - 96px) !important; min-height: 520px; }
-body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 84px) !important; }
+body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 96px) !important; }
 </style>
 """
 
@@ -1506,10 +1504,10 @@ def build_header(gr, title: str, subtitle: str, room: str) -> None:
     gr.HTML(CSS)
     _html(gr, f"""
     <div id="spatchat-topbar">
-      <a class="sp-brand" href="https://spatchat.org/" target="_blank" rel="noopener" title="SpatChat home">{logo_html()}</a>
+      <a class="sp-brand" href="https://spatchat.org/" target="_top" rel="noopener" title="SpatChat home">{logo_html()}</a>
       <h1 class="sp-room">{title}</h1>
       <span class="sp-spacer"></span>
-      <a class="sp-link" href="https://spatchat.org/browse" target="_blank" rel="noopener">All rooms</a>
+      <a class="sp-link" href="https://spatchat.org/browse" target="_top" rel="noopener">All rooms</a>
       <a class="sp-link sp-gated" href="/account">Account</a>
       <div class="spatchat-title-actions">
         <button id="spatchat-theme-btn" type="button" onclick="window.spatchatToggleTheme && window.spatchatToggleTheme()">
