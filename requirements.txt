@@ -9,5 +9,5 @@ joblib
 matplotlib
 gradio==6.13.0
 python-dotenv
-together
+together>=1.2,<2
 statsmodels
