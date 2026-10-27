@@ -38,3 +38,20 @@ jobs:
           git -c user.name="github-actions" -c user.email="actions@users.noreply.github.com" \
             commit -q -m "Sync from GitHub ${GITHUB_SHA::7}"
           git push origin HEAD:main
+
+  # Rebuild the combined gateway Space (it bundles this room). Needs a GitHub token that can
+  # dispatch workflows on Spatchat-org/spatchat-gateway, stored as the GATEWAY_DISPATCH_TOKEN secret.
+  notify-gateway:
+    needs: sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger gateway deploy
+        env:
+          GH_TOKEN: ${{ secrets.GATEWAY_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "GATEWAY_DISPATCH_TOKEN not set; gateway deploys on its 30-minute schedule instead"; exit 0; fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Spatchat-org/spatchat-gateway/dispatches \
+            -d '{"event_type":"deploy"}'
