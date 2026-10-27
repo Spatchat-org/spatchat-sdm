@@ -1173,6 +1173,7 @@ CSS = """
     #spatchat-tabs #spatchat-map .html-container { padding: 0 !important; height: 100% !important; }
     #spatchat-tabs #spatchat-map .prose, #spatchat-tabs #spatchat-map .prose > div:not(.spatchat-map-empty-hint), #spatchat-tabs #spatchat-map .prose > div:not(.spatchat-map-empty-hint) > div,
     #spatchat-tabs #spatchat-map iframe { height: 100% !important; width: 100% !important; }
+    #spatchat-tabs #spatchat-map .prose > div > div { padding-bottom: 0 !important; box-sizing: border-box !important; max-height: 100% !important; }
     #spatchat-plots-pane, #spatchat-data-pane { padding: 8px !important; }
     /* ---- Plots tab: dock the figure viewer instead of a floating window ---- */
     #spatchat-figure-layer, #spatchat-figure-layer > div, #spatchat-figure-layer .spatchat-figure-root {
