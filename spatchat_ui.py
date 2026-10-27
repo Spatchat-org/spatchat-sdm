@@ -1475,7 +1475,7 @@ body.spatchat-dark #spatchat-topbar .sp-brand img { background: #fff; border-rad
 #spatchat-topbar .sp-gated { display: none; }
 body.spatchat-gated #spatchat-topbar .sp-gated { display: inline-block; }
 #spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
-body #spatchat-workarea { height: calc(100vh - 96px) !important; min-height: 520px; }
+body #spatchat-workarea { height: calc(100vh - 210px) !important; min-height: 520px; }
 body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 96px) !important; }
 </style>
 """
