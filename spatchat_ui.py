@@ -1476,7 +1476,9 @@ body.spatchat-dark #spatchat-topbar .sp-brand img { background: #fff; border-rad
 body.spatchat-gated #spatchat-topbar .sp-gated { display: inline-block; }
 #spatchat-topbar .spatchat-title-actions { display: flex; gap: 8px; align-items: center; }
 body #spatchat-workarea { height: calc(100vh - 210px) !important; min-height: 520px; }
-body.spatchat-embedded #spatchat-workarea { height: calc(100vh - 186px) !important; }
+/* Embedded (Hugging Face resizes the iframe to fit the content): never size from viewport height, or each resize feeds the next and the page grows without limit. */
+body.spatchat-embedded #spatchat-workarea { height: 680px !important; min-height: 0 !important; }
+html.spatchat-embedded, body.spatchat-embedded, body.spatchat-embedded gradio-app, body.spatchat-embedded .gradio-container { min-height: 0 !important; }
 </style>
 """
 
