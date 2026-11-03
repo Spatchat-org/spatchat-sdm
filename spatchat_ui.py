@@ -1529,7 +1529,7 @@ def build_header(gr, title: str, subtitle: str, room: str) -> None:
 def build_footer(gr, cite: str) -> None:
     gr.HTML(f"""
     <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(16,36,26,0.1); font-size: 11px; color: #5c6b63; text-align: center;">
-      &copy; 2025 Ho Yi Wan &amp; Logan Hysen &middot; Cite: {cite}
+      &copy; 2025 Ho Yi Wan, Logan Hysen &amp; Lokesh Lokesh &middot; Cite: {cite}
     </div>
     """)
 
