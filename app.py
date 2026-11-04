@@ -376,13 +376,32 @@ try:
     EE_INITIALIZED = True
     print("[GEE DEBUG] Initialization successful", flush=True)
 
+
 except Exception as exc:
     EE_AUTH_ERROR = str(exc)
+
+    svc = _load_service_account_from_env()
+
     print(
-        "[GEE DEBUG] Initialization failed:",
+        "[GEE DEBUG] Service account parsed:",
+        svc is not None,
+        flush=True
+    )
+
+    print(
+        "[GEE DEBUG] Required fields present:",
+        isinstance(svc, dict)
+        and bool(svc.get("client_email"))
+        and bool(svc.get("private_key")),
+        flush=True
+    )
+
+    print(
+        "[GEE DEBUG] Initialization exception type:",
         type(exc).__name__,
         flush=True
     )
+
 
 # ──────────────────────────────────────────────────────────────
 # Helpers for LLM response parsing (HF + Together)
