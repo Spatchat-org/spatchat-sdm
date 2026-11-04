@@ -154,6 +154,8 @@ SESSIONS_ROOT = os.path.join(APP_ROOT, "sessions")
 REPRO_TEMPLATE_DIR = os.path.join(APP_ROOT, "reproducible_scripts")
 os.makedirs(SESSIONS_ROOT, exist_ok=True)
 _GRADIO_SESSION_MAP: dict[str, str] = {}
+_GRADIO_SESSION_LOCK = threading.RLock()
+
 
 def _current_gradio_session_hash() -> Optional[str]:
     if LocalContext is None:
@@ -162,50 +164,88 @@ def _current_gradio_session_hash() -> Optional[str]:
         request = LocalContext.request.get()
     except Exception:
         request = None
-    if request is None:
-        return None
-    session_hash = getattr(request, "session_hash", None)
-    if not session_hash:
-        return None
-    return str(session_hash).strip() or None
+    return str(getattr(request, "session_hash", "") or "").strip() or None
+
+
+def _valid_session_id(sid: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{32}", str(sid or "")))
+
+
+def _session_directory(sid: str) -> str:
+    if not _valid_session_id(sid):
+        raise ValueError("Invalid analysis session identifier")
+    return os.path.join(SESSIONS_ROOT, sid)
+
 
 def _cleanup_session_workspace(session_id: Optional[str]) -> None:
     sid = str(session_id or "").strip()
-    if not sid:
+    if not _valid_session_id(sid):
         return
+    with _GRADIO_SESSION_LOCK:
+        for key, value in list(_GRADIO_SESSION_MAP.items()):
+            if value == sid:
+                _GRADIO_SESSION_MAP.pop(key, None)
     reset_analysis_steps(sid)
-    session_root = os.path.join(SESSIONS_ROOT, sid)
-    if os.path.exists(session_root):
+    session_root = _session_directory(sid)
+    if os.path.isdir(session_root):
         shutil.rmtree(session_root, ignore_errors=True)
-    for key, value in list(_GRADIO_SESSION_MAP.items()):
-        if value == sid:
-            _GRADIO_SESSION_MAP.pop(key, None)
 
-def _register_gradio_session(session_id: Optional[str]) -> None:
+
+def _register_gradio_session(session_id: Optional[str], request_hash: Optional[str] = None) -> None:
     sid = str(session_id or "").strip()
-    if not sid:
+    rh = request_hash or _current_gradio_session_hash()
+    if not rh or not _valid_session_id(sid):
         return
-    request_hash = _current_gradio_session_hash()
-    if not request_hash:
-        return
-    previous_sid = _GRADIO_SESSION_MAP.get(request_hash)
-    _GRADIO_SESSION_MAP[request_hash] = sid
-    if previous_sid and previous_sid != sid:
-        _cleanup_session_workspace(previous_sid)
+    with _GRADIO_SESSION_LOCK:
+        # Do not delete the old workspace on a state mismatch.
+        # The pruner handles abandoned sessions.
+        _GRADIO_SESSION_MAP[rh] = sid
+
+
+def _bind_gradio_state(state: Optional[dict], request=None) -> dict:
+    """Recover a workspace from the *current* Gradio request before running a callback.
+
+    The hash is a temporary UI-session correlation key, NOT proof of user identity.
+    Account-level access control must remain enforced by the Gateway.
+    """
+    rh = str(getattr(request, "session_hash", "") or "").strip() or _current_gradio_session_hash()
+    state = dict(state) if isinstance(state, dict) else {}
+    with _GRADIO_SESSION_LOCK:
+        mapped = _GRADIO_SESSION_MAP.get(rh) if rh else None
+        supplied = str(state.get("session_id") or "")
+        if mapped and os.path.isdir(_session_directory(mapped)):
+            # Map is authoritative for this Gradio tab, even if gr.State was reset.
+            sid = mapped
+        elif _valid_session_id(supplied) and os.path.isdir(_session_directory(supplied)):
+            sid = supplied
+        else:
+            sid = uuid.uuid4().hex
+        if rh:
+            _GRADIO_SESSION_MAP[rh] = sid
+    if state.get("session_id") != sid:
+        # Never carry stale upload metadata from a different workspace.
+        state.pop("pending_upload", None)
+        state.pop("data_metadata", None)
+    state["session_id"] = sid
+    state["session_root"] = _session_directory(sid)
+    return _ensure_session_workspace(state)
+
 
 def _cleanup_current_browser_session() -> None:
     request_hash = _current_gradio_session_hash()
     if not request_hash:
         return
-    sid = _GRADIO_SESSION_MAP.pop(request_hash, None)
+    with _GRADIO_SESSION_LOCK:
+        sid = _GRADIO_SESSION_MAP.pop(request_hash, None)
     if sid:
         _cleanup_session_workspace(sid)
+
 
 def _prune_stale_sessions(max_age_seconds: int = 60 * 60 * 12) -> None:
     cutoff = time.time() - max_age_seconds
     try:
         for entry in os.scandir(SESSIONS_ROOT):
-            if not entry.is_dir():
+            if not entry.is_dir() or not _valid_session_id(entry.name):
                 continue
             try:
                 if entry.stat().st_mtime < cutoff:
@@ -214,6 +254,7 @@ def _prune_stale_sessions(max_age_seconds: int = 60 * 60 * 12) -> None:
                 continue
     except OSError:
         pass
+
 
 def _start_session_pruner(interval_seconds: int = 10 * 60, max_age_seconds: int = 60 * 60 * 24) -> None:
     interval_seconds = max(30, int(interval_seconds))
@@ -227,11 +268,14 @@ def _start_session_pruner(interval_seconds: int = 10 * 60, max_age_seconds: int 
             time.sleep(interval_seconds)
     threading.Thread(target=_loop, name="spatchat-sdm-session-pruner", daemon=True).start()
 
+
 def _ensure_session_workspace(state: Optional[dict]) -> dict:
     if not isinstance(state, dict):
         state = {}
-    session_id = str(state.get("session_id") or uuid.uuid4().hex)
-    session_root = os.path.join(SESSIONS_ROOT, session_id)
+    sid = str(state.get("session_id") or "")
+    if not _valid_session_id(sid):
+        sid = uuid.uuid4().hex
+    session_root = _session_directory(sid)
     for path in (
         session_root,
         os.path.join(session_root, "inputs"),
@@ -240,11 +284,11 @@ def _ensure_session_workspace(state: Optional[dict]) -> dict:
         os.path.join(session_root, "predictor_rasters", "wgs84"),
     ):
         os.makedirs(path, exist_ok=True)
-    state["session_id"] = session_id
+    state["session_id"] = sid
     state["session_root"] = session_root
-    state.setdefault("session_info", {"session_id": session_id})
-    set_current_session(session_id)
-    _register_gradio_session(session_id)
+    state.setdefault("session_info", {"session_id": sid})
+    set_current_session(sid)
+    _register_gradio_session(sid)
     return state
 
 def _fresh_state() -> dict:
@@ -1839,7 +1883,7 @@ def run_fetch(sl, lc, state=None):
             return create_map(state), "Invalid analysis session workspace. Please start a new session."
         points_path = os.path.join(session_root, "inputs", "presence_points.csv")
         if not os.path.isfile(points_path):
-            print("[SDM FETCH] Session occurrence CSV missing", flush=True)
+            print("[SDM FETCH] Session occurrence CSV missing; state and upload workspace disagree", flush=True)
             return create_map(state), (
                 "Occurrence CSV was not found in this analysis session. "
                 "Please upload your CSV again before fetching predictors."
@@ -2699,6 +2743,7 @@ def on_upload(f, history, state):
 
                 state["data_metadata"] = meta
                 state.pop("pending_upload", None)
+                print("[SDM UPLOAD] Normalized session CSV exists:", os.path.isfile(os.path.join(state["session_root"], PRESENCE_POINTS_PATH)), flush=True)
                 history2.append({"role": "assistant", "content": _upload_message(meta, state)})
                 return (history2, create_map(state), state, gr.update(),
                         gr.update(choices=[], visible=False),
@@ -2759,14 +2804,16 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
             gr.update(visible=False), gr.update(visible=False))
 
 
-def on_upload_with_viewer(f, history, state):
+def on_upload_with_viewer(f, history, state, request: gr.Request):
+    state = _bind_gradio_state(state, request)
     out = on_upload(f, _history_to_messages(history), state)
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
     history_out = _history_for_chatbot(out[0])
     return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)))
 
 
-def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state):
+def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state, request: gr.Request):
+    state = _bind_gradio_state(state, request)
     out = confirm_coords(lat_col, lon_col, crs_raw, _history_to_messages(history), state)
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
     history_out = _history_for_chatbot(out[0])
@@ -2781,7 +2828,8 @@ def _chat_denied(markdown, file, user_msg, history, state):
     return _history_for_chatbot(messages), gr.skip(), state, gr.skip(), gr.skip(), gr.skip()
 
 
-def chat_step_with_viewer(file, user_msg, history, state):
+def chat_step_with_viewer(file, user_msg, history, state, request: gr.Request):
+    state = _bind_gradio_state(state, request)
     base_history = _history_to_messages(history)
     msg = str(user_msg or "").strip()
     status_label = "Thinking"
