@@ -159,6 +159,45 @@ _GRADIO_SESSION_MAP: dict[str, str] = {}
 _GRADIO_UPLOAD_MAP: dict[str, str] = {}
 _GRADIO_SESSION_LOCK = threading.RLock()
 
+# Emergency compatibility safeguard: hold normalized occurrence data per analysis
+# in memory so a transient workspace reset cannot lose the uploaded CSV.
+# This is not persistent storage; entries are discarded at session cleanup.
+_PRESENCE_SNAPSHOTS: dict[str, bytes] = {}
+_PRESENCE_SNAPSHOT_LOCK = threading.RLock()
+
+def _remember_presence_csv(state):
+    sid = str((state or {}).get("session_id") or "")
+    if not _valid_session_id(sid):
+        return
+    path = os.path.join(_session_directory(sid), "inputs", "presence_points.csv")
+    if not os.path.isfile(path):
+        return
+    with open(path, "rb") as f:
+        data = f.read()
+    with _PRESENCE_SNAPSHOT_LOCK:
+        _PRESENCE_SNAPSHOTS[sid] = data
+    print("[SDM SNAPSHOT] Presence CSV retained:", bool(data), flush=True)
+
+def _restore_presence_csv(state):
+    sid = str((state or {}).get("session_id") or "")
+    if not _valid_session_id(sid):
+        return False
+    root = _session_directory(sid)
+    path = os.path.join(root, "inputs", "presence_points.csv")
+    if os.path.isfile(path):
+        return True
+    with _PRESENCE_SNAPSHOT_LOCK:
+        data = _PRESENCE_SNAPSHOTS.get(sid)
+    if not data:
+        return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp = path + ".restoring"
+    with open(temp, "wb") as f:
+        f.write(data)
+    os.replace(temp, path)
+    print("[SDM SNAPSHOT] Recovered occurrence CSV for active session", flush=True)
+    return True
+
 
 def _current_gradio_session_hash() -> Optional[str]:
     if LocalContext is None:
@@ -189,6 +228,8 @@ def _cleanup_session_workspace(session_id: Optional[str]) -> None:
             for key, value in list(registry.items()):
                 if value == sid:
                     registry.pop(key, None)
+    with _PRESENCE_SNAPSHOT_LOCK:
+        _PRESENCE_SNAPSHOTS.pop(sid, None)
     reset_analysis_steps(sid)
     session_root = _session_directory(sid)
     if os.path.isdir(session_root):
@@ -1892,6 +1933,8 @@ def run_fetch(sl, lc, state=None):
             return create_map(state), "Invalid analysis session workspace. Please start a new session."
         points_path = os.path.join(session_root, "inputs", "presence_points.csv")
         if not os.path.isfile(points_path):
+            _restore_presence_csv(state)
+        if not os.path.isfile(points_path):
             print("[SDM FETCH] Session occurrence CSV missing; state and upload workspace disagree", flush=True)
             print("[SDM FETCH] Current workspace exists:", os.path.isdir(session_root), flush=True)
             return create_map(state), (
@@ -2754,6 +2797,7 @@ def on_upload(f, history, state):
                 state["data_metadata"] = meta
                 state.pop("pending_upload", None)
                 print("[SDM UPLOAD] Normalized session CSV exists:", os.path.isfile(os.path.join(state["session_root"], PRESENCE_POINTS_PATH)), flush=True)
+                _remember_presence_csv(state)
                 rh = _current_gradio_session_hash()
                 if rh:
                     with _GRADIO_SESSION_LOCK:
@@ -2812,6 +2856,7 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
 
     state["data_metadata"] = meta
     state.pop("pending_upload", None)
+    _remember_presence_csv(state)
     success = f"Coordinates transformed from EPSG:{src_epsg} to WGS84. " + _upload_message(meta, state)
     history.append({"role": "assistant", "content": success})
 
