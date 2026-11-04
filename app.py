@@ -14,6 +14,7 @@ import sys
 import time
 import random
 import threading
+import contextvars
 import inspect
 import uuid
 from contextlib import contextmanager
@@ -154,6 +155,8 @@ SESSIONS_ROOT = os.path.join(APP_ROOT, "sessions")
 REPRO_TEMPLATE_DIR = os.path.join(APP_ROOT, "reproducible_scripts")
 os.makedirs(SESSIONS_ROOT, exist_ok=True)
 _GRADIO_SESSION_MAP: dict[str, str] = {}
+# The upload callback records the dataset-bearing workspace for this Gradio tab.
+_GRADIO_UPLOAD_MAP: dict[str, str] = {}
 _GRADIO_SESSION_LOCK = threading.RLock()
 
 
@@ -182,9 +185,10 @@ def _cleanup_session_workspace(session_id: Optional[str]) -> None:
     if not _valid_session_id(sid):
         return
     with _GRADIO_SESSION_LOCK:
-        for key, value in list(_GRADIO_SESSION_MAP.items()):
-            if value == sid:
-                _GRADIO_SESSION_MAP.pop(key, None)
+        for registry in (_GRADIO_SESSION_MAP, _GRADIO_UPLOAD_MAP):
+            for key, value in list(registry.items()):
+                if value == sid:
+                    registry.pop(key, None)
     reset_analysis_steps(sid)
     session_root = _session_directory(sid)
     if os.path.isdir(session_root):
@@ -211,7 +215,11 @@ def _bind_gradio_state(state: Optional[dict], request=None) -> dict:
     rh = str(getattr(request, "session_hash", "") or "").strip() or _current_gradio_session_hash()
     state = dict(state) if isinstance(state, dict) else {}
     with _GRADIO_SESSION_LOCK:
+        uploaded = _GRADIO_UPLOAD_MAP.get(rh) if rh else None
         mapped = _GRADIO_SESSION_MAP.get(rh) if rh else None
+        # Prefer the exact workspace that successfully normalized this tab's CSV.
+        if uploaded and os.path.isfile(os.path.join(_session_directory(uploaded), "inputs", "presence_points.csv")):
+            mapped = uploaded
         supplied = str(state.get("session_id") or "")
         if mapped and os.path.isdir(_session_directory(mapped)):
             # Map is authoritative for this Gradio tab, even if gr.State was reset.
@@ -237,8 +245,9 @@ def _cleanup_current_browser_session() -> None:
         return
     with _GRADIO_SESSION_LOCK:
         sid = _GRADIO_SESSION_MAP.pop(request_hash, None)
-    if sid:
-        _cleanup_session_workspace(sid)
+        uploaded_sid = _GRADIO_UPLOAD_MAP.pop(request_hash, None)
+    for current_sid in {sid, uploaded_sid} - {None}:
+        _cleanup_session_workspace(current_sid)
 
 
 def _prune_stale_sessions(max_age_seconds: int = 60 * 60 * 12) -> None:
@@ -1884,6 +1893,7 @@ def run_fetch(sl, lc, state=None):
         points_path = os.path.join(session_root, "inputs", "presence_points.csv")
         if not os.path.isfile(points_path):
             print("[SDM FETCH] Session occurrence CSV missing; state and upload workspace disagree", flush=True)
+            print("[SDM FETCH] Current workspace exists:", os.path.isdir(session_root), flush=True)
             return create_map(state), (
                 "Occurrence CSV was not found in this analysis session. "
                 "Please upload your CSV again before fetching predictors."
@@ -2744,6 +2754,12 @@ def on_upload(f, history, state):
                 state["data_metadata"] = meta
                 state.pop("pending_upload", None)
                 print("[SDM UPLOAD] Normalized session CSV exists:", os.path.isfile(os.path.join(state["session_root"], PRESENCE_POINTS_PATH)), flush=True)
+                rh = _current_gradio_session_hash()
+                if rh:
+                    with _GRADIO_SESSION_LOCK:
+                        _GRADIO_UPLOAD_MAP[rh] = state["session_id"]
+                        _GRADIO_SESSION_MAP[rh] = state["session_id"]
+                print("[SDM UPLOAD] Workspace registered:", bool(rh), flush=True)
                 history2.append({"role": "assistant", "content": _upload_message(meta, state)})
                 return (history2, create_map(state), state, gr.update(),
                         gr.update(choices=[], visible=False),
@@ -2815,6 +2831,12 @@ def on_upload_with_viewer(f, history, state, request: gr.Request):
 def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state, request: gr.Request):
     state = _bind_gradio_state(state, request)
     out = confirm_coords(lat_col, lon_col, crs_raw, _history_to_messages(history), state)
+    if os.path.isfile(os.path.join(state["session_root"], "inputs", "presence_points.csv")):
+        rh = str(getattr(request, "session_hash", "") or "").strip()
+        if rh:
+            with _GRADIO_SESSION_LOCK:
+                _GRADIO_UPLOAD_MAP[rh] = state["session_id"]
+                _GRADIO_SESSION_MAP[rh] = state["session_id"]
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
     history_out = _history_for_chatbot(out[0])
     return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)))
@@ -2830,6 +2852,7 @@ def _chat_denied(markdown, file, user_msg, history, state):
 
 def chat_step_with_viewer(file, user_msg, history, state, request: gr.Request):
     state = _bind_gradio_state(state, request)
+    print("[SDM CHAT] Upload workspace resolved:", os.path.isfile(os.path.join(state["session_root"], "inputs", "presence_points.csv")), flush=True)
     base_history = _history_to_messages(history)
     msg = str(user_msg or "").strip()
     status_label = "Thinking"
@@ -2862,7 +2885,8 @@ def chat_step_with_viewer(file, user_msg, history, state, request: gr.Request):
         except Exception as exc:
             box["error"] = exc
 
-    worker = threading.Thread(target=_target, daemon=True)
+    request_context = contextvars.copy_context()
+    worker = threading.Thread(target=lambda: request_context.run(_target), daemon=True)
     worker.start()
 
     last_second = -1
