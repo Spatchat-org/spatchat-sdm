@@ -154,48 +154,50 @@ APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 SESSIONS_ROOT = os.path.join(APP_ROOT, "sessions")
 REPRO_TEMPLATE_DIR = os.path.join(APP_ROOT, "reproducible_scripts")
 os.makedirs(SESSIONS_ROOT, exist_ok=True)
+# The Gradio session id is passed explicitly via analysis_id_state. This mapping
+# is only a fallback for a callback whose Gradio State is unexpectedly absent,
+# and for cleanup; it never overrides the explicitly passed ID.
 _GRADIO_SESSION_MAP: dict[str, str] = {}
-# The upload callback records the dataset-bearing workspace for this Gradio tab.
-_GRADIO_UPLOAD_MAP: dict[str, str] = {}
 _GRADIO_SESSION_LOCK = threading.RLock()
 
-# Emergency compatibility safeguard: hold normalized occurrence data per analysis
-# in memory so a transient workspace reset cannot lose the uploaded CSV.
-# This is not persistent storage; entries are discarded at session cleanup.
-_PRESENCE_SNAPSHOTS: dict[str, bytes] = {}
-_PRESENCE_SNAPSHOT_LOCK = threading.RLock()
 
-def _remember_presence_csv(state):
-    sid = str((state or {}).get("session_id") or "")
-    if not _valid_session_id(sid):
-        return
-    path = os.path.join(_session_directory(sid), "inputs", "presence_points.csv")
-    if not os.path.isfile(path):
-        return
-    with open(path, "rb") as f:
-        data = f.read()
-    with _PRESENCE_SNAPSHOT_LOCK:
-        _PRESENCE_SNAPSHOTS[sid] = data
-    print("[SDM SNAPSHOT] Presence CSV retained:", bool(data), flush=True)
+def _presence_backup_path(sid: str) -> str:
+    # Persist the normalized points in the *same* analysis session, outside
+    # inputs/, which clear_all() may legitimately remove on a new upload.
+    return os.path.join(_session_directory(sid), "uploads", "_normalized_presence_points.csv")
 
-def _restore_presence_csv(state):
+
+def _remember_presence_csv(state) -> bool:
     sid = str((state or {}).get("session_id") or "")
     if not _valid_session_id(sid):
         return False
-    root = _session_directory(sid)
-    path = os.path.join(root, "inputs", "presence_points.csv")
+    source = os.path.join(_session_directory(sid), "inputs", "presence_points.csv")
+    if not os.path.isfile(source):
+        return False
+    backup = _presence_backup_path(sid)
+    os.makedirs(os.path.dirname(backup), exist_ok=True)
+    tmp = backup + ".tmp"
+    shutil.copyfile(source, tmp)
+    os.replace(tmp, backup)
+    print("[SDM DATA] Persisted normalized occurrence CSV in analysis workspace", flush=True)
+    return True
+
+
+def _restore_presence_csv(state) -> bool:
+    sid = str((state or {}).get("session_id") or "")
+    if not _valid_session_id(sid):
+        return False
+    path = os.path.join(_session_directory(sid), "inputs", "presence_points.csv")
     if os.path.isfile(path):
         return True
-    with _PRESENCE_SNAPSHOT_LOCK:
-        data = _PRESENCE_SNAPSHOTS.get(sid)
-    if not data:
+    backup = _presence_backup_path(sid)
+    if not os.path.isfile(backup):
         return False
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp = path + ".restoring"
-    with open(temp, "wb") as f:
-        f.write(data)
-    os.replace(temp, path)
-    print("[SDM SNAPSHOT] Recovered occurrence CSV for active session", flush=True)
+    tmp = path + ".restoring"
+    shutil.copyfile(backup, tmp)
+    os.replace(tmp, path)
+    print("[SDM DATA] Restored normalized occurrence CSV from this session's disk backup", flush=True)
     return True
 
 
@@ -224,12 +226,9 @@ def _cleanup_session_workspace(session_id: Optional[str]) -> None:
     if not _valid_session_id(sid):
         return
     with _GRADIO_SESSION_LOCK:
-        for registry in (_GRADIO_SESSION_MAP, _GRADIO_UPLOAD_MAP):
-            for key, value in list(registry.items()):
-                if value == sid:
-                    registry.pop(key, None)
-    with _PRESENCE_SNAPSHOT_LOCK:
-        _PRESENCE_SNAPSHOTS.pop(sid, None)
+        for key, value in list(_GRADIO_SESSION_MAP.items()):
+            if value == sid:
+                _GRADIO_SESSION_MAP.pop(key, None)
     reset_analysis_steps(sid)
     session_root = _session_directory(sid)
     if os.path.isdir(session_root):
@@ -247,48 +246,52 @@ def _register_gradio_session(session_id: Optional[str], request_hash: Optional[s
         _GRADIO_SESSION_MAP[rh] = sid
 
 
-def _bind_gradio_state(state: Optional[dict], request=None) -> dict:
-    """Recover a workspace from the *current* Gradio request before running a callback.
+def _bind_gradio_state(state: Optional[dict], request=None, analysis_session_id=None) -> dict:
+    """Resolve exactly ONE analysis ID before any upload/chat worker is started.
 
-    The hash is a temporary UI-session correlation key, NOT proof of user identity.
-    Account-level access control must remain enforced by the Gateway.
+    Priority: explicitly passed Gradio State ID > dictionary ID > this tab's
+    registered ID > new random ID. No global latest-upload or cross-user search.
+    A missing directory is not a reason to silently switch to another ID.
     """
     rh = str(getattr(request, "session_hash", "") or "").strip() or _current_gradio_session_hash()
     state = dict(state) if isinstance(state, dict) else {}
+    explicit = str(analysis_session_id or "").strip()
+    supplied = str(state.get("session_id") or "").strip()
     with _GRADIO_SESSION_LOCK:
-        uploaded = _GRADIO_UPLOAD_MAP.get(rh) if rh else None
         mapped = _GRADIO_SESSION_MAP.get(rh) if rh else None
-        # Prefer the exact workspace that successfully normalized this tab's CSV.
-        if uploaded and os.path.isfile(os.path.join(_session_directory(uploaded), "inputs", "presence_points.csv")):
-            mapped = uploaded
-        supplied = str(state.get("session_id") or "")
-        if mapped and os.path.isdir(_session_directory(mapped)):
-            # Map is authoritative for this Gradio tab, even if gr.State was reset.
-            sid = mapped
-        elif _valid_session_id(supplied) and os.path.isdir(_session_directory(supplied)):
-            sid = supplied
+        if _valid_session_id(explicit):
+            sid, origin = explicit, "explicit"
+        elif _valid_session_id(supplied):
+            sid, origin = supplied, "dictionary"
+        elif mapped and _valid_session_id(mapped):
+            sid, origin = mapped, "tab"
         else:
-            sid = uuid.uuid4().hex
+            sid, origin = uuid.uuid4().hex, "new"
         if rh:
             _GRADIO_SESSION_MAP[rh] = sid
+
     if state.get("session_id") != sid:
-        # Never carry stale upload metadata from a different workspace.
         state.pop("pending_upload", None)
         state.pop("data_metadata", None)
     state["session_id"] = sid
     state["session_root"] = _session_directory(sid)
-    return _ensure_session_workspace(state)
+    state = _ensure_session_workspace(state)
+    has_input = os.path.isfile(os.path.join(state["session_root"], "inputs", "presence_points.csv"))
+    has_backup = os.path.isfile(_presence_backup_path(sid))
+    print(f"[SDM SESSION] source={origin} sid={sid[-8:]} "
+          f"input={has_input} backup={has_backup}", flush=True)
+    return state
 
 
 def _cleanup_current_browser_session() -> None:
     request_hash = _current_gradio_session_hash()
     if not request_hash:
         return
+    # Deliberately do not remove the uploaded workspace from the unload hook.
+    # Browsers can reconnect/reload during an ongoing Gradio operation. Instead
+    # the 24-hour session pruner handles abandoned workspaces safely.
     with _GRADIO_SESSION_LOCK:
-        sid = _GRADIO_SESSION_MAP.pop(request_hash, None)
-        uploaded_sid = _GRADIO_UPLOAD_MAP.pop(request_hash, None)
-    for current_sid in {sid, uploaded_sid} - {None}:
-        _cleanup_session_workspace(current_sid)
+        _GRADIO_SESSION_MAP.pop(request_hash, None)
 
 
 def _prune_stale_sessions(max_age_seconds: int = 60 * 60 * 12) -> None:
@@ -2771,6 +2774,11 @@ def on_upload(f, history, state):
     state.setdefault("layers_help_shown", False)
 
     clear_all(state)
+    # Invalidate only this analysis's previous normalized backup before
+    # ingesting a new CSV, so a failed replacement cannot fetch stale data.
+    prior_backup = _presence_backup_path(state["session_id"])
+    if os.path.isfile(prior_backup):
+        os.remove(prior_backup)
     if f:
         with _session_cwd(state):
             source_path = f.name if hasattr(f, "name") else str(f)
@@ -2798,12 +2806,7 @@ def on_upload(f, history, state):
                 state.pop("pending_upload", None)
                 print("[SDM UPLOAD] Normalized session CSV exists:", os.path.isfile(os.path.join(state["session_root"], PRESENCE_POINTS_PATH)), flush=True)
                 _remember_presence_csv(state)
-                rh = _current_gradio_session_hash()
-                if rh:
-                    with _GRADIO_SESSION_LOCK:
-                        _GRADIO_UPLOAD_MAP[rh] = state["session_id"]
-                        _GRADIO_SESSION_MAP[rh] = state["session_id"]
-                print("[SDM UPLOAD] Workspace registered:", bool(rh), flush=True)
+                print("[SDM UPLOAD] Workspace registered:", bool(state.get("session_id")), flush=True)
                 history2.append({"role": "assistant", "content": _upload_message(meta, state)})
                 return (history2, create_map(state), state, gr.update(),
                         gr.update(choices=[], visible=False),
@@ -2865,38 +2868,43 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
             gr.update(visible=False), gr.update(visible=False))
 
 
-def on_upload_with_viewer(f, history, state, request: gr.Request):
-    state = _bind_gradio_state(state, request)
+def on_upload_with_viewer(f, history, state, analysis_session_id, request: gr.Request):
+    state = _bind_gradio_state(state, request, analysis_session_id)
     out = on_upload(f, _history_to_messages(history), state)
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
     history_out = _history_for_chatbot(out[0])
-    return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)))
+    return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)), st["session_id"])
 
 
-def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state, request: gr.Request):
-    state = _bind_gradio_state(state, request)
+def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state, analysis_session_id, request: gr.Request):
+    state = _bind_gradio_state(state, request, analysis_session_id)
     out = confirm_coords(lat_col, lon_col, crs_raw, _history_to_messages(history), state)
-    if os.path.isfile(os.path.join(state["session_root"], "inputs", "presence_points.csv")):
-        rh = str(getattr(request, "session_hash", "") or "").strip()
-        if rh:
-            with _GRADIO_SESSION_LOCK:
-                _GRADIO_UPLOAD_MAP[rh] = state["session_id"]
-                _GRADIO_SESSION_MAP[rh] = state["session_id"]
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
+    if os.path.isfile(os.path.join(st["session_root"], "inputs", "presence_points.csv")):
+        _remember_presence_csv(st)
     history_out = _history_for_chatbot(out[0])
-    return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)))
+    return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)), st["session_id"])
 
 
-def _chat_denied(markdown, file, user_msg, history, state):
+def on_raster_upload_with_session(files, history, state, analysis_session_id, request: gr.Request):
+    state = _bind_gradio_state(state, request, analysis_session_id)
+    out = on_raster_upload(files, history, state)
+    return (*out, state["session_id"])
+
+
+def _chat_denied(markdown, file, user_msg, history, state, analysis_session_id):
     messages = _history_to_messages(history) + [
         {"role": "user", "content": str(user_msg or "")},
         {"role": "assistant", "content": markdown},
     ]
-    return _history_for_chatbot(messages), gr.skip(), state, gr.skip(), gr.skip(), gr.skip()
+    return (_history_for_chatbot(messages), gr.skip(), state, gr.skip(),
+            gr.skip(), gr.skip(), analysis_session_id)
 
 
-def chat_step_with_viewer(file, user_msg, history, state, request: gr.Request):
-    state = _bind_gradio_state(state, request)
+def _chat_step_with_viewer_impl(file, user_msg, history, state):
+    # The outer Gradio callback has already resolved the explicit session ID.
+    state = _ensure_session_workspace(state)
+    _restore_presence_csv(state)
     print("[SDM CHAT] Upload workspace resolved:", os.path.isfile(os.path.join(state["session_root"], "inputs", "presence_points.csv")), flush=True)
     base_history = _history_to_messages(history)
     msg = str(user_msg or "").strip()
@@ -3024,6 +3032,21 @@ def chat_step_with_viewer(file, user_msg, history, state, request: gr.Request):
         feature_update if not yielded_feature else gr.skip(),
         _status_clear_update(),
     )
+
+def chat_step_with_viewer(file, user_msg, history, state, analysis_session_id, request: gr.Request):
+    # Resolve the authoritative ID on the Gradio callback thread, before
+    # metered streaming/workers, just as the working Movement room does.
+    state = _bind_gradio_state(state, request, analysis_session_id)
+    sid = state["session_id"]
+    for update in _chat_step_with_viewer_impl(file, user_msg, history, state):
+        if not isinstance(update, (tuple, list)) or len(update) != 6:
+            raise RuntimeError("SDM chat handler produced an unexpected output count")
+        # Never let an internal callback silently switch analysis directories.
+        state_update = update[2]
+        if isinstance(state_update, dict) and state_update.get("session_id") != sid:
+            raise RuntimeError("SDM analysis session changed during chat processing")
+        yield (*update, sid)
+
 
 # UI
 
@@ -4246,6 +4269,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
         "sdm",
     )
     state = gr.State(_fresh_state())
+    analysis_id_state = gr.State(None)  # simple scalar ID, like Movement room
     with gr.Row(elem_id="spatchat-workarea"):
         with gr.Column(scale=3, min_width=0, elem_id="spatchat-sidebar"):
             _welcome_messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
@@ -4322,28 +4346,28 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
     demo.unload(_cleanup_current_browser_session)
 
     file_input.upload(on_upload_with_viewer,
-        inputs=[file_input, chat, state],
+        inputs=[file_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn,
-                 lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer]
+                 lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
     )
     raster_input.upload(
-        on_raster_upload,
-        inputs=[raster_input, chat, state],
-        outputs=[chat, map_out, state, download_btn, feature_viewer],
+        on_raster_upload_with_session,
+        inputs=[raster_input, chat, state, analysis_id_state],
+        outputs=[chat, map_out, state, download_btn, feature_viewer, analysis_id_state],
     )
     confirm_btn.click(confirm_coords_with_viewer,
-        inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state],
+        inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn,
-                 lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer]
+                 lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
     )
     gr.on(
         triggers=[user_in.submit, send_btn.click],
         fn=metered_chat(room="sdm", message_index=1, deny=_chat_denied)(chat_step_with_viewer),
-        inputs=[file_input, user_in, chat, state],
-        outputs=[chat, map_out, state, download_btn, feature_viewer, status_output],
+        inputs=[file_input, user_in, chat, state, analysis_id_state],
+        outputs=[chat, map_out, state, download_btn, feature_viewer, status_output, analysis_id_state],
         show_progress="hidden",
         js="""
-        (file, message, chatHistory, state) => {
+        (file, message, chatHistory, state, analysisId) => {
             const text = message ?? "";
             setTimeout(() => {
                 const input = document.querySelector('#spatchat-user-input textarea, #spatchat-user-input input');
@@ -4352,7 +4376,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
                     input.dispatchEvent(new Event('input', { bubbles: true }));
                 }
             }, 0);
-            return [file, text, chatHistory, state];
+            return [file, text, chatHistory, state, analysisId];
         }
         """,
     )
