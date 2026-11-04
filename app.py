@@ -361,10 +361,28 @@ def _initialize_earth_engine():
     raise RuntimeError(" | ".join(errors) if errors else "No Earth Engine credentials found.")
 
 try:
+    print(
+        "[GEE DEBUG] Service account present:",
+        bool(os.environ.get("GEE_SERVICE_ACCOUNT")),
+        flush=True
+    )
+    print(
+        "[GEE DEBUG] Project configured:",
+        bool(os.environ.get("GEE_PROJECT")),
+        flush=True
+    )
+
     _initialize_earth_engine()
     EE_INITIALIZED = True
+    print("[GEE DEBUG] Initialization successful", flush=True)
+
 except Exception as exc:
     EE_AUTH_ERROR = str(exc)
+    print(
+        "[GEE DEBUG] Initialization failed:",
+        type(exc).__name__,
+        flush=True
+    )
 
 # ──────────────────────────────────────────────────────────────
 # Helpers for LLM response parsing (HF + Together)
