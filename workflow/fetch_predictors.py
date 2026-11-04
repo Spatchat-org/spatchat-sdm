@@ -11,6 +11,7 @@ import rasterio
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from pathlib import Path
 
 import ee
 import geemap
@@ -20,7 +21,21 @@ from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 
-load_dotenv()
+# app.py provides the specific analysis workspace for this subprocess.
+# Never fall back to a shared application directory or a prior user's files.
+APP_ROOT = Path(__file__).resolve().parent.parent
+SESSIONS_ROOT = (APP_ROOT / "sessions").resolve()
+raw_session_root = os.environ.get("SDM_SESSION_ROOT", "").strip()
+if not raw_session_root:
+    raise RuntimeError("SDM_SESSION_ROOT is missing; upload occurrence data in an active session first.")
+SESSION_ROOT = Path(raw_session_root).resolve(strict=True)
+if not SESSION_ROOT.is_dir() or SESSION_ROOT.parent != SESSIONS_ROOT:
+    raise RuntimeError("Invalid SDM session workspace.")
+# Safe in the separate fetch subprocess; all existing relative raster paths remain session-scoped.
+os.chdir(SESSION_ROOT)
+print("[SDM FETCH] Using session-specific workspace", flush=True)
+
+load_dotenv(dotenv_path=APP_ROOT / ".env")
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -116,14 +131,13 @@ except Exception as exc:
 # -----------------------------------------------------------------------------
 # Wait for presence_points.csv
 # -----------------------------------------------------------------------------
-csv_path = "inputs/presence_points.csv"
-for i in range(5):
-    if os.path.exists(csv_path):
-        break
-    print(f"⏳ Waiting for presence_points.csv… ({i+1}/5)")
-    time.sleep(1)
-if not os.path.exists(csv_path):
-    raise FileNotFoundError("❗ inputs/presence_points.csv not found.")
+csv_path = SESSION_ROOT / "inputs" / "presence_points.csv"
+if not csv_path.is_file():
+    raise FileNotFoundError(
+        "Occurrence CSV is missing from this analysis session. "
+        "Please upload your CSV again before fetching predictors."
+    )
+print("[SDM FETCH] Session occurrence CSV found", flush=True)
 
 # -----------------------------------------------------------------------------
 # Load points & define study-area region + 30 m lat/lon grid
