@@ -3043,7 +3043,7 @@ def chat_step_with_viewer(file, user_msg, history, state, analysis_session_id, r
             raise RuntimeError("SDM chat handler produced an unexpected output count")
         # Never let an internal callback silently switch analysis directories.
         state_update = update[2]
-        if isinstance(state_update, dict) and state_update.get("session_id") != sid:
+        if isinstance(state_update, dict) and "session_id" in state_update and state_update["session_id"] != sid:
             raise RuntimeError("SDM analysis session changed during chat processing")
         yield (*update, sid)
 
