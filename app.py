@@ -261,19 +261,24 @@ def _fresh_state() -> dict:
         "last_multicol_diag": {},
     }
 
+_SESSION_CWD_LOCK = threading.RLock()
+
 @contextmanager
 def _session_cwd(state: Optional[dict]):
     if isinstance(state, dict) and state.get("session_root"):
         root = state["session_root"]
     else:
         root = APP_ROOT
-    prev = os.getcwd()
-    os.makedirs(root, exist_ok=True)
-    os.chdir(root)
-    try:
-        yield root
-    finally:
-        os.chdir(prev)
+    # os.chdir() is process-wide: serialize all legacy relative-path operations.
+    # This is a temporary compatibility safeguard, not the final multi-user design.
+    with _SESSION_CWD_LOCK:
+        prev = os.getcwd()
+        os.makedirs(root, exist_ok=True)
+        os.chdir(root)
+        try:
+            yield os.path.realpath(root)
+        finally:
+            os.chdir(prev)
 
 # --- Authenticate Earth Engine ---
 # Load .env from the app directory so credentials are found even if the
@@ -1826,9 +1831,25 @@ def run_fetch(sl, lc, state=None):
         if lc and "landcover" not in sl_env:
             sl_env.append("landcover")
 
+        # The upload and fetch must use the same isolated workspace.
+        if not isinstance(state, dict) or not state.get("session_id"):
+            return create_map(state), "No active analysis session. Please upload your CSV first."
+        session_root = os.path.realpath(session_root)
+        if os.path.dirname(session_root) != os.path.realpath(SESSIONS_ROOT):
+            return create_map(state), "Invalid analysis session workspace. Please start a new session."
+        points_path = os.path.join(session_root, "inputs", "presence_points.csv")
+        if not os.path.isfile(points_path):
+            print("[SDM FETCH] Session occurrence CSV missing", flush=True)
+            return create_map(state), (
+                "Occurrence CSV was not found in this analysis session. "
+                "Please upload your CSV again before fetching predictors."
+            )
+
         run_env = os.environ.copy()
         run_env["SELECTED_LAYERS"] = ",".join(sl_env)
         run_env["SELECTED_LANDCOVER_CLASSES"] = ",".join(lc)
+        run_env["SDM_SESSION_ROOT"] = session_root
+        print("[SDM FETCH] Session occurrence CSV found", flush=True)
 
         cmd = [sys.executable, "-u", os.path.join(APP_ROOT, "workflow", "fetch_predictors.py")]
         proc = _run_subprocess(cmd, cwd=session_root, env=run_env)
