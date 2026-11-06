@@ -65,6 +65,73 @@ window.spatchatToggleTheme = function() {
   };
   if (document.body) apply(); else document.addEventListener("DOMContentLoaded", apply, { once: true });
 })();
+
+// Drag a file anywhere onto the work area (including the map iframe) to upload it.
+(function spatchatDropzone() {
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  function pickInput(file) {
+    const ext = ((file.name || "").split(".").pop() || "").toLowerCase();
+    const ids = (ext === "tif" || ext === "tiff")
+      ? ["spatchat-raster-input", "spatchat-file-input"]
+      : ["spatchat-nodes-input", "spatchat-file-input"];
+    for (const id of ids) {
+      const el = document.querySelector("#" + id + ' input[type="file"]');
+      if (el) return el;
+    }
+    return document.querySelector('#spatchat-input-row input[type="file"]');
+  }
+  function dropFiles(files) {
+    if (!files || !files.length) return;
+    const input = pickInput(files[0]);
+    if (!input) return;
+    const dt = new DataTransfer();
+    dt.items.add(files[0]);
+    input.files = dt.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  function bind(target, mapcol) {
+    target.addEventListener("dragover", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      mapcol.classList.add("spatchat-map-dragover");
+    });
+    target.addEventListener("dragleave", () => mapcol.classList.remove("spatchat-map-dragover"));
+    target.addEventListener("drop", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      mapcol.classList.remove("spatchat-map-dragover");
+      dropFiles(e.dataTransfer.files);
+    });
+  }
+  function wireIframes(mapcol) {
+    mapcol.querySelectorAll("iframe").forEach((iframe) => {
+      const wire = () => {
+        let doc = null;
+        try { doc = iframe.contentDocument; } catch (e) {}
+        if (doc && !doc.__spatchatDropWired) { doc.__spatchatDropWired = true; bind(doc, mapcol); }
+      };
+      if (!iframe.__spatchatLoadWired) { iframe.__spatchatLoadWired = true; iframe.addEventListener("load", wire); }
+      wire();
+    });
+  }
+  function init() {
+    const mapcol = document.getElementById("spatchat-mapcol");
+    if (!mapcol) return false;
+    if (!mapcol.__spatchatDropInit) {
+      mapcol.__spatchatDropInit = true;
+      bind(mapcol, mapcol);
+      new MutationObserver(() => wireIframes(mapcol)).observe(mapcol, { childList: true, subtree: true });
+    }
+    wireIframes(mapcol);
+    return true;
+  }
+  // A file dropped outside the zone must not make the browser navigate away from the app.
+  document.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener("drop", (e) => { if (hasFiles(e) && !e.defaultPrevented) e.preventDefault(); });
+  let tries = 0;
+  const timer = setInterval(() => { if (init() || ++tries > 80) clearInterval(timer); }, 250);
+})();
 </script>
 """
 
@@ -654,7 +721,7 @@ CSS = """
         border-radius: var(--radius-lg);
     }
     #spatchat-mapcol.spatchat-map-dragover::after {
-        content: "Drop CSV to upload";
+        content: "Drop file to upload";
         position: absolute;
         inset: 0;
         display: flex;
@@ -1572,6 +1639,15 @@ def chip_row(gr, labels: list[str]):
             buttons.append(btn)
     return buttons
 
+def chip_row_with_sample(gr, labels: list[str], sample_label: str = "Try sample data"):
+    """Like chip_row, with a leading 'Try sample data' button. Returns that button so the room can wire it."""
+    with gr.Row(elem_id="spatchat-chips"):
+        sample_btn = gr.Button(sample_label, elem_id="spatchat-sample-btn", size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0)
+        for label in labels:
+            btn = gr.Button(label, size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0)
+            btn.click(fn=None, js=chip_js(label))
+    return sample_btn
+
 
 def composer(gr, placeholder: str, file_types: list[str], *, file_count: str = "single"):
     """The pill-shaped message box: '+' upload button, text box, send arrow. Returns (upload, textbox, send)."""
@@ -1580,3 +1656,101 @@ def composer(gr, placeholder: str, file_types: list[str], *, file_count: str = "
         textbox = gr.Textbox(label="", show_label=False, placeholder=placeholder, lines=1, elem_id="spatchat-user-input", scale=1)
         send = gr.Button("↑", elem_id="spatchat-send-btn", scale=0, min_width=40)
     return upload, textbox, send
+
+
+# ---- Datasheet / Plots tabs (same behaviour as the Move room) -------------------------------------
+
+DATASHEET_MAX_ROWS = 500
+
+
+def empty_state_html(kind: str, title: str, text: str) -> str:
+    icons = {
+        "table": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/>',
+        "plot": '<path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/>',
+    }
+    return (
+        '<div class="spatchat-empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        f'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{icons.get(kind, icons["table"])}</svg>'
+        f'<div class="spatchat-empty-title">{title}</div><div class="spatchat-empty-text">{text}</div></div>'
+    )
+
+
+EMPTY_DATA_HTML = empty_state_html(
+    "table", "No data loaded",
+    "Click + in the chat, drag a file onto this panel, or choose &ldquo;Try sample data&rdquo;. Your table will appear here.",
+)
+EMPTY_PLOTS_HTML = empty_state_html(
+    "plot", "No plots yet",
+    "Load data and run an analysis. Plots will appear here.",
+)
+
+
+def datasheet_safe(df):
+    """First rows of df with only plain numbers/strings, so the browser table can always render it."""
+    import numpy as np
+    import pandas as pd
+
+    out = df.head(DATASHEET_MAX_ROWS).copy()
+    try:
+        out.columns = [str(c) for c in out.columns]
+        out = out.replace([np.inf, -np.inf], np.nan)
+        for col in out.columns:
+            s = out[col]
+            if s.dtype == object or (not pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s)):
+                out[col] = s.astype(str).where(s.notna(), "")
+        return out
+    except Exception:
+        return df.head(DATASHEET_MAX_ROWS).astype(str)
+
+
+def datasheet_updates(gr, df, empty_html: str = EMPTY_DATA_HTML):
+    """(table update, empty-state update). The table is never hidden through `visible` (that crashes the tab);
+    the empty-state text is swapped by value and CSS hides the table while it is present."""
+    if df is None or getattr(df, "empty", False):
+        return gr.update(value=None), gr.update(value=empty_html)
+    return gr.update(value=datasheet_safe(df)), gr.update(value="")
+
+
+def datasheet_tab(gr, label: str = "Datasheet", empty_html: str = EMPTY_DATA_HTML):
+    """Build the Datasheet tab inside `with gr.Tabs(...)`. Returns (dataframe, empty_state_html)."""
+    with gr.Tab(label, id="data", elem_id="spatchat-data-pane"):
+        empty = gr.HTML(value=empty_html, visible=True)
+        sheet = gr.Dataframe(label=f"Data (first {DATASHEET_MAX_ROWS} rows)", interactive=False, wrap=False,
+                             elem_id="spatchat-datasheet")
+    return sheet, empty
+
+
+def plots_tab(gr, label: str = "Plots", empty_html: str = EMPTY_PLOTS_HTML):
+    """Build a Plots tab with a gallery. Returns (gallery, empty_state_html)."""
+    with gr.Tab(label, id="plots", elem_id="spatchat-plots-pane"):
+        empty = gr.HTML(value=empty_html, visible=True)
+        gallery = gr.Gallery(label="Figures", columns=2, height=520, object_fit="contain", show_label=False,
+                             elem_id="spatchat-gallery", allow_preview=True)
+    return gallery, empty
+
+
+def gallery_updates(gr, paths, empty_html: str = EMPTY_PLOTS_HTML):
+    paths = [p for p in (paths or []) if p]
+    if not paths:
+        return gr.update(value=None), gr.update(value=empty_html)
+    return gr.update(value=paths), gr.update(value="")
+
+
+def list_images(*dirs, limit: int = 60):
+    """PNG/JPG files under the given directories, newest first."""
+    import os
+
+    found = []
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        for root, _, files in os.walk(d):
+            for fn in files:
+                if fn.lower().endswith((".png", ".jpg", ".jpeg")):
+                    full = os.path.join(root, fn)
+                    try:
+                        found.append((os.path.getmtime(full), full))
+                    except OSError:
+                        pass
+    found.sort(reverse=True)
+    return [p for _, p in found[:limit]]

@@ -2868,12 +2868,42 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
             gr.update(visible=False), gr.update(visible=False))
 
 
+def _sdm_views(state):
+    """Datasheet + Plots tab contents for this session."""
+    df = None
+    imgs = []
+    try:
+        if isinstance(state, dict) and state.get("session_root"):
+            with _session_cwd(state):
+                for cand in ("outputs/sdm_point_samples_raw.csv", UPLOADED_DATA_PATH):
+                    if os.path.exists(cand):
+                        df = pd.read_csv(cand)
+                        break
+                imgs = spatchat_ui.list_images(os.path.abspath("outputs"))
+    except Exception as exc:
+        print("[sdm] views refresh failed:", exc)
+    sheet_up, sheet_empty_up = spatchat_ui.datasheet_updates(gr, df, spatchat_ui.empty_state_html(
+        "table", "No data loaded", "Upload a CSV, drag one onto this panel, or choose &ldquo;Try sample data&rdquo;."))
+    gal_up, gal_empty_up = spatchat_ui.gallery_updates(gr, imgs, spatchat_ui.empty_state_html(
+        "plot", "No plots yet", "Run the species distribution model and the predictor effect plots will appear here."))
+    return sheet_up, sheet_empty_up, gal_up, gal_empty_up
+
+
+
+_SAMPLE_DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_presence.csv")
+
+
 def on_upload_with_viewer(f, history, state, analysis_session_id, request: gr.Request):
     state = _bind_gradio_state(state, request, analysis_session_id)
     out = on_upload(f, _history_to_messages(history), state)
     st = out[2] if isinstance(out, tuple) and len(out) >= 3 else state
     history_out = _history_for_chatbot(out[0])
     return (history_out, *out[1:], gr.update(value=_render_feature_viewer_html(st)), st["session_id"])
+
+
+def _load_sample_ui(history, state, analysis_session_id, request: gr.Request):
+    """'Try sample data': same path as an upload, using the bundled presence points."""
+    return on_upload_with_viewer(_SAMPLE_DATA_PATH, history, state, analysis_session_id, request)
 
 
 def confirm_coords_with_viewer(lat_col, lon_col, crs_raw, history, state, analysis_session_id, request: gr.Request):
@@ -4283,6 +4313,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
                 CHATBOT_HISTORY_MODE = "tuples"
             status_output = gr.HTML(value="", visible=True, elem_id="spatchat-status")
             with gr.Row(elem_id="spatchat-chips"):
+                sample_btn = gr.Button("Try sample data", elem_id="spatchat-sample-btn", size="sm", elem_classes=["spatchat-chip"], scale=0, min_width=0)
                 raster_input = gr.UploadButton(
                     "Upload predictor rasters",
                     file_count="multiple",
@@ -4332,6 +4363,15 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
             with gr.Tabs(elem_id="spatchat-tabs"):
                 with gr.Tab("Map", id="map"):
                     map_out = gr.HTML(create_map(), label="Map Preview", show_label=False, elem_id="spatchat-map")
+                sheet, sheet_empty = spatchat_ui.datasheet_tab(
+                    gr, "Datasheet",
+                    spatchat_ui.empty_state_html("table", "No data loaded",
+                        "Click + in the chat, drag a CSV onto this panel, or choose &ldquo;Try sample data&rdquo;. "
+                        "Your presence points (and fetched predictor values) will appear here."))
+                gallery, gallery_empty = spatchat_ui.plots_tab(
+                    gr, "Plots",
+                    spatchat_ui.empty_state_html("plot", "No plots yet",
+                        "Run the species distribution model and the predictor effect plots will appear here."))
                 with gr.Tab("Predictors", id="predictors", elem_id="spatchat-plots-pane"):
                     feature_viewer = gr.HTML(
                         value=_render_feature_viewer_html(None),
@@ -4349,17 +4389,23 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
         inputs=[file_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn,
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
-    )
+    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
+    sample_btn.click(
+        _load_sample_ui,
+        inputs=[chat, state, analysis_id_state],
+        outputs=[chat, map_out, state, download_btn,
+                 lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
+    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
     raster_input.upload(
         on_raster_upload_with_session,
         inputs=[raster_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn, feature_viewer, analysis_id_state],
-    )
+    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
     confirm_btn.click(confirm_coords_with_viewer,
         inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn,
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
-    )
+    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
     gr.on(
         triggers=[user_in.submit, send_btn.click],
         fn=metered_chat(room="sdm", message_index=1, deny=_chat_denied)(chat_step_with_viewer),
@@ -4379,7 +4425,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
             return [file, text, chatHistory, state, analysisId];
         }
         """,
-    )
+    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
 
 def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
