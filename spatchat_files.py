@@ -9,8 +9,9 @@ It works like a small directory browser:
 
 Spatial data also appears on the room's map; that is the room's business. This module only lists files.
 
-A room supplies two things:
+A room supplies:
   * which files exist  -> lists of `entry(...)` dicts, usually from `scan(...)`
+  * which dataset is active -> `stamp_sources(...)`, so every result says which data it was made from
   * what removing one means for the room's own state (reset a dataset, a raster, ...)
 
 Keep the copies in every room byte-identical; when the rooms merge this file moves over unchanged.
@@ -37,7 +38,7 @@ _TABLE_EXTS = {".csv", ".tsv", ".txt"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
 _RASTER_EXTS = {".tif", ".tiff"}
 
-COLUMNS = ["Remove", "File", "Origin", "Details", "Size", "Modified"]
+COLUMNS = ["Remove", "File", "Origin", "From", "Details", "Size", "Modified"]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -45,7 +46,8 @@ COLUMNS = ["Remove", "File", "Origin", "Details", "Size", "Modified"]
 # ----------------------------------------------------------------------------------------------
 def entry(path: str, group: str, note: str = "", name: Optional[str] = None) -> dict:
     """One file in the list. `note` is a short description such as 'Presence points' or 'Active'."""
-    return {"path": os.path.abspath(path), "group": group, "note": note, "name": name or os.path.basename(path)}
+    return {"path": os.path.abspath(path), "group": group, "note": note, "name": name or os.path.basename(path),
+            "source": ""}
 
 
 def scan(root: Optional[str], group: str, *, skip_dirs: Iterable[str] = (), skip_names: Iterable[str] = (),
@@ -105,7 +107,7 @@ def _rows(entries: list[dict]) -> list[list]:
         except OSError:
             size, age = "missing", ""
         origin = "Uploaded" if e["group"] == UPLOADED else "Produced"
-        rows.append([False, e["name"], origin, e.get("note", ""), size, age])
+        rows.append([False, e["name"], origin, e.get("source", ""), e.get("note", ""), size, age])
     return rows
 
 
@@ -163,6 +165,81 @@ def zip_paths(paths: Iterable[str], allowed_roots: Iterable[str]) -> Optional[st
             used.add(name)
             z.write(p, arcname=name)
     return archive
+
+
+# ----------------------------------------------------------------------------------------------
+# provenance: which dataset each result was made from
+# ----------------------------------------------------------------------------------------------
+def _load_registry(registry_path: str) -> dict:
+    import json
+
+    try:
+        with open(registry_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_registry(registry_path: str, data: dict) -> None:
+    import json
+
+    try:
+        os.makedirs(os.path.dirname(registry_path) or ".", exist_ok=True)
+        with open(registry_path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass
+
+
+def stamp_sources(entries: list[dict], registry_path: str, active_source: str) -> list[dict]:
+    """Record, for every produced file, the dataset that was active when it appeared (or was rewritten).
+
+    Call this each time the Files list is rebuilt, before showing it: a result that is new, or whose file was
+    rewritten since the last call, belongs to `active_source`; the rest keep the dataset they were stamped with.
+    Uploaded files are their own source and are left alone. Returns `entries` with "source" filled in."""
+    registry = _load_registry(registry_path)
+    changed = False
+    for e in entries:
+        if e["group"] != PRODUCED:
+            continue
+        try:
+            mtime = round(os.path.getmtime(e["path"]), 2)
+        except OSError:
+            continue
+        rec = registry.get(e["path"])
+        if rec is None or abs(rec.get("mtime", 0) - mtime) > 0.01:
+            rec = {"mtime": mtime, "source": active_source or ""}
+            registry[e["path"]] = rec
+            changed = True
+        e["source"] = rec.get("source", "")
+    stale = [path for path in registry if not os.path.exists(path)]  # forget results that were deleted
+    for path in stale:
+        del registry[path]
+    if changed or stale:
+        _save_registry(registry_path, registry)
+    return entries
+
+
+def carry_sources(old_dir: str, new_dir: str, registry_path: str) -> None:
+    """After files were copied from old_dir to new_dir, give the copies the same dataset as the originals."""
+    registry = _load_registry(registry_path)
+    old_dir, new_dir = os.path.abspath(old_dir), os.path.abspath(new_dir)
+    changed = False
+    for cur, _, files in os.walk(new_dir):
+        for fn in files:
+            new_path = os.path.join(cur, fn)
+            old_path = os.path.join(old_dir, os.path.relpath(new_path, new_dir))
+            rec = registry.get(os.path.abspath(old_path))
+            if rec is not None:
+                try:
+                    registry[os.path.abspath(new_path)] = {"mtime": round(os.path.getmtime(new_path), 2),
+                                                           "source": rec.get("source", "")}
+                    changed = True
+                except OSError:
+                    pass
+    if changed:
+        _save_registry(registry_path, registry)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -293,6 +370,7 @@ CSS = """
     padding: 10px 12px; border: 1px dashed var(--spatchat-border, #cfd9d2); border-radius: 10px; margin: 4px 0; }
 #spatchat-files-list { margin-bottom: 4px; }
 #spatchat-files-list table { font-size: 13px; }
+#spatchat-files-list td, #spatchat-files-list th { white-space: nowrap; }
 #spatchat-files-actions { display: flex !important; flex-wrap: wrap !important; gap: 8px !important; margin: 8px 0 2px; align-items: center; }
 #spatchat-files-actions > * { flex: 0 0 auto !important; width: auto !important; min-width: 0 !important; }
 #spatchat-files-actions button { white-space: nowrap !important; min-width: 130px !important; padding: 6px 14px !important; }
@@ -383,14 +461,14 @@ def build(gr, *, label: str = "Files") -> Panel:
     with gr.Tab(label, id="files", elem_id="spatchat-files-pane"):
         gr.HTML(CSS)
         gr.HTML('<div class="spatchat-files-title">Your files &mdash; tick <i>Remove</i> to delete, click a row to open it</div>')
-        kwargs = dict(value=None, headers=COLUMNS, datatype=["bool", "str", "str", "str", "str", "str"],
+        kwargs = dict(value=None, headers=COLUMNS, datatype=["bool", "str", "str", "str", "str", "str", "str"],
                       interactive=True, wrap=False, label="Files", show_label=False, elem_id="spatchat-files-list")
         import inspect
 
         accepted = set(inspect.signature(gr.Dataframe.__init__).parameters)
         # `col_count` was renamed `column_count` in Gradio 6.
         kwargs["column_count" if "column_count" in accepted else "col_count"] = (len(COLUMNS), "fixed")
-        for opt, val in (("static_columns", [1, 2, 3, 4, 5]), ("max_height", 260)):
+        for opt, val in (("static_columns", [1, 2, 3, 4, 5, 6]), ("max_height", 260)):
             if opt in accepted:
                 kwargs[opt] = val
         table = gr.Dataframe(**kwargs)

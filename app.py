@@ -2916,6 +2916,8 @@ def _sdm_files_entries(state):
     zp = os.path.join(root, "spatchat_results.zip")
     if os.path.isfile(zp):
         produced.append(sfiles.entry(zp, sfiles.PRODUCED, "Results bundle"))
+    names = [e["name"] for e in uploaded if e["name"].lower().endswith(".csv")]
+    sfiles.stamp_sources(produced, os.path.join(root, ".provenance.json"), names[0] if names else "")
     return uploaded, produced
 
 
