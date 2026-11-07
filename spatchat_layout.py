@@ -51,13 +51,13 @@ def _folium():
 def _base_map(location=(20, 0), zoom=2):
     folium = _folium()
     m = folium.Map(location=list(location), zoom_start=zoom, control_scale=True, tiles=None)
-    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap", show=False).add_to(m)
     folium.TileLayer("CartoDB positron", name="CartoDB Positron", attr="CartoDB", show=False).add_to(m)
     folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", name="Topographic", attr="OpenTopoMap",
                      show=False).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        name="Satellite", attr="Esri", show=False).add_to(m)
+        name="Satellite", attr="Esri", show=True).add_to(m)
     return m
 
 
