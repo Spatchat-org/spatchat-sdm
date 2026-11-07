@@ -22,6 +22,7 @@ from typing import Optional
 
 import gradio as gr
 import spatchat_ui
+import spatchat_files as sfiles
 import folium
 import html as html_lib
 import pandas as pd
@@ -2868,25 +2869,120 @@ def confirm_coords(lat_col, lon_col, crs_raw, history, state):
             gr.update(visible=False), gr.update(visible=False))
 
 
-def _sdm_views(state):
-    """Datasheet + Plots tab contents for this session."""
-    df = None
+def _sdm_views(state, open_points=False):
+    """Plots + Files tab contents for this session. `open_points` also opens the uploaded CSV as a datasheet."""
     imgs = []
     try:
         if isinstance(state, dict) and state.get("session_root"):
-            with _session_cwd(state):
-                for cand in ("outputs/sdm_point_samples_raw.csv", UPLOADED_DATA_PATH):
-                    if os.path.exists(cand):
-                        df = pd.read_csv(cand)
-                        break
-                imgs = spatchat_ui.list_images(os.path.abspath("outputs"))
+            imgs = spatchat_ui.list_images(os.path.join(state["session_root"], "outputs"))
     except Exception as exc:
         print("[sdm] views refresh failed:", exc)
-    sheet_up, sheet_empty_up = spatchat_ui.datasheet_updates(gr, df, spatchat_ui.empty_state_html(
-        "table", "No data loaded", "Upload a CSV, drag one onto this panel, or choose &ldquo;Try sample data&rdquo;."))
     gal_up, gal_empty_up = spatchat_ui.gallery_updates(gr, imgs, spatchat_ui.empty_state_html(
         "plot", "No plots yet", "Run the species distribution model and the predictor effect plots will appear here."))
-    return sheet_up, sheet_empty_up, gal_up, gal_empty_up
+    uploaded, produced = _sdm_files_entries(state)
+    first_csv = next((e["path"] for e in uploaded if e["path"].lower().endswith(".csv")), None)
+    return (gal_up, gal_empty_up,
+            *files_panel.updates(gr, uploaded, produced, preview_path=first_csv if open_points else None))
+
+
+def _sdm_views_open(state):
+    """After an upload: refresh, and open the points CSV."""
+    return _sdm_views(state, open_points=True)
+
+
+def _sdm_files_entries(state):
+    """(uploaded, produced) file entries for the Files tab."""
+    if not isinstance(state, dict) or not state.get("session_root"):
+        return [], []
+    root = state["session_root"]
+    raw_dir = os.path.join(root, USER_RASTER_RAW_DIR)
+    wgs_dir = os.path.join(root, USER_RASTER_WGS84_DIR)
+    user_stems = {os.path.splitext(f)[0].lower() for f in os.listdir(raw_dir)} if os.path.isdir(raw_dir) else set()
+
+    uploaded = []
+    for rel, note in (("inputs/uploaded_data.csv", "Presence points"), (UPLOADED_ABSENCE_PATH, "Absence points")):
+        fp = os.path.join(root, rel)
+        if os.path.isfile(fp):
+            uploaded.append(sfiles.entry(fp, sfiles.UPLOADED, note))
+    uploaded += sfiles.scan(raw_dir, sfiles.UPLOADED, note_for=lambda p: "Your predictor raster")
+
+    produced = sfiles.scan(wgs_dir, sfiles.PRODUCED, exts=(".tif", ".tiff"),
+                           note_for=lambda p: "Fetched predictor layer")
+    produced = [e for e in produced if os.path.splitext(e["name"])[0].lower() not in user_stems]
+    fp = os.path.join(root, FEATURE_WORKSPACE_CSV)
+    if os.path.isfile(fp):
+        produced.append(sfiles.entry(fp, sfiles.PRODUCED, "Extracted predictor values"))
+    produced += sfiles.scan(os.path.join(root, "outputs"), sfiles.PRODUCED)
+    zp = os.path.join(root, "spatchat_results.zip")
+    if os.path.isfile(zp):
+        produced.append(sfiles.entry(zp, sfiles.PRODUCED, "Results bundle"))
+    return uploaded, produced
+
+
+def _sdm_forget_predictors(state, names):
+    """Drop removed predictors from the extracted-values table so models never see them."""
+    names = {n for n in names if n}
+    if not names:
+        return
+    with _session_cwd(state):
+        try:
+            if os.path.exists(FEATURE_WORKSPACE_CSV):
+                df = pd.read_csv(FEATURE_WORKSPACE_CSV)
+                keep = [c for c in df.columns if c not in names]
+                if len(keep) != len(df.columns):
+                    df[keep].to_csv(FEATURE_WORKSPACE_CSV, index=False)
+            refresh_workspace_from_rasters()
+        except Exception as exc:
+            print("[sdm] could not refresh values after removal:", exc)
+
+
+def _sdm_files_remove(rows, paths, history, state, analysis_session_id, request: gr.Request):
+    """Delete the ticked files and reset whatever the room had loaded from them."""
+    state = _bind_gradio_state(state, request, analysis_session_id)
+    root = state["session_root"]
+    removed, problems = sfiles.remove_paths(files_panel.ticked(rows, paths), [root])
+    gone = {os.path.abspath(p) for p in removed}
+    inputs_dir = os.path.abspath(os.path.join(root, "inputs"))
+    raw_dir = os.path.abspath(os.path.join(root, USER_RASTER_RAW_DIR))
+    wgs_dir = os.path.abspath(os.path.join(root, USER_RASTER_WGS84_DIR))
+
+    raster_names = set()
+    for p in gone:
+        folder, stem = os.path.dirname(p), os.path.splitext(os.path.basename(p))[0]
+        if folder in (raw_dir, wgs_dir) and p.lower().endswith((".tif", ".tiff")):
+            raster_names.add(stem)
+    for stem in raster_names:  # a raster lives as an original plus a WGS84 copy: remove both
+        for folder in (raw_dir, wgs_dir):
+            if os.path.isdir(folder):
+                for fn in os.listdir(folder):
+                    if os.path.splitext(fn)[0] == stem:
+                        sfiles.remove_paths([os.path.join(folder, fn)], [root])
+    if raster_names:
+        _sdm_forget_predictors(state, raster_names)
+
+    if os.path.join(inputs_dir, "uploaded_data.csv") in gone:  # the points are gone: so is everything built from them
+        for fn in ("presence_points.csv", "movement_points.csv", "data_metadata.json",
+                   "feature_workspace.csv", "feature_workspace_meta.json"):
+            sfiles.remove_paths([os.path.join(inputs_dir, fn)], [root])
+        state.pop("data_metadata", None)
+        state.pop("pending_upload", None)
+        clear_analysis_state = {"awaiting_method_choice": False, "selected_method": None,
+                                "awaiting_prune_confirmation": False, "pending_prune_predictors": [],
+                                "pending_model_request": {}}
+        state.update(clear_analysis_state)
+
+    msgs = _history_to_messages(history)
+    if gone:
+        msgs.append({"role": "assistant", "content": sfiles.removal_message(removed)})
+    return (*files_panel.updates(gr, *_sdm_files_entries(state), message=sfiles.removal_message(removed), problems=problems,
+                                  reset_preview=bool(removed)),
+            _history_for_chatbot(msgs), create_map(state), state,
+            gr.update(value=_render_feature_viewer_html(state)), state["session_id"])
+
+
+def _sdm_files_download(rows, paths, state):
+    roots = [state.get("session_root")] if isinstance(state, dict) else []
+    return files_panel.download_update(gr, rows, paths, roots)
 
 
 
@@ -4363,15 +4459,11 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
             with gr.Tabs(elem_id="spatchat-tabs"):
                 with gr.Tab("Map", id="map"):
                     map_out = gr.HTML(create_map(), label="Map Preview", show_label=False, elem_id="spatchat-map")
-                sheet, sheet_empty = spatchat_ui.datasheet_tab(
-                    gr, "Datasheet",
-                    spatchat_ui.empty_state_html("table", "No data loaded",
-                        "Click + in the chat, drag a CSV onto this panel, or choose &ldquo;Try sample data&rdquo;. "
-                        "Your presence points (and fetched predictor values) will appear here."))
                 gallery, gallery_empty = spatchat_ui.plots_tab(
                     gr, "Plots",
                     spatchat_ui.empty_state_html("plot", "No plots yet",
                         "Run the species distribution model and the predictor effect plots will appear here."))
+                files_panel = sfiles.build(gr)
                 with gr.Tab("Predictors", id="predictors", elem_id="spatchat-plots-pane"):
                     feature_viewer = gr.HTML(
                         value=_render_feature_viewer_html(None),
@@ -4385,27 +4477,37 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
     demo.queue(max_size=16)
     demo.unload(_cleanup_current_browser_session)
 
+    VIEW_OUTPUTS = [gallery, gallery_empty, *files_panel.outputs]
+    files_panel.refresh_btn.click(_sdm_views, inputs=state, outputs=VIEW_OUTPUTS)
+    files_panel.remove_btn.click(
+        _sdm_files_remove,
+        inputs=[*files_panel.selections, chat, state, analysis_id_state],
+        outputs=[*files_panel.outputs, chat, map_out, state, feature_viewer, analysis_id_state],
+    ).then(_sdm_views, inputs=state, outputs=VIEW_OUTPUTS, show_progress="hidden")
+    files_panel.table.input(_sdm_files_download, inputs=[*files_panel.selections, state],
+                            outputs=files_panel.download_btn, show_progress="hidden")
+
     file_input.upload(on_upload_with_viewer,
         inputs=[file_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn,
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
-    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
+    ).then(_sdm_views_open, inputs=state, outputs=VIEW_OUTPUTS)
     sample_btn.click(
         _load_sample_ui,
         inputs=[chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn,
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
-    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
+    ).then(_sdm_views_open, inputs=state, outputs=VIEW_OUTPUTS)
     raster_input.upload(
         on_raster_upload_with_session,
         inputs=[raster_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn, feature_viewer, analysis_id_state],
-    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
+    ).then(_sdm_views, inputs=state, outputs=VIEW_OUTPUTS)
     confirm_btn.click(confirm_coords_with_viewer,
         inputs=[lat_dropdown, lon_dropdown, crs_input, chat, state, analysis_id_state],
         outputs=[chat, map_out, state, download_btn,
                  lat_dropdown, lon_dropdown, crs_input, confirm_btn, feature_viewer, analysis_id_state]
-    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty])
+    ).then(_sdm_views_open, inputs=state, outputs=VIEW_OUTPUTS)
     gr.on(
         triggers=[user_in.submit, send_btn.click],
         fn=metered_chat(room="sdm", message_index=1, deny=_chat_denied)(chat_step_with_viewer),
@@ -4425,7 +4527,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
             return [file, text, chatHistory, state, analysisId];
         }
         """,
-    ).then(_sdm_views, inputs=state, outputs=[sheet, sheet_empty, gallery, gallery_empty], show_progress="hidden")
+    ).then(_sdm_views, inputs=state, outputs=VIEW_OUTPUTS, show_progress="hidden")
 
 def _launch_demo(blocks: gr.Blocks) -> None:
     launch_kwargs = {
