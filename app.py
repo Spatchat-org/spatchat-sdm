@@ -4329,6 +4329,7 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
                         fn=None, js=spatchat_ui.chip_js(_label)
                     )
             file_input, user_in, send_btn = spatchat_ui.composer(gr, "Message Spatchat...", [".csv"])
+            spatchat_ui.drop_hint(gr, "a presence CSV (or predictor GeoTIFFs)")
             lat_dropdown = gr.Dropdown(
                 choices=[],
                 label="Y / latitude column",

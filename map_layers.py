@@ -915,6 +915,17 @@ def _add_circle_marker_feature_group_script(
     root.add_child(patch)
 
 
+EMPTY_MAP_HINT = """
+<div class="spatchat-map-empty-hint">
+  <div class="spatchat-map-empty-hint-card">
+    <div class="spatchat-map-empty-hint-icon">&#128205;</div>
+    <div>Drop a presence CSV here, or click + to start</div>
+    <div class="spatchat-map-empty-hint-sub">Latitude/longitude columns required &middot; or click &ldquo;Try sample data&rdquo;</div>
+  </div>
+</div>
+"""
+
+
 def render_sdm_map(
     *,
     session_root: str | None,
@@ -924,7 +935,7 @@ def render_sdm_map(
 ):
     if not session_root:
         m = render_empty_map()
-        return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:100%; min-height:78vh; border:none;"></iframe>'
+        return EMPTY_MAP_HINT + f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:100%; min-height:78vh; border:none;"></iframe>'
 
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True, tiles=None)
     add_default_basemaps(m)
@@ -1101,4 +1112,5 @@ def render_sdm_map(
     folium.LayerControl(collapsed=False).add_to(m)
     _add_floating_ui_patch(m)
     _add_layer_control_sort_patch(m, pane_by_label=pane_by_label)
-    return f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:100%; min-height:78vh; border:none;"></iframe>'
+    hint = "" if os.path.exists(ppath) else EMPTY_MAP_HINT
+    return hint + f'<iframe srcdoc="{html_lib.escape(m.get_root().render())}" style="width:100%; height:100%; min-height:78vh; border:none;"></iframe>'
