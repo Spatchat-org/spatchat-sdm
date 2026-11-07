@@ -23,6 +23,7 @@ from typing import Optional
 import gradio as gr
 import spatchat_ui
 import spatchat_files as sfiles
+import spatchat_layout
 import folium
 import html as html_lib
 import pandas as pd
@@ -4461,8 +4462,8 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
             with gr.Tabs(elem_id="spatchat-tabs"):
                 with gr.Tab("Map", id="map"):
                     map_out = gr.HTML(create_map(), label="Map Preview", show_label=False, elem_id="spatchat-map")
-                gallery, gallery_empty = spatchat_ui.plots_tab(
-                    gr, "Plots",
+                gallery, gallery_empty = spatchat_layout.plots_tab(
+                    gr,
                     spatchat_ui.empty_state_html("plot", "No plots yet",
                         "Run the species distribution model and the predictor effect plots will appear here."))
                 files_panel = sfiles.build(gr)
