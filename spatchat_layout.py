@@ -31,7 +31,7 @@ import spatchat_files as sfiles
 import spatchat_ui
 
 # One qualitative palette, no green. Used when a map or chart needs "a colour per group".
-PALETTE = ["#f85088", "#e4572e", "#9b3dbf", "#f2a900", "#0891b2", "#d6336c", "#7c4a2d", "#475569", "#4f46e5", "#c2410c"]
+PALETTE = ["#fa6a98", "#e4572e", "#9b3dbf", "#f2a900", "#0891b2", "#d6336c", "#7c4a2d", "#475569", "#4f46e5", "#c2410c"]
 POINT_COLOR = PALETTE[0]
 MAX_POINTS = 5000
 

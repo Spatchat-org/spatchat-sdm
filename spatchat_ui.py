@@ -146,8 +146,8 @@ CSS = """
         --spatchat-text: #101724;
         --spatchat-text-secondary: #5c626b;
         --spatchat-text-subtle: #8a8f97;
-        --spatchat-accent: #f85088;
-        --spatchat-accent-hover: #e03a74;
+        --spatchat-accent: #fa6a98;
+        --spatchat-accent-hover: #f0578b;
         --spatchat-accent-soft: #fde8f0;
         --spatchat-shadow: 0 1px 3px rgba(16, 23, 36, 0.08), 0 1px 2px rgba(16, 23, 36, 0.06);
     }
@@ -727,7 +727,7 @@ CSS = """
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(248, 80, 136, 0.14);
+        background: rgba(250, 106, 152, 0.14);
         color: var(--spatchat-accent-hover);
         font-size: 13px;
         font-weight: 600;
@@ -1178,7 +1178,7 @@ CSS = """
         transition: background 0.15s ease, transform 0.1s ease;
     }
     #spatchat-share-btn:hover {
-        background: #e03a74 !important;
+        background: #f0578b !important;
     }
     #spatchat-share-btn:active {
         transform: scale(0.96);
@@ -1422,7 +1422,7 @@ CSS = """
     #spatchat-lightbox .sl-count { font-size: 12px; color: var(--spatchat-text-secondary, #5c626b); margin-right: 6px; }
     #spatchat-lightbox .sl-nav button { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--spatchat-border, rgba(0,0,0,.12)); cursor: pointer;
         background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #101724); font-size: 17px; line-height: 1; }
-    #spatchat-lightbox .sl-nav button:hover:not(:disabled) { background: var(--spatchat-accent-soft, #fde8f0); border-color: var(--spatchat-accent, #f85088); }
+    #spatchat-lightbox .sl-nav button:hover:not(:disabled) { background: var(--spatchat-accent-soft, #fde8f0); border-color: var(--spatchat-accent, #fa6a98); }
     #spatchat-lightbox .sl-nav button:disabled { opacity: .35; cursor: default; }
     #spatchat-lightbox .sl-body { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 16px; background: var(--spatchat-surface, #fff); }
     #spatchat-lightbox .sl-body img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; background: #fff; border-radius: 8px; margin: auto; }
@@ -1458,8 +1458,8 @@ CSS = """
         --spatchat-text: #0f172a;
         --spatchat-text-secondary: #475569;
         --spatchat-text-subtle: #94a3b8;
-        --spatchat-accent: #f85088;
-        --spatchat-accent-hover: #e03a74;
+        --spatchat-accent: #fa6a98;
+        --spatchat-accent-hover: #f0578b;
         --spatchat-accent-soft: #fde8f0;
         --spatchat-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
         --spatchat-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
