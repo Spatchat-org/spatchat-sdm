@@ -365,9 +365,9 @@ CSS = """
 #spatchat-tabs #spatchat-files-pane[style*="display: none"] { display: none !important; }
 #spatchat-files-pane .block { border: none !important; box-shadow: none !important; background: transparent !important;
     min-height: 0 !important; padding: 0 !important; }
-#spatchat-files-pane .spatchat-files-title { font-size: 13px; font-weight: 600; color: var(--spatchat-text, #1c2b22); margin: 8px 0 4px; }
-#spatchat-files-pane .spatchat-files-empty { font-size: 13px; color: var(--spatchat-text-secondary, #5c6b63);
-    padding: 10px 12px; border: 1px dashed var(--spatchat-border, #cfd9d2); border-radius: 10px; margin: 4px 0; }
+#spatchat-files-pane .spatchat-files-title { font-size: 13px; font-weight: 600; color: var(--spatchat-text, #1c222b); margin: 8px 0 4px; }
+#spatchat-files-pane .spatchat-files-empty { font-size: 13px; color: var(--spatchat-text-secondary, #5c626b);
+    padding: 10px 12px; border: 1px dashed var(--spatchat-border, #cfd3d9); border-radius: 10px; margin: 4px 0; }
 #spatchat-files-list { margin-bottom: 4px; }
 #spatchat-files-list table { font-size: 13px; }
 #spatchat-files-list td, #spatchat-files-list th { white-space: nowrap; }
@@ -375,11 +375,11 @@ CSS = """
 #spatchat-files-actions > * { flex: 0 0 auto !important; width: auto !important; min-width: 0 !important; }
 #spatchat-files-actions button { white-space: nowrap !important; min-width: 130px !important; padding: 6px 14px !important; }
 #spatchat-files-remove { background: transparent !important; color: #b3261e !important; border: 1px solid #b3261e !important; border-radius: 10px !important; }
-#spatchat-files-status { font-size: 13px; color: var(--spatchat-text-secondary, #5c6b63); min-height: 18px; }
+#spatchat-files-status { font-size: 13px; color: var(--spatchat-text-secondary, #5c626b); min-height: 18px; }
 #spatchat-files-status .spatchat-files-problem { color: #b3261e; }
 .spatchat-files-preview-head { font-size: 14px; margin: 6px 0 4px; }
-.spatchat-files-preview-head span { color: var(--spatchat-text-secondary, #5c6b63); font-size: 12px; margin-left: 6px; }
-.spatchat-files-preview-body { font-size: 12.5px; color: var(--spatchat-text-secondary, #5c6b63); margin-bottom: 6px; overflow-wrap: anywhere; }
+.spatchat-files-preview-head span { color: var(--spatchat-text-secondary, #5c626b); font-size: 12px; margin-left: 6px; }
+.spatchat-files-preview-body { font-size: 12.5px; color: var(--spatchat-text-secondary, #5c626b); margin-bottom: 6px; overflow-wrap: anywhere; }
 .spatchat-files-preview-body pre { white-space: pre-wrap; max-height: 220px; overflow: auto; }
 #spatchat-files-preview-table { margin-top: 4px; }
 </style>

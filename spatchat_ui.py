@@ -139,17 +139,17 @@ CSS = """
 <style>
 
     :root {
-        --spatchat-connect-bg: #f5f8f5;
+        --spatchat-connect-bg: #f5f6f8;
         --spatchat-surface: #ffffff;
-        --spatchat-surface-alt: #eef3ee;
-        --spatchat-border: rgba(16, 36, 26, 0.1);
-        --spatchat-text: #10241a;
-        --spatchat-text-secondary: #5c6b63;
-        --spatchat-text-subtle: #8a978f;
-        --spatchat-accent: #1f7a4f;
-        --spatchat-accent-hover: #17603d;
-        --spatchat-accent-soft: #e3f2e8;
-        --spatchat-shadow: 0 1px 3px rgba(16, 36, 26, 0.08), 0 1px 2px rgba(16, 36, 26, 0.06);
+        --spatchat-surface-alt: #eef0f3;
+        --spatchat-border: rgba(16, 23, 36, 0.1);
+        --spatchat-text: #101724;
+        --spatchat-text-secondary: #5c626b;
+        --spatchat-text-subtle: #8a8f97;
+        --spatchat-accent: #2563eb;
+        --spatchat-accent-hover: #1d4ed8;
+        --spatchat-accent-soft: #e6eefc;
+        --spatchat-shadow: 0 1px 3px rgba(16, 23, 36, 0.08), 0 1px 2px rgba(16, 23, 36, 0.06);
     }
     :host,
     html,
@@ -200,7 +200,7 @@ CSS = """
         overflow-x: clip;
         padding-right: 4px !important;
         font-size: 15px;
-        scrollbar-color: #c9d3cb var(--spatchat-surface-alt);
+        scrollbar-color: #c9cdd3 var(--spatchat-surface-alt);
         scrollbar-width: thin;
     }
     #spatchat-sidebar::-webkit-scrollbar {
@@ -211,17 +211,17 @@ CSS = """
         border-radius: 999px;
     }
     #spatchat-sidebar::-webkit-scrollbar-thumb {
-        background: #c9d3cb;
+        background: #c9cdd3;
         border-radius: 999px;
         border: 2px solid var(--spatchat-surface-alt);
     }
     #spatchat-sidebar::-webkit-scrollbar-thumb:hover {
-        background: #b5c1b7;
+        background: #b5b9c1;
     }
     #spatchat-sidebar::-webkit-scrollbar-button:single-button {
         display: block;
         height: 12px;
-        background-color: #c9d3cb;
+        background-color: #c9cdd3;
         border-radius: 999px;
         border: 2px solid var(--spatchat-surface-alt);
         background-repeat: no-repeat;
@@ -310,7 +310,7 @@ CSS = """
     #spatchat-chatbot > div,
     #spatchat-chatbot .panel-wrap,
     #spatchat-chatbot .wrap {
-        scrollbar-color: #c9d3cb var(--spatchat-connect-bg);
+        scrollbar-color: #c9cdd3 var(--spatchat-connect-bg);
         scrollbar-width: thin;
     }
     #spatchat-chatbot::-webkit-scrollbar,
@@ -330,7 +330,7 @@ CSS = """
     #spatchat-chatbot > div::-webkit-scrollbar-thumb,
     #spatchat-chatbot .panel-wrap::-webkit-scrollbar-thumb,
     #spatchat-chatbot .wrap::-webkit-scrollbar-thumb {
-        background: #c9d3cb;
+        background: #c9cdd3;
         border-radius: 999px;
         border: 2px solid var(--spatchat-connect-bg);
     }
@@ -338,7 +338,7 @@ CSS = """
     #spatchat-chatbot > div::-webkit-scrollbar-thumb:hover,
     #spatchat-chatbot .panel-wrap::-webkit-scrollbar-thumb:hover,
     #spatchat-chatbot .wrap::-webkit-scrollbar-thumb:hover {
-        background: #b5c1b7;
+        background: #b5b9c1;
     }
     #spatchat-chatbot::-webkit-scrollbar-button:single-button,
     #spatchat-chatbot > div::-webkit-scrollbar-button:single-button,
@@ -346,7 +346,7 @@ CSS = """
     #spatchat-chatbot .wrap::-webkit-scrollbar-button:single-button {
         display: block;
         height: 12px;
-        background-color: #c9d3cb;
+        background-color: #c9cdd3;
         border-radius: 999px;
         border: 2px solid var(--spatchat-connect-bg);
         background-repeat: no-repeat;
@@ -727,7 +727,7 @@ CSS = """
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(31, 122, 79, 0.14);
+        background: rgba(37, 99, 235, 0.14);
         color: var(--spatchat-accent-hover);
         font-size: 13px;
         font-weight: 600;
@@ -1178,7 +1178,7 @@ CSS = """
         transition: background 0.15s ease, transform 0.1s ease;
     }
     #spatchat-share-btn:hover {
-        background: #17603d !important;
+        background: #1d4ed8 !important;
     }
     #spatchat-share-btn:active {
         transform: scale(0.96);
@@ -1201,12 +1201,12 @@ CSS = """
         padding: 8px 14px !important;
         border-radius: 10px !important;
         background: #ffffff !important;
-        border: 1px solid rgba(16, 36, 26, 0.12) !important;
-        color: #10241a !important;
+        border: 1px solid rgba(16, 23, 36, 0.12) !important;
+        color: #101724 !important;
         font-size: 12px !important;
         font-weight: 600 !important;
         text-align: center !important;
-        box-shadow: 0 8px 24px rgba(16, 36, 26, 0.16) !important;
+        box-shadow: 0 8px 24px rgba(16, 23, 36, 0.16) !important;
     }
     .spatchat-map-empty-hint-card * {
         color: inherit !important;
@@ -1217,7 +1217,7 @@ CSS = """
     .spatchat-map-empty-hint-sub {
         font-size: 10px !important;
         font-weight: 500 !important;
-        color: #5c6b63 !important;
+        color: #5c626b !important;
     }
     
 
@@ -1349,10 +1349,10 @@ CSS = """
     /* composer */
     #spatchat-input-row {
         background: var(--spatchat-surface) !important; border: 1px solid var(--spatchat-border) !important; border-radius: 28px !important;
-        padding: 6px 8px 6px 8px !important; margin: 0 0 10px !important; box-shadow: 0 2px 10px rgba(16,36,26,.10) !important;
+        padding: 6px 8px 6px 8px !important; margin: 0 0 10px !important; box-shadow: 0 2px 10px rgba(16, 23, 36,.10) !important;
         min-height: 54px; align-items: center !important;
     }
-    #spatchat-input-row:focus-within { border-color: var(--spatchat-accent) !important; box-shadow: 0 0 0 3px var(--spatchat-accent-soft), 0 2px 10px rgba(16,36,26,.10) !important; }
+    #spatchat-input-row:focus-within { border-color: var(--spatchat-accent) !important; box-shadow: 0 0 0 3px var(--spatchat-accent-soft), 0 2px 10px rgba(16, 23, 36,.10) !important; }
     #spatchat-user-input textarea, #spatchat-user-input input { font-size: 15px !important; padding: 10px 6px !important; }
     #spatchat-file-input { width: 36px !important; height: 36px !important; min-width: 36px !important; flex: 0 0 36px !important; background: var(--spatchat-surface-alt) !important; color: var(--spatchat-text) !important; font-size: 22px !important; }
     #spatchat-file-input:hover { background: var(--spatchat-accent-soft) !important; color: var(--spatchat-accent) !important; }
@@ -1398,31 +1398,31 @@ CSS = """
     .spatchat-thumb { position: relative; display: flex !important; flex-direction: column; text-align: left !important; align-items: stretch !important; padding: 0 !important; cursor: zoom-in; overflow: hidden;
         background: var(--spatchat-surface) !important; color: var(--spatchat-text) !important; border: 1px solid var(--spatchat-border); border-radius: 12px;
         box-shadow: var(--spatchat-shadow); transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease; font: inherit; }
-    .spatchat-thumb:hover { transform: translateY(-2px); border-color: var(--spatchat-accent); box-shadow: 0 6px 18px rgba(16,36,26,.16); }
+    .spatchat-thumb:hover { transform: translateY(-2px); border-color: var(--spatchat-accent); box-shadow: 0 6px 18px rgba(16, 23, 36,.16); }
     .spatchat-thumb-preview { display: block; height: 100px; background: #fff; overflow: hidden; border-bottom: 1px solid var(--spatchat-border); }
     .spatchat-thumb-img { display: block; width: 100%; height: 100%; object-fit: contain; }
-    .spatchat-thumb-table { height: 100%; overflow: hidden; font-size: 9px; padding: 6px; color: #10241a; pointer-events: none; }
+    .spatchat-thumb-table { height: 100%; overflow: hidden; font-size: 9px; padding: 6px; color: #101724; pointer-events: none; }
     .spatchat-thumb-meta { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px 9px; text-align: left; }
     .spatchat-thumb-title { font-size: 12px; font-weight: 600; line-height: 1.3; }
     .spatchat-thumb-sub { font-size: 10.5px; color: var(--spatchat-text-secondary); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .spatchat-thumb-badge { position: absolute; top: 8px; left: 8px; background: var(--spatchat-accent); color: #fff; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
-    .spatchat-thumb-zoom { position: absolute; top: 8px; right: 8px; background: rgba(16,36,26,.78); color: #fff; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; opacity: 0; transition: opacity .12s; }
+    .spatchat-thumb-zoom { position: absolute; top: 8px; right: 8px; background: rgba(16, 23, 36,.78); color: #fff; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; opacity: 0; transition: opacity .12s; }
     .spatchat-thumb:hover .spatchat-thumb-zoom, .spatchat-thumb:focus-visible .spatchat-thumb-zoom { opacity: 1; }
     #spatchat-lightbox { position: fixed; inset: 0; z-index: 100000; display: none; align-items: center; justify-content: center; }
     #spatchat-lightbox.open { display: flex; }
-    #spatchat-lightbox .sl-backdrop { position: absolute; inset: 0; background: rgba(8,14,11,.62); backdrop-filter: blur(2px); }
+    #spatchat-lightbox .sl-backdrop { position: absolute; inset: 0; background: rgba(8, 10, 14,.62); backdrop-filter: blur(2px); }
     #spatchat-lightbox .sl-panel { position: relative; display: flex; flex-direction: column; width: min(1100px, 92vw); height: min(86vh, 900px);
-        background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #10241a); border-radius: 16px; overflow: hidden;
+        background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #101724); border-radius: 16px; overflow: hidden;
         box-shadow: 0 24px 80px rgba(0,0,0,.45); border: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); }
     #spatchat-lightbox .sl-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px;
-        border-bottom: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); background: var(--spatchat-surface-alt, #eef3ee); }
+        border-bottom: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); background: var(--spatchat-surface-alt, #eef0f3); }
     #spatchat-lightbox .sl-title { font-size: 15px; font-weight: 700; }
-    #spatchat-lightbox .sl-sub { font-size: 12px; color: var(--spatchat-text-secondary, #5c6b63); }
+    #spatchat-lightbox .sl-sub { font-size: 12px; color: var(--spatchat-text-secondary, #5c626b); }
     #spatchat-lightbox .sl-nav { display: flex; align-items: center; gap: 6px; }
-    #spatchat-lightbox .sl-count { font-size: 12px; color: var(--spatchat-text-secondary, #5c6b63); margin-right: 6px; }
+    #spatchat-lightbox .sl-count { font-size: 12px; color: var(--spatchat-text-secondary, #5c626b); margin-right: 6px; }
     #spatchat-lightbox .sl-nav button { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--spatchat-border, rgba(0,0,0,.12)); cursor: pointer;
-        background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #10241a); font-size: 17px; line-height: 1; }
-    #spatchat-lightbox .sl-nav button:hover:not(:disabled) { background: var(--spatchat-accent-soft, #e3f2e8); border-color: var(--spatchat-accent, #1f7a4f); }
+        background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #101724); font-size: 17px; line-height: 1; }
+    #spatchat-lightbox .sl-nav button:hover:not(:disabled) { background: var(--spatchat-accent-soft, #e6eefc); border-color: var(--spatchat-accent, #2563eb); }
     #spatchat-lightbox .sl-nav button:disabled { opacity: .35; cursor: default; }
     #spatchat-lightbox .sl-body { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 16px; background: var(--spatchat-surface, #fff); }
     #spatchat-lightbox .sl-body img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; background: #fff; border-radius: 8px; margin: auto; }
@@ -1434,9 +1434,9 @@ CSS = """
     .spatchat-thumb-table { background: var(--spatchat-surface); }
     /* ================= dark mode ================= */
     .spatchat-dark {
-        --spatchat-connect-bg: #0e1512; --spatchat-surface: #16201b; --spatchat-surface-alt: #1e2a24;
-        --spatchat-border: rgba(255,255,255,0.12); --spatchat-text: #e8efe9; --spatchat-text-secondary: #a6b4ab; --spatchat-text-subtle: #7f8f85;
-        --spatchat-accent: #3fb27f; --spatchat-accent-hover: #5cc796; --spatchat-accent-soft: #1d3a2d;
+        --spatchat-connect-bg: #0e1115; --spatchat-surface: #161a20; --spatchat-surface-alt: #1e222a;
+        --spatchat-border: rgba(255,255,255,0.12); --spatchat-text: #e8ebef; --spatchat-text-secondary: #a6abb4; --spatchat-text-subtle: #7f858f;
+        --spatchat-accent: #60a5fa; --spatchat-accent-hover: #93c5fd; --spatchat-accent-soft: #1e3a5f;
         --spatchat-shadow: 0 1px 3px rgba(0,0,0,.5), 0 1px 2px rgba(0,0,0,.4);
     }
     body.spatchat-dark #spatchat-navbar a { color: var(--spatchat-text) !important; }
@@ -1458,9 +1458,9 @@ CSS = """
         --spatchat-text: #0f172a;
         --spatchat-text-secondary: #475569;
         --spatchat-text-subtle: #94a3b8;
-        --spatchat-accent: #0f766e;
-        --spatchat-accent-hover: #115e59;
-        --spatchat-accent-soft: #e6f4f1;
+        --spatchat-accent: #2563eb;
+        --spatchat-accent-hover: #1d4ed8;
+        --spatchat-accent-soft: #e6eefc;
         --spatchat-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
         --spatchat-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
     }
@@ -1595,7 +1595,7 @@ def build_header(gr, title: str, subtitle: str, room: str) -> None:
 
 def build_footer(gr, cite: str) -> None:
     gr.HTML(f"""
-    <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(16,36,26,0.1); font-size: 11px; color: #5c6b63; text-align: center;">
+    <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(16, 23, 36,0.1); font-size: 11px; color: #5c626b; text-align: center;">
       &copy; 2025 Ho Yi Wan, Logan Hysen &amp; Lokesh Lokesh &middot; Cite: {cite}
     </div>
     """)
@@ -1761,8 +1761,8 @@ DROP_HINT_CSS = """
 #spatchat-drop-hint { margin: 6px 2px 0 !important; padding: 0 !important; background: transparent !important; border: none !important; }
 #spatchat-drop-hint .spatchat-drop-hint-inner {
     display: flex; align-items: center; gap: 8px; padding: 7px 12px;
-    border: 1px dashed var(--spatchat-border, #cfd9d2); border-radius: 10px;
-    font-size: 12.5px; line-height: 1.4; color: var(--spatchat-text-secondary, #5c6b63);
+    border: 1px dashed var(--spatchat-border, #cfd3d9); border-radius: 10px;
+    font-size: 12.5px; line-height: 1.4; color: var(--spatchat-text-secondary, #5c626b);
 }
 #spatchat-drop-hint svg { flex: 0 0 auto; opacity: .85; }
 </style>
