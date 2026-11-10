@@ -178,6 +178,54 @@ def raster_map(path: str, label: str = "Land cover", max_px: int = 1000) -> str:
 
 
 # ----------------------------------------------------------------------------------------------
+# tables as figures: a results table is shown in the Plots tab like any chart
+# ----------------------------------------------------------------------------------------------
+def table_png(df, path: str, title: str = "", max_rows: int = 14, max_cols: int = 8) -> str:
+    """Render a table as a picture so it sits in the Plots gallery next to the charts (pink header, banded rows)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    total = len(df)
+    d = df.iloc[:max_rows, :max_cols].copy()
+
+    def fmt(v):
+        if isinstance(v, float):
+            return "" if pd.isna(v) else (f"{v:.4g}" if abs(v) < 1e5 else f"{v:,.0f}")
+        return str(v)
+
+    cells = [[fmt(v) for v in row] for row in d.itertuples(index=False)]
+    cols = [str(c) for c in d.columns]
+    fig_w = min(13.0, max(4.5, 1.35 * len(cols) + 1.0))
+    fig_h = 1.0 + 0.34 * (len(cells) + 1)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.axis("off")
+    tbl = ax.table(cellText=cells or [[""] * len(cols)], colLabels=cols, loc="upper center", cellLoc="left")
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.auto_set_column_width(list(range(len(cols))))
+    tbl.scale(1.0, 1.35)
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor("#e6dde2")
+        if r == 0:
+            cell.set_facecolor(POINT_COLOR)
+            cell.set_text_props(color="white", weight="bold")
+        else:
+            cell.set_facecolor("#fff1f6" if r % 2 == 0 else "white")
+    if title:
+        ax.set_title(title, fontsize=11, loc="left", color="#0f172a", pad=8)
+    if total > len(cells) or df.shape[1] > len(cols):
+        ax.text(0, -0.02, f"Showing the first {len(cells)} of {total:,} rows"
+                + (f" and {len(cols)} of {df.shape[1]} columns" if df.shape[1] > len(cols) else "")
+                + ". The full table is in the Files tab.", transform=ax.transAxes, fontsize=8, color="#64748b", va="top")
+    fig.savefig(path, dpi=130, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+# ----------------------------------------------------------------------------------------------
 # the screen
 # ----------------------------------------------------------------------------------------------
 GALLERY_CSS = """
