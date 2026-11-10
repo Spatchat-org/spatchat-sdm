@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import random
 
@@ -99,7 +100,8 @@ class UnifiedLLM:
     def chat(self, messages, temperature=0.3, max_tokens=512, stream=False):
         try:
             return self._hf_chat(messages, max_tokens=max_tokens, temperature=temperature)
-        except Exception:
+        except Exception as hf_err:
+            print(f"[LLM] HF primary failed: {hf_err}", file=sys.stderr)
             if self.together is None:
                 raise
             self._tg_limiter.wait()
