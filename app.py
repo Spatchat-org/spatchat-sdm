@@ -114,6 +114,8 @@ PREDICTOR_CHOICES = (
 )
 # force everything to lower-case so our .lower() tokens always match
 VALID_LAYERS = {p.lower() for p in PREDICTOR_CHOICES}
+# What a generic "fetch environmental predictors" request gets: climate, terrain and vegetation basics.
+DEFAULT_FETCH_LAYERS = ["bio1", "bio12", "elevation", "slope", "ndvi"]
 
 # All available MODIS landcover classes
 LANDCOVER_CLASSES = {
@@ -2047,6 +2049,10 @@ def try_parse_fetch_from_text(user_msg: str):
         layers.append("landcover")
     if layers or classes:
         return layers, classes
+    # A generic request ("Fetch environmental predictors") names no layer: use a sensible default set.
+    if (re.search(r'\b(fetch|get|grab|download)\b', user_msg, re.I)
+            and re.search(r'\b(environmental|predictors?|layers?|rasters?|covariates?|variables?)\b', user_msg, re.I)):
+        return list(DEFAULT_FETCH_LAYERS), []
     return None, None
 
 def run_model(state=None, method=None):
