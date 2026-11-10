@@ -139,16 +139,16 @@ CSS = """
 <style>
 
     :root {
-        --spatchat-connect-bg: #f5f6f8;
+        --spatchat-connect-bg: #faf7f4;
         --spatchat-surface: #ffffff;
-        --spatchat-surface-alt: #eef0f3;
+        --spatchat-surface-alt: #f3eeea;
         --spatchat-border: rgba(16, 23, 36, 0.1);
         --spatchat-text: #101724;
         --spatchat-text-secondary: #5c626b;
         --spatchat-text-subtle: #8a8f97;
         --spatchat-accent: #fa6a98;
         --spatchat-accent-hover: #f0578b;
-        --spatchat-accent-soft: #fde8f0;
+        --spatchat-accent-soft: #fbeff3;
         --spatchat-shadow: 0 1px 3px rgba(16, 23, 36, 0.08), 0 1px 2px rgba(16, 23, 36, 0.06);
     }
     :host,
@@ -1060,9 +1060,9 @@ CSS = """
     }
     #spatchat-confirm {
         margin-top: 8px !important;
-        background: var(--spatchat-accent) !important;
-        color: #ffffff !important;
-        border: none !important;
+        background: var(--spatchat-surface) !important;
+        color: #d94a80 !important;
+        border: 1.5px solid var(--spatchat-accent) !important;
         transition: background 0.15s ease, transform 0.1s ease !important;
     }
     #spatchat-confirm:hover {
@@ -1085,13 +1085,13 @@ CSS = """
         justify-content: center !important;
         gap: 8px;
         text-align: center;
-        background: var(--spatchat-accent) !important;
-        color: #ffffff !important;
-        border: none !important;
+        background: var(--spatchat-surface) !important;
+        color: #d94a80 !important;
+        border: 1.5px solid var(--spatchat-accent) !important;
         transition: background 0.15s ease, transform 0.1s ease !important;
     }
     #spatchat-download button:hover {
-        background: var(--spatchat-accent-hover) !important;
+        background: var(--spatchat-accent-soft) !important;
     }
     #spatchat-download button:active {
         transform: scale(0.98) !important;
@@ -1292,8 +1292,8 @@ CSS = """
     #spatchat-sample-btn { border: 1px solid var(--spatchat-border) !important; border-radius: 8px !important; background: var(--spatchat-surface) !important;
         align-self: stretch !important; padding: 8px 12px !important; font-size: 13px !important; }
     #spatchat-download, #spatchat-confirm { border-radius: 8px !important; font-weight: 600 !important; }
-    #spatchat-download { background: var(--spatchat-accent) !important; color: #fff !important; border: none !important; }
-    #spatchat-download:hover { background: var(--spatchat-accent-hover) !important; }
+    #spatchat-download { background: var(--spatchat-surface) !important; color: #d94a80 !important; border: 1.5px solid var(--spatchat-accent) !important; }
+    #spatchat-download:hover { background: var(--spatchat-accent-soft) !important; }
     #spatchat-datasheet table { font-size: 13px; }
     #spatchat-datasheet th { background: var(--spatchat-surface-alt) !important; font-weight: 600 !important; }
     /* ---- Round chatbot ---- */
@@ -1415,14 +1415,14 @@ CSS = """
         background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #101724); border-radius: 16px; overflow: hidden;
         box-shadow: 0 24px 80px rgba(0,0,0,.45); border: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); }
     #spatchat-lightbox .sl-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px;
-        border-bottom: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); background: var(--spatchat-surface-alt, #eef0f3); }
+        border-bottom: 1px solid var(--spatchat-border, rgba(0,0,0,.1)); background: var(--spatchat-surface-alt, #f3eeea); }
     #spatchat-lightbox .sl-title { font-size: 15px; font-weight: 700; }
     #spatchat-lightbox .sl-sub { font-size: 12px; color: var(--spatchat-text-secondary, #5c626b); }
     #spatchat-lightbox .sl-nav { display: flex; align-items: center; gap: 6px; }
     #spatchat-lightbox .sl-count { font-size: 12px; color: var(--spatchat-text-secondary, #5c626b); margin-right: 6px; }
     #spatchat-lightbox .sl-nav button { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--spatchat-border, rgba(0,0,0,.12)); cursor: pointer;
         background: var(--spatchat-surface, #fff); color: var(--spatchat-text, #101724); font-size: 17px; line-height: 1; }
-    #spatchat-lightbox .sl-nav button:hover:not(:disabled) { background: var(--spatchat-accent-soft, #fde8f0); border-color: var(--spatchat-accent, #fa6a98); }
+    #spatchat-lightbox .sl-nav button:hover:not(:disabled) { background: var(--spatchat-accent-soft, #fbeff3); border-color: var(--spatchat-accent, #fa6a98); }
     #spatchat-lightbox .sl-nav button:disabled { opacity: .35; cursor: default; }
     #spatchat-lightbox .sl-body { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 16px; background: var(--spatchat-surface, #fff); }
     #spatchat-lightbox .sl-body img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; background: #fff; border-radius: 8px; margin: auto; }
@@ -1451,16 +1451,16 @@ CSS = """
     body.spatchat-dark .spatchat-figure-table th, body.spatchat-dark .spatchat-figure-table td { color: var(--spatchat-text) !important; }
     /* ================= Enterprise polish (keep last) ================= */
     :root {
-        --spatchat-connect-bg: #f3f5f8;
+        --spatchat-connect-bg: #faf7f4;
         --spatchat-surface: #ffffff;
-        --spatchat-surface-alt: #f1f4f8;
+        --spatchat-surface-alt: #f3eeea;
         --spatchat-border: rgba(15, 23, 42, 0.09);
         --spatchat-text: #0f172a;
         --spatchat-text-secondary: #475569;
         --spatchat-text-subtle: #94a3b8;
         --spatchat-accent: #fa6a98;
         --spatchat-accent-hover: #f0578b;
-        --spatchat-accent-soft: #fde8f0;
+        --spatchat-accent-soft: #fbeff3;
         --spatchat-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
         --spatchat-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
     }
