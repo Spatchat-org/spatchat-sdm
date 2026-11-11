@@ -2490,6 +2490,30 @@ def chat_step(file, user_msg, history, state):
             )
         return str(status_text or "")
 
+    # "Show model results / plots" is answered from saved output of a real run, never by the LLM
+    # (which used to invent AIC, odds ratios, etc. when nothing had been run).
+    _msg_txt = str(user_msg or "")
+    if (
+        re.search(r"\b(show|display|view|see|open)\b.{0,30}\b(results?|plots?|outputs?|coefficients)\b", _msg_txt, re.I)
+        and not re.search(r"\b(run|fit|train|build|fetch|download|zip|map)\b", _msg_txt, re.I)
+    ):
+        with _session_cwd(state):
+            has_logit = os.path.exists("outputs/performance_metrics_cv.csv") and os.path.exists("outputs/coefficients.csv")
+            has_issa = os.path.exists("outputs/issa_summary.csv")
+        dl = gr.update()
+        if has_logit:
+            reply, dl = _compose_status_with_cv_and_coefs("**Latest model results**", False, state, None)
+            reply += "\n\nEffect plots are in the **Plots** tab; all tables are in the **Predictors** tab."
+        elif has_issa:
+            reply = "Your latest iSSA results are in the **Predictors** tab, and effect plots are in the **Plots** tab."
+        else:
+            reply = (
+                "No model has been run yet, so there are no results or plots to show.\n\n"
+                "Fetch predictors, then run the model (for example `run logistic regression`)."
+            )
+        history.extend([{"role": "user", "content": user_msg}, {"role": "assistant", "content": reply}])
+        return history, create_map(state), state, dl
+
     route = _llm_route_intent(user_msg, state)
     action = route.get("action", "general_chat")
     requested_method_from_text = _detect_method_from_text(user_msg) or _normalize_method_name(user_msg)
