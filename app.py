@@ -4352,6 +4352,13 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
         z-index: 1;
         font-weight: 700;
     }
+    /* Gradio's own heading/table colors win in light mode, leaving dark text on this dark modal. */
+    .spatchat-values-modal .spatchat-values-modal-title,
+    .spatchat-values-modal .spatchat-values-card-title,
+    .spatchat-values-modal .spatchat-values-table th,
+    .spatchat-values-modal .spatchat-values-table td {
+        color: #f4f7fb;
+    }
     .spatchat-values-empty {
         font-size: 12px;
         color: rgba(226, 233, 245, 0.72);
