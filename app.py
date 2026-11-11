@@ -11,6 +11,7 @@ import zipfile
 import re
 import difflib
 import sys
+import traceback
 import time
 import random
 import threading
@@ -3071,6 +3072,7 @@ def _chat_step_with_viewer_impl(file, user_msg, history, state):
         try:
             box["result"] = chat_step(file, user_msg, base_history, state)
         except Exception as exc:
+            print("[SDM CHAT] chat_step failed: " + traceback.format_exc(), file=sys.stderr, flush=True)
             box["error"] = exc
 
     request_context = contextvars.copy_context()
