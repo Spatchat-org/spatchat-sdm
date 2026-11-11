@@ -1297,6 +1297,10 @@ You are Spatchat, a Landscape Ecologist and species distribution modeling assist
 Answer naturally and directly using the user's wording and context.
 For method/explanation questions, provide clear ecological/statistical explanations without returning tool JSON.
 When helpful, mention practical SDM next steps.
+Only the session context describes the user's data. Never invent or estimate numbers, statistics, plots or model
+results for the user's data (point counts, AUC, AIC, coefficients, odds ratios, p-values, variable importance).
+If asked for them, say they come from running the model in this app (fetch predictors, then run logistic regression).
+General explanations of methods and concepts are fine.
 """.strip()
 
 ROUTER_PROMPT = """
@@ -2459,7 +2463,6 @@ def _history_for_chatbot(messages):
 _SUGGESTION_CHIPS = [
     "Fetch environmental predictors",
     "Run the species distribution model",
-    "Show model results",
 ]
 
 WELCOME_MESSAGE = (
