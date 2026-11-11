@@ -1574,7 +1574,7 @@ def build_header(gr, title: str, subtitle: str, room: str) -> None:
     gr.HTML(CSS)
     _html(gr, f"""
     <div id="spatchat-topbar">
-      <a class="sp-brand" href="https://spatchat.org/" target="_top" rel="noopener" title="SpatChat home">{logo_html()}</a>
+      <a class="sp-brand" href="https://spatchat.org/browse" target="_top" rel="noopener" title="SpatChat rooms">{logo_html()}</a>
       <h1 class="sp-room">{title}</h1>
       <span class="sp-spacer"></span>
       <a class="sp-link" href="https://spatchat.org/browse" target="_top" rel="noopener">All rooms</a>
