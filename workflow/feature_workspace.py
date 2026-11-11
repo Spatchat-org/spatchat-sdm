@@ -611,12 +611,13 @@ def _effect_plot_sections() -> list[tuple[str, str, str]]:
     return sections
 
 
-def render_feature_popup_html(auto_open: bool = False) -> str:
+def _collect_viewer_sections(values_rows: int = 24, values_cols: int = 14, table_rows: int = 40) -> list[tuple[str, str, str]]:
+    """(title, subtitle, html) for every table/plot the viewer can show."""
     df = load_workspace_df()
     meta = _load_meta(get_workspace_predictors(df))
     active = meta.get("active_predictors", [])
     inactive = meta.get("inactive_predictors", [])
-    table_html = _to_table_html(df, max_rows=24, max_cols=14)
+    table_html = _to_table_html(df, max_rows=values_rows, max_cols=values_cols)
     sections = [("Extracted Predictor Values", f"Rows={len(df)} Active={len(active)} Inactive={len(inactive)}", table_html)]
     sections.extend(_effect_plot_sections())
     model_tables = [
@@ -641,9 +642,29 @@ def render_feature_popup_html(auto_open: bool = False) -> str:
             try:
                 tdf = pd.read_csv(fp)
                 if not tdf.empty:
-                    sections.append((title, os.path.basename(fp), _to_table_html(tdf, max_rows=40, max_cols=12)))
+                    sections.append((title, os.path.basename(fp), _to_table_html(tdf, max_rows=table_rows, max_cols=12)))
             except Exception:
                 continue
+    return sections
+
+
+def render_feature_inline_html() -> str:
+    """The same tables and plots as the popup viewer, stacked inline for the Predictors tab."""
+    sections = _collect_viewer_sections(values_rows=500, values_cols=30, table_rows=200)
+    parts = []
+    for title, subtitle, body in sections:
+        parts.append(
+            "<section class='spatchat-values-inline-section'>"
+            f"<h3 class='spatchat-values-inline-title'>{html.escape(title)}</h3>"
+            f"<div class='spatchat-values-inline-meta'>{html.escape(subtitle)}</div>"
+            f"<div class='spatchat-values-inline-scroll'>{body}</div>"
+            "</section>"
+        )
+    return "<div class='spatchat-values-inline'>" + "".join(parts) + "</div>"
+
+
+def render_feature_popup_html(auto_open: bool = False) -> str:
+    sections = _collect_viewer_sections()
     figures = [{"id": f"values-{idx}", "title": title, "subtitle": subtitle, "tableHtml": body} for idx, (title, subtitle, body) in enumerate(sections)]
     payload = html.escape(
         json.dumps(

@@ -88,6 +88,7 @@ from workflow.feature_workspace import (
     FEATURE_WORKSPACE_CSV,
     refresh_workspace_from_rasters,
     render_feature_popup_html,
+    render_feature_inline_html,
     run_multicollinearity_check,
     run_morans_i_check,
     run_pre_model_diagnostics,
@@ -716,7 +717,7 @@ def _render_feature_viewer_html(state=None):
         if not isinstance(state, dict) or not state.get("session_root"):
             return "<div class='spatchat-values-empty'>No extracted values yet. Upload points and fetch layers to populate this viewer.</div>"
         with _session_cwd(state):
-            return render_feature_popup_html(auto_open=False)
+            return render_feature_inline_html()
     except Exception as exc:
         return f"<div class='spatchat-values-meta'>Values viewer unavailable: {html_lib.escape(str(exc))}</div>"
 
@@ -2121,7 +2122,7 @@ def run_model(state=None, method=None):
 
             summary_lines = [
                 "iSSA ran successfully. Suitability map was projected to the map when predictor rasters were available.",
-                "Detailed iSSA metrics and coefficients are available in the popup viewer.",
+                "Detailed iSSA metrics and coefficients are available in the Predictors tab.",
             ]
             postprocess_warning = _run_effect_plot_postprocessing()
             if not postprocess_warning:
@@ -2247,7 +2248,7 @@ def _compose_status_with_cv_and_coefs(status_prefix: str, long_names: bool = Fal
             if os.path.exists(effect_manifest_csv):
                 ef = pd.read_csv(effect_manifest_csv)
                 if not ef.empty:
-                    effect_note_md = f"\n\n**Predictor Effect Plots:** generated ({len(ef)} plot(s)); open them in the popup viewer."
+                    effect_note_md = f"\n\n**Predictor Effect Plots:** generated ({len(ef)} plot(s)); open them in the Predictors tab."
         except Exception:
             effect_note_md = ""
 
@@ -2631,7 +2632,7 @@ def chat_step(file, user_msg, history, state):
                 )
                 if auto_pruned:
                     mc_msg += f" Auto-pruned low-information predictors: {', '.join(auto_pruned)}."
-                mc_msg += " Detailed VIF summary and correlation matrix are available in the popup viewer."
+                mc_msg += " Detailed VIF summary and correlation matrix are available in the Predictors tab."
 
             if not mor.get("ok"):
                 mor_msg = mor.get("message", "Unable to run Moran's I check.")
@@ -2662,7 +2663,7 @@ def chat_step(file, user_msg, history, state):
                 )
                 if auto_pruned:
                     reply += f" Auto-pruned low-information predictors: {', '.join(auto_pruned)}."
-                reply += " Detailed VIF summary and correlation matrix are available in the popup viewer."
+                reply += " Detailed VIF summary and correlation matrix are available in the Predictors tab."
             history.extend([{"role": "user", "content": user_msg}, {"role": "assistant", "content": reply}])
             return history, create_map(state), state, gr.update()
 
@@ -4361,6 +4362,52 @@ with gr.Blocks(title="Spatchat: Species Distribution Model") as demo:
     .spatchat-values-modal .spatchat-values-table th,
     .spatchat-values-modal .spatchat-values-table td {
         color: #f4f7fb;
+    }
+    /* Predictors tab: tables and plots shown inline, themed with the page (light and dark). */
+    .spatchat-values-inline {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        padding: 4px 2px 24px;
+        color: var(--body-text-color);
+    }
+    .spatchat-values-inline-section {
+        border: 1px solid var(--border-color-primary);
+        border-radius: 14px;
+        padding: 14px 16px;
+        background: var(--background-fill-primary);
+    }
+    .spatchat-values-inline-title {
+        margin: 0 0 2px;
+        font-size: 16px;
+        font-weight: 700;
+        color: var(--body-text-color);
+    }
+    .spatchat-values-inline-meta {
+        font-size: 12px;
+        color: var(--body-text-color-subdued);
+        margin-bottom: 10px;
+    }
+    .spatchat-values-inline-scroll {
+        max-height: 420px;
+        overflow: auto;
+    }
+    .spatchat-values-inline .spatchat-values-table th,
+    .spatchat-values-inline .spatchat-values-table td {
+        color: var(--body-text-color);
+        border-bottom: 1px solid var(--border-color-primary);
+    }
+    .spatchat-values-inline .spatchat-values-table th {
+        background: var(--background-fill-secondary);
+    }
+    .spatchat-values-inline .spatchat-values-note,
+    .spatchat-values-inline .spatchat-values-empty,
+    .spatchat-values-inline div[style*="color:rgba"] {
+        color: var(--body-text-color-subdued) !important;
+    }
+    .spatchat-values-inline img {
+        background: transparent !important;
+        border-color: var(--border-color-primary) !important;
     }
     .spatchat-values-empty {
         font-size: 12px;
