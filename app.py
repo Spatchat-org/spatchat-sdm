@@ -1405,6 +1405,9 @@ def _llm_route_intent(user_msg: str, state) -> dict:
         action = "general_chat"
 
     method = _normalize_method_name(parsed.get("method"))
+    # The model may guess iSSA; only keep it when movement data exists or the user asked for it by name.
+    if method == "issa" and not has_movement and not _detect_method_from_text(user_msg):
+        method = None
 
     def _as_str_list(value):
         if not isinstance(value, list):
