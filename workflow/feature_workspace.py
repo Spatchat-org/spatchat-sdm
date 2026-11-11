@@ -338,8 +338,10 @@ def run_multicollinearity_check(corr_threshold: float = 0.7, vif_threshold: floa
     while len(work) >= 2:
         iter_no += 1
         xw = x[work].to_numpy(dtype=float)
-        cw = pd.DataFrame(xw, columns=work).corr(method="spearman").abs()
-        np.fill_diagonal(cw.values, 0.0)
+        # pandas 3 (copy-on-write) returns read-only .values, so work on a writable copy.
+        cw_arr = pd.DataFrame(xw, columns=work).corr(method="spearman").abs().to_numpy(dtype=float, copy=True)
+        np.fill_diagonal(cw_arr, 0.0)
+        cw = pd.DataFrame(cw_arr, index=work, columns=work)
         max_corr = float(np.nanmax(cw.values)) if cw.size else 0.0
         vif_w = _vif_for_matrix(xw)
         max_vif = float(np.nanmax(vif_w)) if len(vif_w) else np.nan
