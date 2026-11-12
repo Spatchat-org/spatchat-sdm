@@ -1546,6 +1546,36 @@ body #spatchat-workarea { height: calc(100vh - 210px) !important; min-height: 52
 /* Embedded (Hugging Face resizes the iframe to fit the content): never size from viewport height, or each resize feeds the next and the page grows without limit. */
 body.spatchat-embedded #spatchat-workarea { height: 680px !important; min-height: 0 !important; }
 html.spatchat-embedded, body.spatchat-embedded, body.spatchat-embedded gradio-app, body.spatchat-embedded .gradio-container { min-height: 0 !important; }
+
+/* Mobile: stack chat above map/plots instead of pushing the results panel off-screen. */
+@media (max-width: 900px) {
+    body #spatchat-workarea {
+        height: auto !important;
+        min-height: 0 !important;
+        overflow-x: hidden !important;
+        overflow-y: visible !important;
+    }
+    body.spatchat-embedded #spatchat-workarea {
+        height: 1080px !important;
+        min-height: 1080px !important;
+    }
+    #spatchat-workarea,
+    #spatchat-workarea > .gradio-row {
+        min-width: 0 !important;
+        height: auto !important;
+        flex-direction: column !important;
+        flex-wrap: nowrap !important;
+        align-items: stretch !important;
+    }
+    #spatchat-sidebar,
+    #spatchat-mapcol {
+        flex: 0 0 520px !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        height: 520px !important;
+        min-height: 520px !important;
+    }
+}
 </style>
 """
 
