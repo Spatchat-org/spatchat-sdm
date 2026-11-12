@@ -1,6 +1,23 @@
 # app.py
 
 import os
+# Structured logging: the shared module comes from the gateway (skipped when this room runs on its own).
+try:
+    import spatchat_log
+
+    spatchat_log.setup("sdm")
+except Exception:
+    pass
+
+import logging
+
+try:
+    from spatchat_log import swallowed as _swallowed
+except Exception:  # shared module not available: still record the problem with plain logging
+
+    def _swallowed(where, level=logging.WARNING):
+        logging.getLogger("spatchat.swallowed").log(level, "ignored error in %s", where, exc_info=True)
+
 import io
 import json
 import ast
@@ -323,7 +340,7 @@ def _start_session_pruner(interval_seconds: int = 10 * 60, max_age_seconds: int 
             try:
                 _prune_stale_sessions(max_age_seconds=max_age_seconds)
             except Exception:
-                pass
+                _swallowed("sdm.app:_loop (_prune_stale_sessions)")
             time.sleep(interval_seconds)
     threading.Thread(target=_loop, name="spatchat-sdm-session-pruner", daemon=True).start()
 
@@ -2143,7 +2160,7 @@ def run_model(state=None, method=None):
                 try:
                     write_session_snapshot(state, os.path.join(session_root, "outputs"), {"status": "ok", "method": "issa"})
                 except Exception:
-                    pass
+                    _swallowed("sdm.app:run_model (write_session_snapshot)")
             zip_path = zip_results(state)
             return create_map(state), "\n".join(summary_lines) + postprocess_warning, None, None, zip_path
 
@@ -2175,7 +2192,7 @@ def run_model(state=None, method=None):
             try:
                 write_session_snapshot(state, os.path.join(session_root, "outputs"), {"status": "ok", "method": "logistic_regression"})
             except Exception:
-                pass
+                _swallowed("sdm.app:run_model (write_session_snapshot)")
         zip_path = zip_results(state)
         return create_map(state), "Model ran successfully. Download the SDM using the button below the map." + postprocess_warning, perf_df, coef_df, zip_path
 def _compose_status_with_cv_and_coefs(status_prefix: str, long_names: bool = False, state=None, zip_path=None):
